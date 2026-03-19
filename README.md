@@ -272,3 +272,160 @@ curl http://localhost:8000/api/conversations/xxxx/memory
 
 **Q: 消息历史会被删吗？**
 不会。`conv.messages` 永不删除，压缩只推进 `mid_term_cursor`，全量历史始终保留在磁盘。
+
+## 开发者说明
+  ---
+  整体调用链
+
+  用户发消息 → main.py → harness.py（统一门面） → 各个 layers/ → ollama_client.py → Ollama
+
+  ---
+  ollama_client.py — 最底层，直接和 Ollama 说话
+
+  这是唯一真正发 HTTP 请求的地方，其他所有层都不直接碰网络。
+
+  有三个函数：
+  - chat_stream() — 流式对话，用 SSE 一块一块返回文字（给用户看的那种打字效果）
+  - chat_sync() — 同步调用，等模型跑完再返回完整结果（用于内部摘要任务）
+  - get_embedding() — 获取向量（预留，RAG 用）
+
+  值得注意：这里从旧版的 Ollama 私有 API (/api/chat) 改成了 OpenAI 兼容格式 (/v1/chat/completions)，所以理论上把 API_BASE_URL 换成任何 OpenAI 兼容服务（比如 vLLM、LM Studio、真正的 OpenAI）都能用。
+
+  ---
+  9 层详解
+
+  Layer 1 — prompt.py：管"说什么"
+
+  两个函数：
+
+  ensure_system_prompt(raw)          # 用户没填 system prompt → 用默认的
+  build_summary_messages(history, existing_summary)  # 拼摘要请求的消息列表
+
+  所有 prompt 模板都集中在这里，改人设或摘要风格只改这一个文件。
+
+  ---
+  Layer 2 — capability.py：管"能做什么"
+
+  目前只有两个能力：
+  - list_models() — 问 Ollama 有哪些模型
+  - get_embedding() — 获取向量
+
+  这层是对 ollama_client 的薄包装，目的是语义隔离——"工具"和"底层 HTTP 客户端"是两回事。以后接 MCP、外部 API 也加在这里。
+
+  ---
+  Layer 3 — memory.py：数据结构定义
+
+  两个 dataclass：
+
+  Message:
+      role: str        # "user" | "assistant" | "system"
+      content: str
+      timestamp: float
+
+  Conversation:
+      id, title, system_prompt
+      messages: list[Message]    # 全量历史，永不删除
+      mid_term_summary: str      # 语义记忆（摘要）
+      mid_term_cursor: int       # 已摘要到哪条消息（索引）
+      # long_term_collection     # 预留：RAG 集合名
+
+  关键设计：messages 是追加写的，永远不删。mid_term_cursor 像一个指针，记录"哪些消息已经被压缩进摘要了"，但原消息还在。
+
+  ---
+  Layer 4 — runtime.py：执行引擎
+
+  目前只有两个函数，非常薄：
+
+  stream(model, messages, temperature)    # 流式 → yield 文字块
+  call_sync(model, messages, temperature) # 同步 → 返回完整字符串
+
+  这是 agent loop 的执行层。现在是单轮对话，以后如果要做多步 agent（工具调用循环、子代理）就在这里扩展。
+
+  ---
+  Layer 5 — state.py：进程内工作记忆
+
+  StateManager 就是一个字典 { conv_id: Conversation }，装在内存里。
+
+  state.get(conv_id)   # 取一个对话
+  state.set(conv)      # 存一个对话
+  state.remove(id)     # 删除
+  state.all()          # 列出所有
+  state.load_from(dict) # 启动时从磁盘批量恢复
+
+  类比 OS 的 RAM——进程跑着就在，进程重启就没了。所以必须配合 Layer 7 Persistence 才能跨进程恢复。
+
+  ---
+  Layer 6 — context.py：决定"发什么给模型"
+
+  这是整个记忆系统最核心的逻辑，三个函数：
+
+  build_messages(conv) — 组装发给模型的消息列表，固定顺序：
+  [system prompt]
+  [中期摘要]         ← 如果有
+  [RAG 检索结果]     ← 预留注释
+  [最近 N 轮原文]    ← 滑动窗口 SHORT_TERM_MAX_TURNS*2 条消息
+
+  should_compress(conv) — 判断是否要压缩：
+  未摘要消息数 = len(messages) - mid_term_cursor
+  return 未摘要消息数 >= COMPRESS_TRIGGER * 2   # 默认 8*2=16 条
+
+  slice_for_compression(conv) — 决定压缩哪些：
+  keep_count = (SHORT_TERM_MAX_TURNS // 2) * 2  # 保留最近一半
+  new_cursor = len(messages) - keep_count        # cursor 前进到这里
+  to_summarise = messages[old_cursor:new_cursor] # 这段发给摘要模型
+  压缩后消息列表不变，只有 cursor 往前推。
+
+  ---
+  Layer 7 — persistence.py：磁盘 Checkpoint
+
+  三个函数，负责把 Conversation 对象序列化成 JSON 存到 conversations/ 目录：
+
+  save(conv)       # 写 JSON 文件（conversations/{id}.json）
+  load_all()       # 启动时读所有 JSON，返回 dict
+  delete(conv_id)  # 删文件
+
+  有一个向后兼容处理：旧版本用的是 short_term 字段，新版本改成了 messages，load 时两个都能认。
+
+  ---
+  Layer 8 — verification.py：日志
+
+  log_chat(conv_id, model)                           # 每次聊天记一条
+  log_compression(conv_id, compressed, kept, len)   # 压缩时记一条
+  log_error(msg, exc)                               # 报错时记
+
+  用标准 logging 输出到控制台，格式是 时间 [级别] harness: 消息。
+
+  ---
+  Layer 9 — extension.py：CORS
+
+  目前就一个函数：
+
+  apply_cors(app, origins=["*"])
+
+  在 main.py 最早被调用，让前端跨域请求不被浏览器拦截。这层的扩展位是以后加插件系统、多渠道接入（微信、Telegram）、API Gateway 之类的东西。
+
+  ---
+  harness.py — 把 9 层串起来的门面
+
+  AgentHarness 是唯一被 main.py 用到的类，它自己不做任何计算，就负责把调用路由到正确的层：
+
+  create_conversation()  → Layer 1（ensure prompt）+ Layer 5（set）+ Layer 7（save）
+  add_message()          → Layer 3（append）+ Layer 7（save）
+  build_messages()       → Layer 6（context assembly）
+  chat_stream()          → Layer 8（log）+ Layer 4（runtime stream）
+  maybe_compress()       → Layer 6（should? slice?）+ Layer 1（build prompt）
+                          + Layer 4（call sync）+ Layer 3（update cursor）
+                          + Layer 7（save）+ Layer 8（log）
+
+  maybe_compress 是最复杂的一个方法，跨了 6 层，但每一步做什么都很清晰。
+
+  ---
+  main.py — 最外层，HTTP 接口
+
+  就是 FastAPI 路由，非常薄。收到请求 → 调 harness → 返回结果。
+
+  唯一有业务逻辑的是 /api/chat 的 generate() 生成器：
+  1. 流式 yield 文字块给前端
+  2. 全部生成完后记录 assistant 消息
+  3. 异步触发一次 maybe_compress
+  4. 发 {done: true} 结束流
