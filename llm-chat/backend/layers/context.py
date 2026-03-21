@@ -8,48 +8,56 @@
 author: leizihao
 email: lzh19162600626@gmail.com
 """
-from config import SHORT_TERM_MAX_TURNS, COMPRESS_TRIGGER
+from config import SHORT_TERM_MAX_TURNS, COMPRESS_TRIGGER, SHORT_TERM_FORGET_TURNS
 from layers.memory import Conversation, Message
 
 
 def build_messages(
     conv: Conversation,
     long_term_memories: list[str] | None = None,
+    forget_mode: bool = False,
 ) -> list[dict]:
     """
     按顺序构建发送给 LLM 的消息列表：
       1. 系统提示               （第 1 层 – Prompt）
-      2. 中期摘要               （第 3 层 – Memory：语义记忆）
-      3. 长期记忆               （第 3b 层 – Memory：向量检索）
-      4. 最近消息的滑动窗口     （第 3 层 – Memory：情节记忆）
+      2. 中期摘要               （第 3 层 – Memory：语义记忆）  ← forget_mode 时跳过
+      3. 长期记忆               （第 3b 层 – Memory：向量检索） ← forget_mode 时跳过
+      4. 最近消息的滑动窗口     （第 3 层 – Memory：情节记忆）  ← forget_mode 时只取最近 N 轮
+
+    forget_mode=True 触发条件：RAG 未命中 且 query 与摘要余弦相似度低于阈值。
+    此时只发最近 SHORT_TERM_FORGET_TURNS 轮，丢弃摘要和长期记忆，减少无关上下文干扰。
     """
     # 1. 系统提示
     result: list[dict] = [{"role": "system", "content": conv.system_prompt}]
 
+    if not forget_mode:
+        # 2. 中期摘要（语义记忆）
+        if conv.mid_term_summary:
+            result.append({
+                "role": "system",
+                "content": (
+                    "【对话背景摘要】以下是之前对话的压缩摘要，请结合这些背景来回答：\n"
+                    f"{conv.mid_term_summary}"
+                ),
+            })
 
-    # 2. 中期摘要（语义记忆）
-    if conv.mid_term_summary:
-        result.append({
-            "role": "system",
-            "content": (
-                "【对话背景摘要】以下是之前对话的压缩摘要，请结合这些背景来回答：\n"
-                f"{conv.mid_term_summary}"
-            ),
-        })
+        # 3. 注入长期记忆（Qdrant 向量检索）
+        if long_term_memories:
+            memories_text = "\n\n".join(long_term_memories)
+            result.append({
+                "role": "system",
+                "content": (
+                    "【长期记忆】以下是与当前问题高度相关的历史对话记录，请参考这些内容来回答：\n"
+                    f"{memories_text}"
+                ),
+            })
 
-    # 3. 注入长期记忆（Qdrant 向量检索）
-    if long_term_memories:
-        memories_text = "\n\n".join(long_term_memories)
-        result.append({
-            "role": "system",
-            "content": (
-                "【长期记忆】以下是与当前问题高度相关的历史对话记录，请参考这些内容来回答：\n"
-                f"{memories_text}"
-            ),
-        })
+        # 4. 滑动窗口——从完整历史中取最近 N 轮
+        window = conv.messages[-(SHORT_TERM_MAX_TURNS * 2):]
+    else:
+        # 忘记模式：只保留最近 SHORT_TERM_FORGET_TURNS 轮，不注入任何记忆
+        window = conv.messages[-(SHORT_TERM_FORGET_TURNS * 2):]
 
-    # 4. 滑动窗口——从完整历史中取最近 N 轮
-    window = conv.messages[-(SHORT_TERM_MAX_TURNS * 2):]
     for msg in window:
         result.append({"role": msg.role, "content": msg.content})
 

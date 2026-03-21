@@ -16,7 +16,7 @@ from harness import harness
 from layers.capability import list_models, get_embedding   # 第 2 层
 from layers.extension import apply_cors                    # 第 9 层
 from layers import longterm                                # 第 3b 层
-from config import CHAT_MODEL, BACKEND_HOST, BACKEND_PORT, EMBEDDING_MODEL
+from config import CHAT_MODEL, BACKEND_HOST, BACKEND_PORT, EMBEDDING_MODEL, LONGTERM_MEMORY_ENABLED
 
 logger = logging.getLogger("main")
 
@@ -24,10 +24,13 @@ logger = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 启动 ──
-    try:
-        await longterm.init_collection()
-    except Exception as exc:
-        logger.error("Qdrant 初始化失败（长期记忆不可用）: %s", exc)
+    if LONGTERM_MEMORY_ENABLED:
+        try:
+            await longterm.init_collection()
+        except Exception as exc:
+            logger.error("Qdrant 初始化失败（长期记忆不可用）: %s", exc)
+    else:
+        logger.info("长期记忆（RAG）已禁用，跳过 Qdrant 初始化")
     yield
     # ── 关闭 ──（无需操作）
 
@@ -95,7 +98,8 @@ async def update_conversation(conv_id: str, req: UpdateConversationRequest):
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
     harness.delete_conversation(conv_id)
-    await longterm.delete_by_conv(conv_id)   # Layer 3b – 同步清除向量记忆
+    if LONGTERM_MEMORY_ENABLED:
+        await longterm.delete_by_conv(conv_id)   # Layer 3b – 同步清除向量记忆
     return {"ok": True}
 
 
@@ -112,7 +116,10 @@ async def chat(req: ChatRequest):
     # 第 3b 层 – 检索长期记忆（在 build_messages 之前）
     long_term = await harness.search_long_term(req.conversation_id, req.message)
 
-    messages = harness.gen_chat_msg(conv, long_term)   # 第 6 层 – Context
+    # 第 6 层 – 判断忘记模式：RAG 未命中 且 query 与摘要不相关
+    forget = await harness.should_forget(req.conversation_id, req.message, long_term)
+
+    messages = harness.gen_chat_msg(conv, long_term, forget_mode=forget)   # 第 6 层 – Context
     model = req.model or CHAT_MODEL
 
     async def generate():
@@ -127,9 +134,7 @@ async def chat(req: ChatRequest):
 
         harness.add_message(req.conversation_id, "assistant", full_response)
 
-        # 第 3b 层 – 存储本轮对话到长期记忆
-        await harness.store_long_term(req.conversation_id, req.message, full_response)
-
+        # 第 3b 层 – RAG 写入已移至 maybe_compress 压缩时批量处理
         compressed = await harness.maybe_compress(req.conversation_id)  # 第 6 层
         yield f"data: {json.dumps({'done': True, 'compressed': compressed})}\n\n"
 
@@ -147,13 +152,13 @@ async def get_memory_debug(conv_id: str):
     conv = harness.get_conversation(conv_id)
     if not conv:
         return {"error": "对话不存在"}
-    lt_count = await longterm.count_by_conv(conv_id)
+    lt_count = await longterm.count_by_conv(conv_id) if LONGTERM_MEMORY_ENABLED else -1
     return {
         "total_messages": len(conv.messages),
         "summarised_count": conv.mid_term_cursor,
         "window_count": len(conv.messages) - conv.mid_term_cursor,
         "mid_term_summary": conv.mid_term_summary or "(空)",
-        "long_term_stored_pairs": lt_count,
+        "long_term_stored_pairs": lt_count if LONGTERM_MEMORY_ENABLED else "(已禁用)",
         "build_messages_preview": [
             {
                 "role": m["role"],

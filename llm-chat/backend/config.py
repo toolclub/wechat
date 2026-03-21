@@ -9,8 +9,8 @@ API_BASE_URL = "http://localhost:11434/v1"
 API_KEY = "ollama"  # Ollama 不验证 key，随便填
 
 # ── 模型配置 ──
-CHAT_MODEL = "qwen2.5:14b"           # 对话主模型
-SUMMARY_MODEL = "qwen2.5:1.5b"       # 摘要压缩模型
+CHAT_MODEL = "qwen3-coder:30b"           # 对话主模型
+SUMMARY_MODEL = "qwen2.5-coder:14b"       # 摘要压缩模型
 EMBEDDING_MODEL = "bge-m3"            # Embedding 模型（长期记忆用）
 
 # ── 上下文窗口 ──
@@ -23,12 +23,16 @@ COMPRESS_TRIGGER = 8                  # 触发压缩的轮数阈值
 MAX_SUMMARY_LENGTH = 500              # 摘要最大字数
 
 # ── 长期记忆（Qdrant 向量库） ──
+# 设为 False 可在未部署 Qdrant 的环境下完全跳过长期记忆（RAG），不影响其他功能
+LONGTERM_MEMORY_ENABLED = True
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
 QDRANT_COLLECTION = "llm_chat_memories"
 EMBEDDING_DIM = 1024              # bge-m3 输出维度
 LONGTERM_TOP_K = 3                # 每次检索返回的最相关记忆数
 LONGTERM_SCORE_THRESHOLD = 0.5   # 最低余弦相似度阈值
+SUMMARY_RELEVANCE_THRESHOLD = 0.4  # query与摘要余弦相似度低于此值视为不相关
+SHORT_TERM_FORGET_TURNS = 2       # 忘记模式下只保留最近N轮
 
 # ── 服务端口 ──
 BACKEND_HOST = "0.0.0.0"
