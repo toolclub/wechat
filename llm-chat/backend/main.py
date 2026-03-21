@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     # ── 关闭 ──（无需操作）
 
 
-app = FastAPI(title="WeChat", lifespan=lifespan)
+app = FastAPI(title="ChatFlow", lifespan=lifespan)
 apply_cors(app)  # 第 9 层 – Extension
 
 

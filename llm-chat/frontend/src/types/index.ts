@@ -1,6 +1,7 @@
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  images?: string[]  // base64 data URLs
   timestamp?: number
 }
 
@@ -16,4 +17,9 @@ export interface ConversationDetail {
   system_prompt: string
   messages: Message[]
   mid_term_summary: string
+}
+
+export interface SendPayload {
+  text: string
+  images: string[]
 }

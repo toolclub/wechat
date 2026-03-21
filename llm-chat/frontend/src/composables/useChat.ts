@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { Message, ConversationInfo } from '../types'
+import type { Message, ConversationInfo, SendPayload } from '../types'
 import * as api from '../api'
 
 export function useChat() {
@@ -24,9 +24,10 @@ export function useChat() {
   async function selectConversation(id: string) {
     currentConvId.value = id
     const data = await api.fetchConversation(id)
-    messages.value = (data.messages || []).map((m: Message & { timestamp?: number }) => ({
+    messages.value = (data.messages || []).map((m: Message) => ({
       role: m.role,
       content: m.content,
+      images: m.images,
       timestamp: m.timestamp,
     }))
   }
@@ -47,17 +48,18 @@ export function useChat() {
     await loadConversations()
   }
 
-  async function send(text: string) {
-    if (!text.trim() || loading.value) return
+  async function send({ text, images }: SendPayload) {
+    if (!text.trim() && images.length === 0) return
+    if (loading.value) return
 
     // 如果没有当前对话，先创建
     if (!currentConvId.value) {
-      const data = await api.createConversation(text.slice(0, 30))
+      const data = await api.createConversation(text.slice(0, 30) || '图片对话')
       currentConvId.value = data.id
     }
 
     // 添加用户消息
-    messages.value.push({ role: 'user', content: text })
+    messages.value.push({ role: 'user', content: text, images: images.length > 0 ? images : undefined })
 
     // 添加空的 assistant 消息（流式填充）
     messages.value.push({ role: 'assistant', content: '' })
@@ -70,6 +72,7 @@ export function useChat() {
         currentConvId.value!,
         text,
         selectedModel.value,
+        images,
         (chunk) => {
           messages.value[assistantIdx].content += chunk
         },

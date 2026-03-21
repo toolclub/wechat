@@ -97,4 +97,7 @@ async def list_models() -> list[str]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"{API_BASE_URL}/models", headers=_headers())
         data = resp.json()
-        return [m["id"] for m in data.get("models", data.get("data", []))]
+        models = data.get("models", data.get("data", []))
+        result = list(filter(lambda m: not (m.get("id") or "").startswith("bge"), models))
+        result = [m["id"] for m in result]
+        return result

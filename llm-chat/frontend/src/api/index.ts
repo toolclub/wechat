@@ -34,17 +34,24 @@ export async function sendMessage(
   conversationId: string,
   message: string,
   model: string,
+  images: string[],
   onChunk: (text: string) => void,
   onDone: () => void,
 ) {
+  const body: Record<string, unknown> = {
+    conversation_id: conversationId,
+    message,
+    model,
+  }
+  if (images.length > 0) {
+    // 去掉 data URL 前缀，只传 base64 内容（与 Ollama vision API 兼容）
+    body.images = images.map(img => img.replace(/^data:image\/[a-z]+;base64,/, ''))
+  }
+
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conversation_id: conversationId,
-      message,
-      model,
-    }),
+    body: JSON.stringify(body),
   })
 
   const reader = res.body?.getReader()

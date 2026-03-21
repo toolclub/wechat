@@ -1,15 +1,28 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import type { SendPayload } from '../types'
+import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
 
-const props = defineProps<{ loading: boolean }>()
-const emit = defineEmits<{ send: [text: string] }>()
+const props = defineProps<{
+  loading: boolean
+  centered?: boolean
+}>()
+
+const emit = defineEmits<{ send: [payload: SendPayload] }>()
 
 const input = ref('')
+const pendingImages = ref<string[]>([])
+const fileInputRef = ref<HTMLInputElement>()
+const textareaRef = ref<HTMLTextAreaElement>()
+
+const canSend = () => (input.value.trim() || pendingImages.value.length > 0) && !props.loading
 
 function handleSend() {
-  if (!input.value.trim() || props.loading) return
-  emit('send', input.value)
+  if (!canSend()) return
+  emit('send', { text: input.value, images: [...pendingImages.value] })
   input.value = ''
+  pendingImages.value = []
+  if (textareaRef.value) textareaRef.value.style.height = 'auto'
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -18,115 +31,308 @@ function handleKeydown(e: KeyboardEvent) {
     handleSend()
   }
 }
+
+function autoResize() {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+}
+
+function addImageFile(file: File) {
+  if (!file.type.startsWith('image/')) return
+  const reader = new FileReader()
+  reader.onload = ev => {
+    const url = ev.target?.result as string
+    if (url) pendingImages.value.push(url)
+  }
+  reader.readAsDataURL(file)
+}
+
+function handlePaste(e: ClipboardEvent) {
+  for (const item of Array.from(e.clipboardData?.items || [])) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault()
+      const f = item.getAsFile()
+      if (f) addImageFile(f)
+    }
+  }
+}
+
+function handleFileSelect(e: Event) {
+  for (const f of Array.from((e.target as HTMLInputElement).files || [])) addImageFile(f)
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
+function handleDrop(e: DragEvent) {
+  e.preventDefault()
+  for (const f of Array.from(e.dataTransfer?.files || [])) addImageFile(f)
+}
+
+function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 </script>
 
 <template>
-  <div class="input-wrapper">
-    <div class="input-box" :class="{ disabled: loading }">
-      <textarea
-        v-model="input"
-        @keydown="handleKeydown"
-        placeholder="有问题，尽管问... （Enter 发送，Shift+Enter 换行）"
-        :disabled="loading"
-        rows="1"
-        class="input-textarea"
-      />
-      <button
-        class="send-btn"
-        @click="handleSend"
-        :disabled="loading || !input.trim()"
-        :title="loading ? '生成中...' : '发送'"
-      >
-        <svg v-if="!loading" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-        </svg>
-        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="spin">
-          <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z" opacity=".3"/>
-          <path d="M12 2a10 10 0 0 1 10 10h-2a8 8 0 0 0-8-8z"/>
-        </svg>
-      </button>
+  <div class="input-root" :class="{ centered }" @dragover.prevent @drop="handleDrop">
+    <div class="input-card" :class="{ 'is-loading': loading }">
+
+      <!-- 图片预览 -->
+      <div v-if="pendingImages.length > 0" class="img-previews">
+        <div v-for="(img, i) in pendingImages" :key="i" class="img-thumb">
+          <img :src="img" alt="图片" />
+          <button class="img-remove" @click="removeImage(i)" title="移除">
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 文本输入 -->
+      <div class="textarea-area">
+        <textarea
+          ref="textareaRef"
+          v-model="input"
+          @keydown="handleKeydown"
+          @paste="handlePaste"
+          @input="autoResize"
+          :placeholder="centered ? '分配一个任务或提问任何问题...' : '发消息... （Enter 发送 · Shift+Enter 换行 · 支持粘贴截图）'"
+          :disabled="loading"
+          rows="1"
+          class="the-textarea"
+        />
+      </div>
+
+      <!-- 底部工具栏 -->
+      <div class="toolbar">
+        <div class="tl">
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept="image/*"
+            multiple
+            style="display:none"
+            @change="handleFileSelect"
+          />
+          <el-tooltip content="上传图片 / 粘贴截图 (Ctrl+V)" placement="top" :show-after="400">
+            <button class="tool-btn" @click="fileInputRef?.click()" :disabled="loading">
+              <el-icon><Picture /></el-icon>
+            </button>
+          </el-tooltip>
+          <span v-if="pendingImages.length > 0" class="img-badge">
+            {{ pendingImages.length }} 张图片
+          </span>
+        </div>
+
+        <div class="tr">
+          <span v-if="input.length > 20" class="char-count">{{ input.length }}</span>
+
+          <el-tooltip :content="loading ? '生成中...' : (canSend() ? '发送 (Enter)' : '请输入内容')" placement="top" :show-after="300">
+            <button
+              class="send-btn"
+              :class="{ active: canSend(), loading }"
+              @click="handleSend"
+              :disabled="!canSend()"
+            >
+              <el-icon v-if="!loading" class="send-icon"><Promotion /></el-icon>
+              <el-icon v-else class="spin"><Loading /></el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+      </div>
     </div>
-    <p class="hint">AI 可能出错，请核实重要信息。</p>
+
+    <div class="hint-row">
+      <span class="hint">ChatFlow · 本地 AI · 数据安全</span>
+      <span class="hint-sep">·</span>
+      <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.input-wrapper {
-  padding: 8px 24px 16px;
-  max-width: 760px;
-  margin: 0 auto;
+.input-root {
   width: 100%;
 }
+.input-root.centered {
+  max-width: 680px;
+  margin: 0 auto;
+}
 
-.input-box {
+/* 卡片 */
+.input-card {
+  background: var(--cf-card);
+  border: 1.5px solid var(--cf-border);
+  border-radius: var(--cf-radius-lg);
+  box-shadow: var(--cf-shadow-md);
+  overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.input-card:focus-within {
+  border-color: #a5b4fc;
+  box-shadow: var(--cf-shadow-lg), 0 0 0 3px rgba(99,102,241,0.08);
+}
+.input-card.is-loading {
+  opacity: 0.8;
+}
+
+/* 图片预览 */
+.img-previews {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
-  background: #f4f4f4;
-  border: 1px solid #e5e5e5;
-  border-radius: 16px;
-  padding: 10px 12px 10px 16px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  padding: 12px 14px 0;
 }
-.input-box:focus-within {
-  border-color: #c0c0c0;
-  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.06);
+.img-thumb {
+  position: relative;
+  width: 68px; height: 68px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1.5px solid var(--cf-border);
 }
-.input-box.disabled {
-  opacity: 0.7;
+.img-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
 }
-
-.input-textarea {
-  flex: 1;
-  background: transparent;
-  border: none;
-  outline: none;
-  font-size: 14px;
-  font-family: inherit;
-  line-height: 1.6;
-  color: #0d0d0d;
-  resize: none;
-  max-height: 200px;
-  overflow-y: auto;
-}
-.input-textarea::placeholder {
-  color: #aaa;
-}
-
-.send-btn {
-  width: 32px;
-  height: 32px;
+.img-remove {
+  position: absolute;
+  top: 3px; right: 3px;
+  width: 17px; height: 17px;
   border-radius: 50%;
-  background: #0d0d0d;
+  background: rgba(0,0,0,0.65);
   color: #fff;
   border: none;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  transition: background 0.15s, opacity 0.15s;
+  padding: 0;
+  transition: background 0.12s;
 }
-.send-btn:hover:not(:disabled) {
-  background: #333;
+.img-remove:hover { background: rgba(239,68,68,0.9); }
+
+/* 文本区 */
+.textarea-area {
+  padding: 14px 16px 6px;
 }
-.send-btn:disabled {
-  background: #d0d0d0;
-  cursor: not-allowed;
+.the-textarea {
+  width: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 14.5px;
+  font-family: 'Inter', inherit;
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--cf-text-1);
+  resize: none;
+  max-height: 220px;
+  overflow-y: auto;
+  letter-spacing: -0.1px;
+}
+.the-textarea::placeholder {
+  color: var(--cf-text-5);
+  font-weight: 400;
 }
 
+/* 工具栏 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px 10px;
+}
+.tl, .tr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-btn {
+  width: 30px; height: 30px;
+  border-radius: var(--cf-radius-sm);
+  background: none;
+  border: none;
+  color: var(--cf-text-4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background 0.12s, color 0.12s;
+}
+.tool-btn:hover:not(:disabled) {
+  background: var(--cf-hover);
+  color: var(--cf-indigo);
+}
+.tool-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.img-badge {
+  font-size: 11px;
+  color: var(--cf-indigo);
+  background: var(--cf-active);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.char-count {
+  font-size: 11px;
+  color: var(--cf-text-5);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 发送按钮 */
+.send-btn {
+  width: 32px; height: 32px;
+  border-radius: 10px;
+  background: var(--cf-hover);
+  color: var(--cf-text-4);
+  border: 1.5px solid var(--cf-border);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  transition: all 0.15s;
+}
+.send-btn.active {
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #fff;
+  border-color: #6366f1;
+  box-shadow: 0 2px 10px rgba(99,102,241,0.35);
+}
+.send-btn.active:hover {
+  background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
+  transform: scale(1.05);
+  box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+}
+.send-btn:disabled:not(.active) { cursor: not-allowed; }
+
+.send-icon { font-size: 15px; }
 .spin {
-  animation: spin 1s linear infinite;
+  font-size: 15px;
+  animation: spin 0.8s linear infinite;
 }
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-.hint {
-  text-align: center;
-  font-size: 11px;
-  color: #bbb;
+/* 提示行 */
+.hint-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   margin-top: 8px;
+}
+.hint {
+  font-size: 11px;
+  color: var(--cf-text-5);
+}
+.hint-sep {
+  font-size: 11px;
+  color: var(--cf-text-5);
+  opacity: 0.5;
 }
 </style>

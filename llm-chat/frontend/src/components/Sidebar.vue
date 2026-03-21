@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { ConversationInfo } from '../types'
+import {
+  Plus, Search, ChatDotRound, Delete, Connection,
+  ArrowRight, Monitor
+} from '@element-plus/icons-vue'
 
 const props = defineProps<{
   conversations: ConversationInfo[]
@@ -23,30 +27,73 @@ const filteredConversations = computed(() =>
     c.title.toLowerCase().includes(searchQuery.value.toLowerCase())
   )
 )
+
+// 删除确认
+const pendingDelete = ref<string | null>(null)
+function confirmDelete(id: string) {
+  pendingDelete.value = id
+  setTimeout(() => { pendingDelete.value = null }, 2500)
+}
+function doDelete(id: string) {
+  pendingDelete.value = null
+  emit('delete', id)
+}
 </script>
 
 <template>
   <div class="sidebar">
-    <div class="sidebar-top">
-      <button class="new-chat-btn" @click="emit('newChat')">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M12 5v14M5 12h14"/>
+
+    <!-- Logo -->
+    <div class="sidebar-logo">
+      <div class="logo-icon">
+        <svg width="15" height="15" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M36 8L22 34H31L28 56L46 28H36Z" fill="white"/>
+          <circle cx="46" cy="18" r="4" fill="#c7d2fe" opacity="0.8"/>
         </svg>
+      </div>
+      <span class="logo-text">ChatFlow</span>
+      <span class="logo-badge">AI</span>
+    </div>
+
+    <!-- 新对话按钮 -->
+    <div class="sidebar-actions">
+      <el-button
+        type="primary"
+        class="new-chat-btn"
+        @click="emit('newChat')"
+        :icon="Plus"
+      >
         新对话
-      </button>
+      </el-button>
     </div>
 
-    <div class="search-wrap">
-      <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-      </svg>
-      <input v-model="searchQuery" class="search-input" placeholder="搜索对话..." />
+    <!-- 搜索 -->
+    <div class="sidebar-search">
+      <el-input
+        v-model="searchQuery"
+        placeholder="搜索对话..."
+        :prefix-icon="Search"
+        size="small"
+        clearable
+        class="search-input"
+      />
     </div>
 
+    <!-- 对话列表标题 -->
+    <div class="section-label">
+      <el-icon class="section-icon"><ChatDotRound /></el-icon>
+      <span>对话历史</span>
+      <el-badge :value="filteredConversations.length" class="conv-count" type="info" />
+    </div>
+
+    <!-- 对话列表 -->
     <div class="conv-list">
-      <p v-if="filteredConversations.length === 0" class="empty-hint">
-        {{ searchQuery ? '无匹配结果' : '暂无对话' }}
-      </p>
+      <el-empty
+        v-if="filteredConversations.length === 0"
+        :description="searchQuery ? '无匹配结果' : '暂无对话'"
+        :image-size="48"
+        style="padding: 20px 0;"
+      />
       <div
         v-for="conv in filteredConversations"
         :key="conv.id"
@@ -54,124 +101,198 @@ const filteredConversations = computed(() =>
         :class="{ active: conv.id === currentConvId }"
         @click="emit('select', conv.id)"
       >
-        <svg class="bubble-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
+        <el-icon class="conv-icon"><ChatDotRound /></el-icon>
         <span class="conv-title">{{ conv.title }}</span>
-        <button class="del-btn" @click.stop="emit('delete', conv.id)" title="删除">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
-          </svg>
-        </button>
+
+        <!-- 删除操作 -->
+        <div class="conv-actions" @click.stop>
+          <template v-if="pendingDelete === conv.id">
+            <el-button size="small" type="danger" plain @click="doDelete(conv.id)" style="height:22px;padding:0 6px;font-size:11px;">确认</el-button>
+          </template>
+          <template v-else>
+            <el-tooltip content="删除" placement="top" :show-after="300">
+              <el-icon class="del-icon" @click="confirmDelete(conv.id)"><Delete /></el-icon>
+            </el-tooltip>
+          </template>
+        </div>
       </div>
     </div>
 
+    <!-- 底部：模型选择 + 状态 -->
     <div class="sidebar-footer">
-      <p class="footer-label">当前模型</p>
-      <select
-        class="model-select"
-        :value="selectedModel"
-        @change="emit('update:selectedModel', ($event.target as HTMLSelectElement).value)"
+      <div class="footer-label">
+        <el-icon><Monitor /></el-icon>
+        <span>模型选择</span>
+      </div>
+
+      <el-select
+        :model-value="selectedModel"
+        @update:model-value="emit('update:selectedModel', $event)"
+        placeholder="选择模型"
+        style="width: 100%"
+        size="small"
       >
-        <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
-      </select>
+        <el-option v-for="m in models" :key="m" :value="m">
+          <div class="model-option">
+            <span class="model-option-dot"></span>
+            <span>{{ m }}</span>
+          </div>
+        </el-option>
+      </el-select>
+
+      <!-- 模型状态 -->
+      <div class="model-status">
+        <span class="status-dot pulse"></span>
+        <span class="status-text">已连接 · 正常运行</span>
+        <el-icon class="status-icon"><Connection /></el-icon>
+      </div>
     </div>
+
   </div>
 </template>
 
 <style scoped>
 .sidebar {
-  width: 260px;
+  width: 248px;
   flex-shrink: 0;
-  background: #171717;
+  background: var(--cf-sidebar);
   display: flex;
   flex-direction: column;
   height: 100vh;
+  border-right: 1px solid var(--cf-border);
 }
 
-.sidebar-top {
-  padding: 12px 12px 6px;
-}
-
-.new-chat-btn {
+/* Logo */
+.sidebar-logo {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid var(--cf-border-soft);
+}
+.logo-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #312e81 0%, #6366f1 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.35);
+}
+.logo-text {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cf-text-1);
+  letter-spacing: -0.3px;
+}
+.logo-badge {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: var(--cf-active);
+  color: var(--cf-indigo);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #c7d2fe;
+}
+
+/* 新对话 */
+.sidebar-actions {
+  padding: 12px 12px 6px;
+}
+.new-chat-btn {
   width: 100%;
-  padding: 10px 14px;
-  background: transparent;
-  color: #ececec;
-  border: 1px solid #333;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 13.5px;
-  font-family: inherit;
-  transition: background 0.15s;
+  font-weight: 500;
+  border-radius: var(--cf-radius-sm) !important;
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%) !important;
+  border: none !important;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.3) !important;
+  transition: all 0.2s !important;
 }
 .new-chat-btn:hover {
-  background: #2a2a2a;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(99,102,241,0.4) !important;
 }
 
-.search-wrap {
-  position: relative;
+/* 搜索 */
+.sidebar-search {
   padding: 6px 12px 8px;
 }
-.search-icon {
-  position: absolute;
-  left: 22px;
-  top: 50%;
-  transform: translateY(-55%);
-  color: #555;
-  pointer-events: none;
+:deep(.search-input .el-input__wrapper) {
+  background: var(--cf-hover) !important;
+  border-radius: var(--cf-radius-sm) !important;
+  border: 1px solid var(--cf-border) !important;
+  box-shadow: none !important;
 }
-.search-input {
-  width: 100%;
-  padding: 7px 10px 7px 28px;
-  background: #2a2a2a;
-  color: #d0d0d0;
-  border: none;
-  border-radius: 8px;
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
+:deep(.search-input .el-input__inner) {
+  font-size: 13px !important;
+  font-family: inherit !important;
 }
-.search-input::placeholder { color: #555; }
 
+/* 区块标题 */
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cf-text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+.section-icon { font-size: 12px; }
+.conv-count {
+  margin-left: auto;
+}
+:deep(.conv-count .el-badge__content) {
+  font-size: 10px;
+  height: 16px;
+  line-height: 16px;
+  min-width: 16px;
+  padding: 0 4px;
+  background: var(--cf-border) !important;
+  color: var(--cf-text-3) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* 对话列表 */
 .conv-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 8px;
+  padding: 2px 8px;
 }
-
-.empty-hint {
-  text-align: center;
-  color: #444;
-  font-size: 12px;
-  padding: 20px 0;
-}
-
 .conv-item {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
   margin: 1px 0;
-  border-radius: 8px;
+  border-radius: var(--cf-radius-sm);
   cursor: pointer;
-  transition: background 0.15s;
-  color: #b0b0b0;
+  color: var(--cf-text-3);
+  transition: background 0.12s, color 0.12s;
+  position: relative;
 }
 .conv-item:hover {
-  background: #252525;
-  color: #e0e0e0;
+  background: var(--cf-hover);
+  color: var(--cf-text-1);
 }
 .conv-item.active {
-  background: #2a2a2a;
-  color: #ffffff;
+  background: var(--cf-active);
+  color: var(--cf-indigo);
 }
-.bubble-icon {
+.conv-item.active .conv-icon {
+  color: var(--cf-indigo);
+}
+.conv-icon {
+  font-size: 13px;
   flex-shrink: 0;
-  color: #4a4a4a;
+  opacity: 0.5;
 }
 .conv-title {
   flex: 1;
@@ -179,43 +300,96 @@ const filteredConversations = computed(() =>
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+  font-weight: 400;
 }
-.del-btn {
-  background: none;
-  border: none;
-  color: #4a4a4a;
-  cursor: pointer;
-  padding: 2px;
+.conv-actions {
   opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
   display: flex;
   align-items: center;
+  transition: opacity 0.15s;
   flex-shrink: 0;
 }
-.conv-item:hover .del-btn { opacity: 1; }
-.del-btn:hover { color: #e74c3c; }
+.conv-item:hover .conv-actions { opacity: 1; }
+.del-icon {
+  font-size: 14px;
+  color: var(--cf-text-4);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.del-icon:hover {
+  color: var(--cf-red);
+  background: #fee2e2;
+}
 
+/* Footer */
 .sidebar-footer {
   padding: 12px;
-  border-top: 1px solid #272727;
+  border-top: 1px solid var(--cf-border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .footer-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
-  color: #4a4a4a;
-  margin-bottom: 5px;
+  font-weight: 600;
+  color: var(--cf-text-4);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.model-select {
-  width: 100%;
-  padding: 7px 10px;
-  background: #252525;
-  color: #d0d0d0;
-  border: 1px solid #333;
-  border-radius: 8px;
+.model-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.model-option-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cf-green);
+  flex-shrink: 0;
+}
+
+/* 模型状态行 */
+.model-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: var(--cf-radius-sm);
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cf-green);
+  flex-shrink: 0;
+}
+.pulse {
+  animation: pulse 2s ease-in-out infinite;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+}
+.status-text {
+  font-size: 11px;
+  color: #16a34a;
+  font-weight: 500;
+  flex: 1;
+}
+.status-icon {
   font-size: 12px;
-  font-family: inherit;
-  outline: none;
-  cursor: pointer;
+  color: #16a34a;
+  opacity: 0.6;
 }
 </style>

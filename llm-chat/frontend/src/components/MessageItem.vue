@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { marked } from 'marked'
 import type { Message } from '../types'
+import { CopyDocument, Check, User } from '@element-plus/icons-vue'
 
 const props = defineProps<{ message: Message }>()
+const copied = ref(false)
 
 const renderedContent = computed(() => {
   if (props.message.role === 'assistant') {
@@ -11,172 +13,295 @@ const renderedContent = computed(() => {
   }
   return ''
 })
+
+async function copy() {
+  try {
+    await navigator.clipboard.writeText(props.message.content)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  } catch {}
+}
 </script>
 
 <template>
-  <div class="msg-row" :class="message.role">
-    <!-- 用户消息：右对齐气泡 -->
-    <template v-if="message.role === 'user'">
-      <div class="user-bubble">{{ message.content }}</div>
-    </template>
+  <div class="msg" :class="message.role">
 
-    <!-- AI 消息：左对齐，带图标 -->
-    <template v-else>
-      <div class="ai-row">
-        <div class="ai-avatar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2zM9 14a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
-          </svg>
+    <!-- 用户消息 -->
+    <template v-if="message.role === 'user'">
+      <div class="user-wrap">
+        <!-- 图片 -->
+        <div v-if="message.images?.length" class="user-imgs">
+          <el-image
+            v-for="(img, i) in message.images"
+            :key="i"
+            :src="img"
+            :preview-src-list="message.images"
+            :initial-index="i"
+            fit="cover"
+            class="user-img"
+          />
         </div>
-        <div class="ai-content markdown-body" v-html="renderedContent"></div>
+        <!-- 文字 -->
+        <div v-if="message.content" class="user-bubble">{{ message.content }}</div>
+      </div>
+      <!-- 用户头像 -->
+      <div class="user-avatar">
+        <el-icon><User /></el-icon>
       </div>
     </template>
+
+    <!-- AI 消息 -->
+    <template v-else>
+      <!-- AI 头像 -->
+      <div class="ai-avatar">
+        <svg width="13" height="13" viewBox="0 0 64 64" fill="none">
+          <path d="M36 8L22 34H31L28 56L46 28H36Z" fill="white"/>
+        </svg>
+      </div>
+      <div class="ai-content-wrap">
+        <div class="ai-content markdown-body" v-html="renderedContent"></div>
+        <!-- 操作行 -->
+        <div v-if="message.content" class="ai-actions">
+          <el-tooltip :content="copied ? '已复制！' : '复制内容'" placement="top" :show-after="300">
+            <button class="action-btn" :class="{ copied }" @click="copy">
+              <el-icon><component :is="copied ? Check : CopyDocument" /></el-icon>
+              <span>{{ copied ? '已复制' : '复制' }}</span>
+            </button>
+          </el-tooltip>
+        </div>
+      </div>
+    </template>
+
   </div>
 </template>
 
 <style scoped>
-.msg-row {
-  padding: 6px 0;
+.msg {
   width: 100%;
-}
-
-/* 用户消息 */
-.msg-row.user {
+  padding: 10px 0;
   display: flex;
-  justify-content: flex-end;
-  padding-right: 16px;
-}
-.user-bubble {
-  max-width: 70%;
-  background: #f0f0f0;
-  color: #0d0d0d;
-  padding: 10px 16px;
-  border-radius: 18px 18px 4px 18px;
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* AI 消息 */
-.msg-row.assistant {
-  display: flex;
-  justify-content: flex-start;
-  padding-left: 4px;
-}
-.ai-row {
-  display: flex;
-  gap: 12px;
-  max-width: 85%;
   align-items: flex-start;
+  gap: 10px;
 }
-.ai-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: #19c37d;
+
+/* 用户 */
+.msg.user {
+  flex-direction: row-reverse;
+}
+.user-avatar {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #374151 0%, #1f2937 100%);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  font-size: 13px;
   flex-shrink: 0;
   margin-top: 2px;
 }
-.ai-content {
+.user-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 68%;
+}
+.user-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.user-img {
+  width: 200px;
+  height: 200px;
+  border-radius: var(--cf-radius-md) !important;
+  border: 1.5px solid var(--cf-border);
+  cursor: zoom-in;
+}
+.user-bubble {
+  background: var(--cf-card);
+  color: var(--cf-text-1);
+  padding: 10px 16px;
+  border-radius: 18px 6px 18px 18px;
+  font-size: 14.5px;
+  font-weight: 400;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1.5px solid var(--cf-border);
+  box-shadow: var(--cf-shadow-xs);
+  letter-spacing: -0.1px;
+}
+
+/* AI */
+.msg.assistant {
+  flex-direction: row;
+}
+.ai-avatar {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #312e81 0%, #6366f1 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+}
+.ai-content-wrap {
   flex: 1;
-  font-size: 14px;
-  line-height: 1.7;
-  color: #0d0d0d;
   min-width: 0;
+  max-width: 86%;
+}
+.ai-content {
+  font-size: 14.5px;
+  line-height: 1.75;
+  color: var(--cf-text-1);
+  letter-spacing: -0.1px;
+}
+
+/* 操作行 */
+.ai-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.msg.assistant:hover .ai-actions { opacity: 1; }
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--cf-card);
+  border: 1.5px solid var(--cf-border);
+  border-radius: 8px;
+  color: var(--cf-text-4);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.action-btn:hover {
+  border-color: #a5b4fc;
+  color: var(--cf-indigo);
+  background: var(--cf-active);
+}
+.action-btn.copied {
+  border-color: #bbf7d0;
+  color: #16a34a;
+  background: #f0fdf4;
 }
 </style>
 
 <style>
-/* Markdown 渲染样式（非 scoped，作用于 v-html 内容） */
-.markdown-body h1,
-.markdown-body h2,
-.markdown-body h3 {
-  font-weight: 600;
-  margin: 16px 0 8px;
+/* ── Markdown 全局样式 ── */
+.markdown-body { word-break: break-word; }
+
+.markdown-body p { margin: 0 0 10px; }
+.markdown-body p:last-child { margin-bottom: 0; }
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  font-weight: 700;
+  margin: 20px 0 8px;
   line-height: 1.3;
+  color: #111827;
+  letter-spacing: -0.3px;
 }
 .markdown-body h1 { font-size: 1.4em; }
-.markdown-body h2 { font-size: 1.2em; }
+.markdown-body h2 { font-size: 1.2em; border-bottom: 1px solid #e4e6ef; padding-bottom: 6px; }
 .markdown-body h3 { font-size: 1.05em; }
 
-.markdown-body p {
-  margin: 0 0 10px;
+.markdown-body ul, .markdown-body ol {
+  padding-left: 22px;
+  margin: 6px 0 12px;
 }
-.markdown-body p:last-child {
-  margin-bottom: 0;
-}
+.markdown-body li { margin: 5px 0; line-height: 1.65; }
 
-.markdown-body ul,
-.markdown-body ol {
-  padding-left: 20px;
-  margin: 6px 0 10px;
-}
-.markdown-body li {
-  margin: 3px 0;
-}
+.markdown-body strong { font-weight: 700; color: #111827; }
+.markdown-body em { font-style: italic; }
 
-.markdown-body strong {
-  font-weight: 600;
+.markdown-body a {
+  color: #6366f1;
+  text-decoration: underline;
+  text-decoration-color: #c7d2fe;
+  text-underline-offset: 2px;
 }
-.markdown-body em {
-  font-style: italic;
-}
+.markdown-body a:hover { text-decoration-color: #6366f1; }
 
 .markdown-body code {
-  background: #f0f0f0;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  background: #eef2ff;
+  color: #4f46e5;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 13px;
+  font-weight: 500;
+  border: 1px solid #e0e7ff;
 }
 
 .markdown-body pre {
-  background: #1e1e1e;
-  color: #d4d4d4;
-  padding: 14px 16px;
-  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 16px 18px;
+  border-radius: 12px;
   overflow-x: auto;
-  margin: 10px 0;
+  margin: 12px 0;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.65;
+  border: 1px solid #1e293b;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
 }
 .markdown-body pre code {
   background: none;
   padding: 0;
   color: inherit;
+  font-size: inherit;
+  border: none;
+  font-weight: 400;
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid #d0d0d0;
-  padding-left: 12px;
-  color: #666;
-  margin: 8px 0;
+  border-left: 3px solid #a5b4fc;
+  padding: 8px 16px;
+  color: #6b7280;
+  margin: 12px 0;
+  background: #f5f3ff;
+  border-radius: 0 8px 8px 0;
+  font-style: italic;
 }
 
 .markdown-body hr {
   border: none;
-  border-top: 1px solid #e5e5e5;
-  margin: 14px 0;
+  border-top: 1px solid #e4e6ef;
+  margin: 18px 0;
 }
 
 .markdown-body table {
   border-collapse: collapse;
   width: 100%;
-  margin: 10px 0;
+  margin: 14px 0;
+  font-size: 13.5px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e4e6ef;
 }
-.markdown-body th,
-.markdown-body td {
-  border: 1px solid #e5e5e5;
-  padding: 6px 12px;
+.markdown-body th, .markdown-body td {
+  border: 1px solid #e4e6ef;
+  padding: 8px 14px;
   text-align: left;
 }
 .markdown-body th {
-  background: #f7f7f7;
+  background: #f3f4f8;
   font-weight: 600;
+  color: #374151;
+  font-size: 13px;
 }
+.markdown-body tr:nth-child(even) td { background: #f9fafb; }
+.markdown-body tr:hover td { background: #eef2ff; }
 </style>
