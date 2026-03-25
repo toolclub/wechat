@@ -42,3 +42,4 @@ llm-chat/backend/conversations/*.json
 .claude/settings.local.json
 
 conversations/*
+cloudflared-config.yml

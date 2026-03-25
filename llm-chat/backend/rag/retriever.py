@@ -1,11 +1,10 @@
 """
-Layer 3b – Long-term Memory
-Qdrant 向量存储：把每轮 Q&A 对嵌入后持久化，在下一次对话前检索最相关的历史记忆注入上下文。
+RAG 检索层：Qdrant 向量存储
+替代原来的 layers/longterm.py
 
-存储单元：一对 (user_msg, assistant_msg) 作为一个 Point，向量取自 user_msg（用于相关性匹配）。
-检索策略：用当前用户问题做 Embedding，按余弦相似度取 TOP-K，过滤同一会话。
-author: leizihao
-email: lzh19162600626@gmail.com
+存储策略：每轮 Q&A 对在压缩时批量写入（见 rag/ingestor.py）
+检索策略：按 conv_id 过滤 + 余弦相似度 Top-K
+忘记模式：RAG 未命中时，计算 query 与摘要/近期消息的余弦相似度判断话题连续性
 """
 import asyncio
 import hashlib
@@ -26,17 +25,15 @@ from qdrant_client.models import (
 
 from config import (
     EMBEDDING_DIM,
-    EMBEDDING_MODEL,
     LONGTERM_SCORE_THRESHOLD,
     LONGTERM_TOP_K,
     QDRANT_COLLECTION,
-    QDRANT_HOST,
-    QDRANT_PORT,
+    QDRANT_URL,
     SUMMARY_RELEVANCE_THRESHOLD,
 )
-from ollama_client import get_embedding as _embed
+from llm.embeddings import embed_text
 
-logger = logging.getLogger("longterm")
+logger = logging.getLogger("rag.retriever")
 
 _client: Optional[AsyncQdrantClient] = None
 
@@ -44,7 +41,7 @@ _client: Optional[AsyncQdrantClient] = None
 def get_client() -> AsyncQdrantClient:
     global _client
     if _client is None:
-        _client = AsyncQdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        _client = AsyncQdrantClient(url=QDRANT_URL)
     return _client
 
 
@@ -52,8 +49,17 @@ def _point_id(conv_id: str, user_idx: int) -> int:
     """稳定可重现的 uint63 point ID，避免 hash() 受 PYTHONHASHSEED 影响。"""
     raw = f"{conv_id}:{user_idx}".encode()
     digest = hashlib.md5(raw).digest()
-    return int.from_bytes(digest[:8], "big") % (2 ** 63)
+    return int.from_bytes(digest[:8], "big") % (2**63)
 
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+
+# ── 初始化 ────────────────────────────────────────────────────────────────────
 
 async def init_collection() -> None:
     """启动时调用：若 Collection 不存在则创建。"""
@@ -70,18 +76,17 @@ async def init_collection() -> None:
         logger.info("Qdrant: Collection '%s' 就绪", QDRANT_COLLECTION)
 
 
+# ── 写入 ──────────────────────────────────────────────────────────────────────
+
 async def store_pair(
     conv_id: str,
     user_msg: str,
     assistant_msg: str,
     user_idx: int,
 ) -> None:
-    """
-    将一轮对话 (user_msg, assistant_msg) 向量化后存入 Qdrant。
-    向量来自 user_msg，便于按"问题相关性"检索。
-    """
+    """将一轮 Q&A 向量化后写入 Qdrant（向量来自 user_msg，便于相关性检索）。"""
     try:
-        vector = await _embed(user_msg, EMBEDDING_MODEL)
+        vector = await embed_text(user_msg)
         point_id = _point_id(conv_id, user_idx)
         await get_client().upsert(
             collection_name=QDRANT_COLLECTION,
@@ -98,22 +103,21 @@ async def store_pair(
                 )
             ],
         )
-        logger.info("Qdrant: 已存储 conv=%s idx=%d", conv_id, user_idx)
+        logger.debug("Qdrant: 已存储 conv=%s idx=%d", conv_id, user_idx)
     except Exception as exc:
         logger.error("Qdrant store_pair 失败: %s", exc)
 
+
+# ── 检索 ──────────────────────────────────────────────────────────────────────
 
 async def search_memories(
     conv_id: str,
     query: str,
     top_k: int = LONGTERM_TOP_K,
 ) -> list[str]:
-    """
-    检索与 query 最相关的历史 Q&A 对。
-    返回格式：["用户: ...\n助手: ...", ...]
-    """
+    """检索与 query 最相关的历史 Q&A 对，返回格式化字符串列表。"""
     try:
-        vector = await _embed(query, EMBEDDING_MODEL)
+        vector = await embed_text(query)
         results = await get_client().search(
             collection_name=QDRANT_COLLECTION,
             query_vector=vector,
@@ -123,77 +127,48 @@ async def search_memories(
             limit=top_k,
             score_threshold=LONGTERM_SCORE_THRESHOLD,
         )
-        memories = []
-        for r in results:
-            user = r.payload.get("user", "")
-            assistant = r.payload.get("assistant", "")
-            memories.append(f"用户: {user}\n助手: {assistant}")
-
-        return memories
+        return [
+            f"用户: {r.payload.get('user', '')}\n助手: {r.payload.get('assistant', '')}"
+            for r in results
+        ]
     except Exception as exc:
         logger.error("Qdrant search_memories 失败: %s", exc)
         return []
 
 
-def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
-    """计算两个向量的余弦相似度。"""
-    dot = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = math.sqrt(sum(a * a for a in vec_a))
-    norm_b = math.sqrt(sum(b * b for b in vec_b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+# ── 忘记模式判断 ──────────────────────────────────────────────────────────────
 
-
-async def is_relevant_to_recent(
-    query: str,
-    recent_msgs: list[str],
-    threshold: float = SUMMARY_RELEVANCE_THRESHOLD,
-) -> bool:
-    """
-    没有摘要时的替代方案：比较 query 与最近几条用户消息的平均余弦相似度。
-    返回 True 表示话题连续，False 表示话题切换（可触发忘记）。
-    """
+async def is_relevant_to_summary(query: str, summary: str) -> bool:
+    """判断 query 是否与中期摘要在语义上相关（低于阈值则触发忘记模式）。"""
     try:
-        vecs = await asyncio.gather(
-            _embed(query, EMBEDDING_MODEL),
-            *[_embed(m, EMBEDDING_MODEL) for m in recent_msgs],
-        )
-        vec_q = vecs[0]
-        sims = [_cosine_similarity(vec_q, v) for v in vecs[1:]]
-        avg_sim = sum(sims) / len(sims)
-        logger.info("query与近期消息平均相似度: %.4f (阈值: %.2f)", avg_sim, threshold)
-        return avg_sim >= threshold
-    except Exception as exc:
-        logger.error("is_relevant_to_recent 失败: %s", exc)
-        return True  # 出错保守处理，不触发忘记
-
-
-async def is_relevant_to_summary(
-    query: str,
-    summary: str,
-    threshold: float = SUMMARY_RELEVANCE_THRESHOLD,
-) -> bool:
-    """
-    用 Embedding 余弦相似度判断 query 是否与摘要相关。
-    返回 True 表示相关，False 表示不相关（可以触发忘记）。
-    出错时保守返回 True，避免误触发忘记。
-    """
-    try:
-        vec_q, vec_s = await asyncio.gather(
-            _embed(query, EMBEDDING_MODEL),
-            _embed(summary, EMBEDDING_MODEL),
-        )
+        vec_q, vec_s = await asyncio.gather(embed_text(query), embed_text(summary))
         sim = _cosine_similarity(vec_q, vec_s)
-        logger.info("query与摘要相似度: %.4f (阈值: %.2f)", sim, threshold)
-        return sim >= threshold
+        logger.info("query与摘要相似度: %.4f (阈值: %.2f)", sim, SUMMARY_RELEVANCE_THRESHOLD)
+        return sim >= SUMMARY_RELEVANCE_THRESHOLD
     except Exception as exc:
         logger.error("is_relevant_to_summary 失败: %s", exc)
         return True  # 出错保守处理，不触发忘记
 
 
+async def is_relevant_to_recent(query: str, recent_msgs: list[str]) -> bool:
+    """无摘要时的替代方案：与最近几条用户消息的平均余弦相似度判断话题连续性。"""
+    try:
+        vecs = await asyncio.gather(
+            embed_text(query), *[embed_text(m) for m in recent_msgs]
+        )
+        sims = [_cosine_similarity(vecs[0], v) for v in vecs[1:]]
+        avg_sim = sum(sims) / len(sims) if sims else 0.0
+        logger.info("query与近期消息平均相似度: %.4f (阈值: %.2f)", avg_sim, SUMMARY_RELEVANCE_THRESHOLD)
+        return avg_sim >= SUMMARY_RELEVANCE_THRESHOLD
+    except Exception as exc:
+        logger.error("is_relevant_to_recent 失败: %s", exc)
+        return True
+
+
+# ── 删除 / 统计 ───────────────────────────────────────────────────────────────
+
 async def delete_by_conv(conv_id: str) -> None:
-    """删除某会话的所有长期记忆 Point。"""
+    """删除某会话的所有长期记忆。"""
     try:
         await get_client().delete(
             collection_name=QDRANT_COLLECTION,
@@ -209,7 +184,7 @@ async def delete_by_conv(conv_id: str) -> None:
 
 
 async def count_by_conv(conv_id: str) -> int:
-    """返回某会话在 Qdrant 中存储的记忆条数（用于调试接口）。"""
+    """返回某会话在 Qdrant 中存储的记忆条数（供调试接口使用）。"""
     try:
         result = await get_client().count(
             collection_name=QDRANT_COLLECTION,

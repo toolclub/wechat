@@ -1,10 +1,23 @@
 """
+ChatFlow Backend —— LangChain + LangGraph 重构版
 author: leizihao
 email: lzh19162600626@gmail.com
+
+启动顺序（lifespan）：
+  1. 从磁盘加载全部对话到内存
+  2. 初始化 Qdrant Collection（若启用长期记忆）
+  3. 加载 MCP 工具（若配置了 MCP_SERVERS）
+  4. 构建并编译 LangGraph Agent 图
+
+REST API 与原版完全兼容，前端无需修改。
+新增接口：
+  GET  /api/tools          —— 查看当前可用工具列表
+  GET  /api/conversations/{id}/memory  —— 记忆状态调试（新增 active_tools 字段）
 """
 import logging
 import uuid
-import json
+
+import httpx
 import uvicorn
 from contextlib import asynccontextmanager
 
@@ -12,52 +25,103 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from models import ChatRequest, CreateConversationRequest, UpdateConversationRequest
-from harness import harness
-from layers.capability import list_models, get_embedding   # 第 2 层
-from layers.extension import apply_cors                    # 第 9 层
-from layers import longterm                                # 第 3b 层
-from config import CHAT_MODEL, BACKEND_HOST, BACKEND_PORT, EMBEDDING_MODEL, LONGTERM_MEMORY_ENABLED
+from memory import store as memory_store
+from rag import retriever as rag_retriever
+from tools.mcp.loader import load_mcp_tools
+from tools import get_all_tools, get_tool_names, get_tools_info
+from graph import agent as graph_agent
+from graph import runner as graph_runner
+from layers.extension import apply_cors  # 保留原有 CORS 配置
+from config import (
+    CHAT_MODEL,
+    BACKEND_HOST,
+    BACKEND_PORT,
+    EMBEDDING_MODEL,
+    LONGTERM_MEMORY_ENABLED,
+    MCP_SERVERS,
+    OLLAMA_BASE_URL,
+)
 
 logger = logging.getLogger("main")
 
 
+# ── 应用生命周期 ──────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 启动 ──
+
+    # 1. 从磁盘加载对话历史
+    memory_store.init()
+
+    # 2. 初始化 Qdrant
     if LONGTERM_MEMORY_ENABLED:
         try:
-            await longterm.init_collection()
+            await rag_retriever.init_collection()
         except Exception as exc:
             logger.error("Qdrant 初始化失败（长期记忆不可用）: %s", exc)
     else:
         logger.info("长期记忆（RAG）已禁用，跳过 Qdrant 初始化")
+
+    # 3. 加载 MCP 工具
+    if MCP_SERVERS:
+        await load_mcp_tools(MCP_SERVERS)
+    else:
+        logger.info("未配置 MCP 服务器，跳过 MCP 工具加载")
+
+    # 4. 构建 LangGraph Agent 图
+    all_tools = get_all_tools()
+    graph_agent.init(tools=all_tools, model=CHAT_MODEL)
+
+    logger.info(
+        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s",
+        CHAT_MODEL,
+        len(all_tools),
+        "开启" if LONGTERM_MEMORY_ENABLED else "关闭",
+    )
+
     yield
-    # ── 关闭 ──（无需操作）
+    # ── 关闭（无需操作，Qdrant 客户端无持久连接） ──
 
 
-app = FastAPI(title="ChatFlow", lifespan=lifespan)
-apply_cors(app)  # 第 9 层 – Extension
+app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
+apply_cors(app)
 
 
-# ── 模型 ──
+# ── 模型接口 ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/models")
 async def get_models():
-    models = await list_models()   # Layer 2 – Capability
+    """列出 Ollama 中已下载的所有模型。"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+    except Exception:
+        models = [CHAT_MODEL]
     return {"models": models}
 
 
-# ── 对话管理 ──
+# ── 对话管理 ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/conversations")
 async def get_conversations():
-    return {"conversations": harness.list_conversations()}
+    convs = sorted(
+        [
+            {"id": c.id, "title": c.title, "updated_at": c.updated_at}
+            for c in memory_store.all_conversations()
+        ],
+        key=lambda x: x["updated_at"],
+        reverse=True,
+    )
+    return {"conversations": convs}
 
 
 @app.post("/api/conversations")
 async def create_conversation(req: CreateConversationRequest):
     conv_id = str(uuid.uuid4())[:8]
-    conv = harness.create_conversation(
+    conv = memory_store.create(
         conv_id=conv_id,
         title=req.title or "新对话",
         system_prompt=req.system_prompt or "",
@@ -67,7 +131,7 @@ async def create_conversation(req: CreateConversationRequest):
 
 @app.get("/api/conversations/{conv_id}")
 async def get_conversation(conv_id: str):
-    conv = harness.get_conversation(conv_id)
+    conv = memory_store.get(conv_id)
     if not conv:
         return {"error": "对话不存在"}
     return {
@@ -84,96 +148,88 @@ async def get_conversation(conv_id: str):
 
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, req: UpdateConversationRequest):
-    conv = harness.get_conversation(conv_id)
+    conv = memory_store.get(conv_id)
     if not conv:
         return {"error": "对话不存在"}
     if req.title is not None:
         conv.title = req.title
     if req.system_prompt is not None:
         conv.system_prompt = req.system_prompt
-    harness._save(conv)
+    memory_store.save(conv)
     return {"ok": True}
 
 
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
-    harness.delete_conversation(conv_id)
+    memory_store.delete(conv_id)
     if LONGTERM_MEMORY_ENABLED:
-        await longterm.delete_by_conv(conv_id)   # Layer 3b – 同步清除向量记忆
+        await rag_retriever.delete_by_conv(conv_id)
     return {"ok": True}
 
 
-# ── 聊天（流式 SSE） ──
+# ── 聊天（流式 SSE） ──────────────────────────────────────────────────────────
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    conv = harness.get_conversation(req.conversation_id)
+    """
+    流式对话接口（SSE）。
+
+    SSE 事件格式：
+      data: {"content": "..."}         ← 增量 token
+      data: {"tool_call": {...}}        ← 工具调用（新增）
+      data: {"tool_result": {...}}      ← 工具结果（新增）
+      data: {"done": true, "compressed": bool}  ← 完成信号
+    """
+    conv = memory_store.get(req.conversation_id)
     if not conv:
-        conv = harness.create_conversation(req.conversation_id)
-
-    harness.add_message(req.conversation_id, "user", req.message)
-
-    # 第 3b 层 – 检索长期记忆（在 build_messages 之前）
-    long_term = await harness.search_long_term(req.conversation_id, req.message)
-
-    # 第 6 层 – 判断忘记模式：RAG 未命中 且 query 与摘要不相关
-    forget = await harness.should_forget(req.conversation_id, req.message, long_term)
-
-    messages = harness.gen_chat_msg(conv, long_term, forget_mode=forget)   # 第 6 层 – Context
-    model = req.model or CHAT_MODEL
-
-    async def generate():
-        full_response = ""
-        async for chunk in harness.chat_stream(          # 第 4 层 – Runtime
-            model=model,
-            messages=messages,
-            temperature=req.temperature,
-        ):
-            full_response += chunk
-            yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-
-        harness.add_message(req.conversation_id, "assistant", full_response)
-
-        # 第 3b 层 – RAG 写入已移至 maybe_compress 压缩时批量处理
-        compressed = await harness.maybe_compress(req.conversation_id)  # 第 6 层
-        yield f"data: {json.dumps({'done': True, 'compressed': compressed})}\n\n"
+        conv = memory_store.create(req.conversation_id)
 
     return StreamingResponse(
-        generate(),
+        graph_runner.stream_response(
+            conv_id=req.conversation_id,
+            user_message=req.message,
+            model=req.model or CHAT_MODEL,
+            temperature=req.temperature,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-# ── 记忆调试 ──
+# ── 工具接口 ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/tools")
+async def list_tools():
+    """列出当前所有可用工具（内置 + MCP + 动态注册）。"""
+    return {"tools": get_tools_info()}
+
+
+# ── 记忆调试接口 ───────────────────────────────────────────────────────────────
 
 @app.get("/api/conversations/{conv_id}/memory")
 async def get_memory_debug(conv_id: str):
-    conv = harness.get_conversation(conv_id)
+    conv = memory_store.get(conv_id)
     if not conv:
         return {"error": "对话不存在"}
-    lt_count = await longterm.count_by_conv(conv_id) if LONGTERM_MEMORY_ENABLED else -1
+    lt_count = (
+        await rag_retriever.count_by_conv(conv_id) if LONGTERM_MEMORY_ENABLED else -1
+    )
     return {
         "total_messages": len(conv.messages),
         "summarised_count": conv.mid_term_cursor,
         "window_count": len(conv.messages) - conv.mid_term_cursor,
         "mid_term_summary": conv.mid_term_summary or "(空)",
         "long_term_stored_pairs": lt_count if LONGTERM_MEMORY_ENABLED else "(已禁用)",
-        "build_messages_preview": [
-            {
-                "role": m["role"],
-                "content": m["content"][:80] + "..." if len(m["content"]) > 80 else m["content"],
-            }
-            for m in harness.gen_chat_msg(conv)
-        ],
+        "active_tools": get_tool_names(),
     }
 
 
-# ── Embedding 测试接口 ──
+# ── Embedding 测试接口 ────────────────────────────────────────────────────────
 
 @app.post("/api/embedding")
 async def test_embedding(text: str = "测试文本"):
-    vec = await get_embedding(text, EMBEDDING_MODEL)  # Layer 2 – Capability
+    from llm.embeddings import embed_text
+    vec = await embed_text(text)
     return {
         "model": EMBEDDING_MODEL,
         "text": text,
@@ -182,10 +238,11 @@ async def test_embedding(text: str = "测试文本"):
     }
 
 
+# ── 入口 ──────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    logger = logging.getLogger("harness")
     uvicorn.run(app, host=BACKEND_HOST, port=BACKEND_PORT)
