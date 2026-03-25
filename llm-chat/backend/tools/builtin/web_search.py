@@ -19,7 +19,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         格式化的搜索结果摘要
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         max_results = min(max_results, 10)
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -44,7 +44,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     except ImportError:
         return (
             "网络搜索功能不可用，请安装依赖：\n"
-            "pip install duckduckgo-search"
+            "pip install ddgs"
         )
     except Exception as exc:
         return f"搜索失败: {exc}"

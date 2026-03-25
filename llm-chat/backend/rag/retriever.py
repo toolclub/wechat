@@ -118,9 +118,9 @@ async def search_memories(
     """检索与 query 最相关的历史 Q&A 对，返回格式化字符串列表。"""
     try:
         vector = await embed_text(query)
-        results = await get_client().search(
+        response = await get_client().query_points(
             collection_name=QDRANT_COLLECTION,
-            query_vector=vector,
+            query=vector,
             query_filter=Filter(
                 must=[FieldCondition(key="conv_id", match=MatchValue(value=conv_id))]
             ),
@@ -129,7 +129,7 @@ async def search_memories(
         )
         return [
             f"用户: {r.payload.get('user', '')}\n助手: {r.payload.get('assistant', '')}"
-            for r in results
+            for r in response.points
         ]
     except Exception as exc:
         logger.error("Qdrant search_memories 失败: %s", exc)

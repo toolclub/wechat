@@ -21,4 +21,4 @@ langchain-mcp-adapters>=0.1.0
 qdrant-client>=1.9.0
 
 # ── 内置工具依赖 ──
-duckduckgo-search>=6.0.0         # web_search 工具（无需 API Key）
+ddgs>=1.0.0                      # web_search 工具（duckduckgo-search 已改名为 ddgs）
