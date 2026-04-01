@@ -43,4 +43,5 @@ llm-chat/backend/conversations/*.json
 
 conversations/*
 cloudflared-config.yml
-llm-chat/logs
+llm-chat/logs*
+logs

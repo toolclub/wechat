@@ -19,6 +19,7 @@ SSE 事件格式（供前端消费）：
   {"tool_call": {"name": "...", "input": {...}}}         ← 工具调用开始
   {"search_item": {"url":"","title":"","status":""}}     ← web_search 单条结果
   {"tool_result": {"name": "...", ...}}                  ← 工具完成信号
+  {"ping": true}                                         ← 心跳（防 nginx 超时）
   {"done": true, "compressed": bool}                    ← 流结束信号
 
 对外接口（main.py 唯一依赖）：
@@ -68,6 +69,7 @@ class WebSearchFormatter(ToolResultFormatter):
     async def format(self, name: str, raw: str) -> AsyncGenerator[str, None]:
         try:
             results = json.loads(raw)
+
             for item in results:
                 url = item.get("url", "")
                 yield _sse({
@@ -349,6 +351,12 @@ async def stream_response(
 ) -> AsyncGenerator[str, None]:
     """
     驱动 LangGraph 图执行，将事件流翻译为 FastAPI SSE 字符串流。
+
+    设计要点：
+      - 图执行在独立 Task 中运行，主循环通过 asyncio.Queue 接收事件
+      - 心跳任务每 20s 向队列注入 ping，主循环 yield 给前端，防止 nginx 超时断流
+      - recursion_limit=60：支持最多约 13 个计划步骤（每步 4 节点 + 固定开销 5）
+      - 图 Task 取消时（客户端断开）主循环捕获 CancelledError 并退出，不发 done
     """
     graph = get_graph(model)
     ctx = StreamContext(active_model=model)
@@ -375,15 +383,64 @@ async def stream_response(
         "reflection": "",
     }
 
+    # ── 后台任务：驱动图执行，把事件塞进队列 ─────────────────────────────────
+    queue: asyncio.Queue[tuple] = asyncio.Queue()
+
+    async def _graph_producer() -> None:
+        try:
+            async for event in graph.astream_events(
+                initial_state,
+                version="v2",
+                config={"recursion_limit": 60},
+            ):
+                await queue.put(("event", event))
+        except asyncio.CancelledError:
+            pass  # 客户端断开时被取消，正常退出
+        except Exception as exc:
+            logger.error("图执行失败 conv=%s: %s", conv_id, exc, exc_info=True)
+            try:
+                await queue.put(("error", exc))
+            except Exception:
+                pass
+        finally:
+            try:
+                await queue.put(("done", None))
+            except Exception:
+                pass
+
+    # ── 后台任务：每 20s 发一次心跳，防止 nginx proxy_read_timeout 断流 ──────
+    async def _heartbeat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(20)
+                await queue.put(("ping", None))
+        except asyncio.CancelledError:
+            pass
+
+    graph_task = asyncio.create_task(_graph_producer())
+    hb_task    = asyncio.create_task(_heartbeat())
+
+    graph_done = False
     try:
-        async for event in graph.astream_events(initial_state, version="v2"):
-            async for chunk in _dispatcher.dispatch(event, ctx):
-                yield chunk
+        while True:
+            kind, val = await queue.get()
+            if kind == "event":
+                async for chunk in _dispatcher.dispatch(val, ctx):
+                    yield chunk
+            elif kind == "ping":
+                yield _sse({"ping": True})
+            elif kind == "error":
+                yield _sse({"error": str(val)})
+                # 继续等待 done 信号，确保 finally 正常执行
+            elif kind == "done":
+                graph_done = True
+                break
     except asyncio.CancelledError:
         logger.info("SSE 连接已断开 conv=%s", conv_id)
-        return
-    except Exception as exc:
-        logger.error("图执行失败 conv=%s: %s", conv_id, exc, exc_info=True)
-        yield _sse({"error": str(exc)})
+        graph_done = False  # 不发 done 事件
+    finally:
+        hb_task.cancel()
+        graph_task.cancel()
 
-    yield _sse({"done": True, "compressed": ctx.compressed})
+    if graph_done:
+        yield _sse({"done": True, "compressed": ctx.compressed})

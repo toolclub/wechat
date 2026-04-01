@@ -112,6 +112,7 @@ export async function sendMessage(
   if (!reader) return
 
   let buffer = ''
+  let streamDone = false
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -132,9 +133,14 @@ export async function sendMessage(
         if (data.route)             onRoute(data.route.model, data.route.intent)
         if (data.plan_generated)    onPlanGenerated(data.plan_generated.steps)
         if (data.reflection)        onReflection(data.reflection.content, data.reflection.decision)
-        if (data.done)              onDone()
-        if (data.stopped)           onStopped()
+        // 后端执行出错：把错误信息追加到消息末尾，等待随后的 done 事件
+        if (data.error)             onChunk('\n\n⚠️ ' + data.error)
+        // ping 心跳：前端忽略，仅用于保持 nginx 连接不超时
+        if (data.done)              { streamDone = true; onDone() }
+        if (data.stopped)           { streamDone = true; onStopped() }
       } catch {}
     }
   }
+  // 流被意外关闭（nginx 超时/网络中断）且未收到 done：确保 loading 状态被清除
+  if (!streamDone) onStopped()
 }
