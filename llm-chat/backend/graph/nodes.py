@@ -363,6 +363,38 @@ def make_reflector():
         # 提取最近消息用于评估
         messages = list(state.get("messages", []))
         recent = messages[-5:] if len(messages) > 5 else messages
+
+        # 快速路径：非最后步骤 + 有工具调用结果 + 首次执行（未重试）
+        # → 不调 LLM，直接 continue。
+        # 原因：call_model_after_tool 的输出常包含"下一步行动"等措辞，
+        # 会误导 LLM 认为后续步骤已处理，导致提前 done。
+        if not is_last and step_iters == 0:
+            has_tool_result = any(
+                type(m).__name__ == "ToolMessage"
+                for m in recent
+            )
+            if has_tool_result:
+                updated_plan = _mark_step(plan, current_idx, "done")
+                next_idx = current_idx + 1
+                updated_plan = _mark_step(updated_plan, next_idx, "running")
+                next_step = updated_plan[next_idx]
+                step_msg = HumanMessage(
+                    content=(
+                        f"步骤 {current_idx + 1} 已完成。\n\n"
+                        f"**[执行步骤 {next_idx + 1}/{total}]: {next_step['title']}**\n"
+                        f"具体任务：{next_step['description']}\n"
+                        "请使用工具完成此步骤。"
+                    )
+                )
+                return {
+                    "reflector_decision": "continue",
+                    "reflection": f"步骤 {current_idx + 1} 工具调用完成，继续执行步骤 {next_idx + 1}",
+                    "plan": updated_plan,
+                    "messages": [step_msg],
+                    "current_step_index": next_idx,
+                    "step_iterations": 0,
+                }
+
         recent_text = "\n".join([
             f"[{type(m).__name__}]: {str(m.content)[:600]}"
             for m in recent

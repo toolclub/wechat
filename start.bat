@@ -40,20 +40,58 @@ REM -- Show container status --
 docker compose ps
 echo.
 
-REM -- Start cloudflared tunnel in background --
+REM -- Start cloudflared tunnel as Windows Service (survives bat close + reboot) --
 echo [3/3] Starting Cloudflare Tunnel...
+
 if not exist "%CLOUDFLARED%" (
     echo [WARN] cloudflared.exe not found, skipping tunnel.
-) else if not exist "%CLOUDFLARED_CONFIG%" (
-    echo [WARN] cloudflared-config.yml not found, skipping tunnel.
-) else (
-    REM Kill any existing cloudflared process first
-    taskkill /f /im cloudflared.exe > nul 2>&1
-    start /b "" "%CLOUDFLARED%" tunnel --config "%CLOUDFLARED_CONFIG%" run > "%~dp0logs\cloudflared.log" 2>&1
-    timeout /t 2 /nobreak > nul
-    echo [OK] Cloudflare Tunnel started (log: logs\cloudflared.log)
+    goto :done
 )
 
+if not exist "%CLOUDFLARED_CONFIG%" (
+    echo [WARN] cloudflared-config.yml not found, skipping tunnel.
+    goto :done
+)
+
+REM -- Check if service already registered --
+sc query cloudflared > nul 2>&1
+if %errorlevel% neq 0 (
+    echo      Registering cloudflared as Windows service...
+    "%CLOUDFLARED%" --config "%CLOUDFLARED_CONFIG%" service install
+    if %errorlevel% neq 0 (
+        echo [ERROR] Failed to install cloudflared service. Try running as Administrator.
+        goto :tunnel_fallback
+    )
+    echo      [OK] Service registered.
+)
+
+REM -- Start the service (ignore error if already running) --
+net start cloudflared > nul 2>&1
+timeout /t 3 /nobreak > nul
+
+sc query cloudflared | findstr "RUNNING" > nul 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] Cloudflare Tunnel service is running.
+    goto :done
+) else (
+    echo [WARN] Service did not start cleanly, falling back to foreground process...
+    goto :tunnel_fallback
+)
+
+:tunnel_fallback
+REM -- Fallback: run in a separate visible window so it survives bat close --
+echo      Starting tunnel in separate window ^(keep it open^)...
+taskkill /f /im cloudflared.exe > nul 2>&1
+start "Cloudflare Tunnel" "%CLOUDFLARED%" tunnel --config "%CLOUDFLARED_CONFIG%" run
+timeout /t 3 /nobreak > nul
+tasklist | findstr /i "cloudflared" > nul 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] Cloudflare Tunnel started in separate window.
+) else (
+    echo [ERROR] Tunnel failed to start. Check logs\cloudflared.log for details.
+)
+
+:done
 echo.
 echo ============================================
 echo   All services started!
@@ -66,9 +104,9 @@ echo   Tunnel:    https://chatflow-live.com
 echo.
 echo   Logs:
 echo     App logs:   %~dp0logs\
-echo     Tunnel log: %~dp0logs\cloudflared.log
-echo     Container:  docker compose logs -f backend
+echo     Container:  docker compose -f "%COMPOSE_DIR%\docker-compose.yml" logs -f backend
+echo     Tunnel:     sc query cloudflared  ^(service mode^)
 echo.
-echo   Run stop.bat to shut down all services.
+echo   To stop everything, run stop.bat
 echo ============================================
 pause
