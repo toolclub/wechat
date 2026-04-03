@@ -24,6 +24,12 @@ from langchain_core.tools import BaseTool
 from config import LONGTERM_MEMORY_ENABLED, ROUTER_MODEL, ROUTE_MODEL_MAP, SEARCH_MODEL
 from llm.chat import get_chat_llm
 from graph.state import GraphState, PlanStep
+from graph.event_types import (
+    RouteNodeOutput,
+    PlannerNodeOutput,
+    ReflectorNodeOutput,
+    CompressNodeOutput,
+)
 from memory import store as memory_store
 from memory.compressor import maybe_compress
 from memory.context_builder import build_messages
@@ -57,7 +63,7 @@ ROUTE_PROMPT = """你是一个意图分类器。根据用户消息，输出以�
 
 只输出标签本身，例如：chat"""
 
-async def route_model(state: GraphState) -> dict:
+async def route_model(state: GraphState) -> RouteNodeOutput:
     user_msg = state["user_message"]
     llm = get_chat_llm(model=ROUTER_MODEL, temperature=0.0)
 
@@ -161,7 +167,7 @@ PLANNER_SYSTEM = """你是一个任务规划专家。分析用户的请求，制
 def make_planner():
     """工厂函数：创建 planner 节点（任务规划）"""
 
-    async def planner(state: GraphState) -> dict:
+    async def planner(state: GraphState) -> PlannerNodeOutput:
         route = state.get("route", "")
 
         # 只对搜索类任务或无路由模式进行规划
@@ -329,7 +335,7 @@ REFLECTOR_SYSTEM = """你是一个任务完成情况评估专家。
 def make_reflector():
     """工厂函数：创建 reflector 节点（任务反思与路由决策）"""
 
-    async def reflector(state: GraphState) -> dict:
+    async def reflector(state: GraphState) -> ReflectorNodeOutput:
         plan = state.get("plan", [])
 
         # 无计划时直接完成
@@ -575,7 +581,7 @@ def _build_tool_summary(state: GraphState) -> str:
 
 # ── 节点 6：压缩记忆 ──────────────────────────────────────────────────────────
 
-async def compress_memory(state: GraphState) -> dict:
+async def compress_memory(state: GraphState) -> CompressNodeOutput:
     """
     按需触发对话压缩：
       - 对超过阈值的旧消息生成摘要

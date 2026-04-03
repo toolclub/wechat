@@ -34,6 +34,15 @@ from typing import AsyncGenerator, ClassVar
 
 from config import ROUTE_MODEL_MAP
 from graph.agent import get_graph
+from graph.event_types import (
+    CompressEndEvent,
+    LLMStreamEvent,
+    PlannerEndEvent,
+    ReflectorEndEvent,
+    RouteEndEvent,
+    ToolEndEvent,
+    ToolStartEvent,
+)
 from graph.state import GraphState
 
 logger = logging.getLogger("graph.runner")
@@ -133,15 +142,11 @@ class RouteEndHandler(EventHandler):
         return event_type == "on_chain_end" and "route_model" in (event_name, node_name)
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        output = event["data"].get("output", {})
-        if not isinstance(output, dict):
+        ev = RouteEndEvent.from_event(event)
+        if ev is None:
             return
-        ctx.active_model = (
-            output.get("answer_model")
-            or output.get("model")
-            or ctx.active_model
-        )
-        intent = output.get("route") or _MODEL_TO_INTENT.get(ctx.active_model, "chat")
+        ctx.active_model = ev.answer_model or ctx.active_model
+        intent = ev.route or _MODEL_TO_INTENT.get(ctx.active_model, "chat")
         yield _sse({"route": {"model": ctx.active_model, "intent": intent}})
 
 
@@ -162,14 +167,12 @@ class PlannerEndHandler(EventHandler):
         return event_type == "on_chain_end" and "planner" in (event_name, node_name)
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        output = event["data"].get("output", {})
-        if not isinstance(output, dict):
+        ev = PlannerEndEvent.from_event(event)
+        if ev is None or not ev.plan:
             return
-        plan = output.get("plan", [])
-        if not plan:
-            return
-        ctx.last_plan_step_count = len(plan)
-        yield _sse({"plan_generated": {"steps": plan}})
+        ctx.last_plan_step_count = len(ev.plan)
+        steps = list(ev.plan)
+        yield _sse({"plan_generated": {"steps": steps}})
 
 
 class ReflectorEndHandler(EventHandler):
@@ -179,20 +182,14 @@ class ReflectorEndHandler(EventHandler):
         return event_type == "on_chain_end" and "reflector" in (event_name, node_name)
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        output = event["data"].get("output", {})
-        if not isinstance(output, dict):
+        ev = ReflectorEndEvent.from_event(event)
+        if ev is None:
             return
-
-        # 推送更新后的计划（步骤状态变化）
-        plan = output.get("plan", [])
-        if plan:
-            yield _sse({"plan_generated": {"steps": plan}})
-
-        # 推送反思结果
-        reflection = output.get("reflection", "")
-        decision = output.get("reflector_decision", "")
-        if reflection or decision:
-            yield _sse({"reflection": {"content": reflection, "decision": decision}})
+        if ev.plan:
+            steps = list(ev.plan)
+            yield _sse({"plan_generated": {"steps": steps}})
+        if ev.reflection or ev.reflector_decision:
+            yield _sse({"reflection": {"content": ev.reflection, "decision": ev.reflector_decision}})
 
 
 class LLMStartHandler(EventHandler):
@@ -216,18 +213,18 @@ class LLMStreamHandler(EventHandler):
         return event_type == "on_chat_model_stream" and node_name in self._NODES
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        chunk = event["data"].get("chunk")
-        if not chunk or not chunk.content:
+        ev = LLMStreamEvent.from_event(event)
+        if ev is None:
             return
-        content: str = chunk.content
         # 过滤 <think>...</think> 推理块（可能跨 chunk）
         output_parts: list[str] = []
         pos = 0
+        content = ev.content
         while pos < len(content):
             if ctx.in_think_block:
                 end = content.find("</think>", pos)
                 if end == -1:
-                    pos = len(content)   # 整段都在 think 块里，丢弃
+                    pos = len(content)
                 else:
                     ctx.in_think_block = False
                     pos = end + len("</think>")
@@ -251,12 +248,8 @@ class ToolStartHandler(EventHandler):
         return event_type == "on_tool_start"
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        yield _sse({
-            "tool_call": {
-                "name": event.get("name", ""),
-                "input": event["data"].get("input", {}),
-            }
-        })
+        ev = ToolStartEvent.from_event(event)
+        yield _sse({"tool_call": {"name": ev.name, "input": ev.input}})
 
 
 class ToolEndHandler(EventHandler):
@@ -266,10 +259,9 @@ class ToolEndHandler(EventHandler):
         return event_type == "on_tool_end"
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        name = event.get("name", "")
-        raw = _extract_tool_output(event["data"].get("output", ""))
-        formatter = _TOOL_FORMATTERS.get(name, _DEFAULT_FORMATTER)
-        async for chunk in formatter.format(name, raw):
+        ev = ToolEndEvent.from_event(event)
+        formatter = _TOOL_FORMATTERS.get(ev.name, _DEFAULT_FORMATTER)
+        async for chunk in formatter.format(ev.name, ev.raw_output):
             yield chunk
 
 
@@ -280,9 +272,8 @@ class CompressEndHandler(EventHandler):
         return event_type == "on_chain_end" and event_name == "compress_memory"
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        output = event["data"].get("output", {})
-        if isinstance(output, dict):
-            ctx.compressed = output.get("compressed", False)
+        ev = CompressEndEvent.from_event(event)
+        ctx.compressed = ev.compressed
         return
         yield  # 声明为 AsyncGenerator
 
@@ -423,14 +414,14 @@ async def stream_response(
     graph_done = False
     try:
         while True:
-            kind, val = await queue.get()
+            kind, _event = await queue.get()
             if kind == "event":
-                async for chunk in _dispatcher.dispatch(val, ctx):
+                async for chunk in _dispatcher.dispatch(_event, ctx):
                     yield chunk
             elif kind == "ping":
                 yield _sse({"ping": True})
             elif kind == "error":
-                yield _sse({"error": str(val)})
+                yield _sse({"error": str(_event)})
                 # 继续等待 done 信号，确保 finally 正常执行
             elif kind == "done":
                 graph_done = True
