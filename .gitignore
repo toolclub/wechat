@@ -11,7 +11,6 @@ build/
 venv/
 .venv/
 env/
-.env
 *.env.local
 
 # ===== Node / Frontend =====
@@ -34,6 +33,10 @@ desktop.ini
 # ===== Project specific =====
 # 对话历史不上库
 llm-chat/backend/conversations/*.json
+
+# 密钥文件永远不上库（含密码，只放在 /opt/secret/ 本地目录）
+**/chatflow-secret.yml
+# .env 可以上库（敏感值已用 ENC(...) 加密）
 
 # 可执行文件
 *.exe

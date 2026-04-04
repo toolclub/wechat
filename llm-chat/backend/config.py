@@ -1,22 +1,27 @@
 """
-集中管理所有配置，支持 .env 文件和环境变量覆盖。
+集中管理所有配置，从 .env 文件或环境变量读取，无内置默认值。
 author: leizihao
 
-用法：
-  所有配置均可通过 .env 文件或环境变量覆盖，环境变量优先级最高。
-  示例：LLM_BASE_URL=http://my-server:11434/v1
-
-复杂配置（ROUTE_MODEL_MAP / MCP_SERVERS）可在 .env 中写 JSON 字符串：
+所有配置必须在 .env 中显式声明（参考 .env.example）。
+复杂类型（ROUTE_MODEL_MAP / MCP_SERVERS）在 .env 中写 JSON 字符串：
   ROUTE_MODEL_MAP={"code":"qwen3-coder:30b","search":"qwen3:8b","chat":"qwen3:8b","search_code":"qwen3-coder:30b"}
+
+加密环境变量：若存在 .env.enc 且有对应密钥文件，启动时自动解密并注入 os.environ。
 """
-import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import field_validator, model_validator
+# 启动时尝试从 .env.enc 解密（存在则解密，不存在则跳过，兼容普通 .env 开发场景）
+try:
+    from decrypt_env import load_encrypted_env as _load_encrypted_env
+    _load_encrypted_env()
+except RuntimeError:
+    raise
+except Exception:
+    pass  # 依赖未安装或模块找不到时静默跳过
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# .env 文件位于项目根目录（llm-chat/.env）或当前工作目录
 _ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
@@ -29,74 +34,68 @@ class Settings(BaseSettings):
     )
 
     # ── LLM 服务（OpenAI 兼容接口） ──────────────────────────────────────────
-    # Ollama:     http://localhost:11434/v1
-    # vLLM:       http://localhost:8000/v1
-    # LM Studio:  http://localhost:1234/v1
-    # OpenAI:     https://api.openai.com/v1
-    # Docker 中连接宿主机 Ollama: http://host.docker.internal:11434/v1
-    llm_base_url: str = "http://localhost:11434/v1"
-    api_key: str = "ollama"
-
-    # Embedding 单独配置（Ollama 原生 API，不走 /v1）
-    ollama_base_url: str = "http://localhost:11434"
+    llm_base_url: str
+    api_key: str
+    # Embedding 使用独立 URL，可与 LLM 指向不同提供商
+    # 示例：本地 Ollama = http://localhost:11434/v1
+    #        云端 GLM   = https://open.bigmodel.cn/api/paas/v4
+    embedding_base_url: str
 
     # ── 模型配置 ─────────────────────────────────────────────────────────────
-    chat_model: str = "qwen3:8b"
-    summary_model: str = "qwen3:8b"
-    embedding_model: str = "bge-m3"
+    chat_model: str
+    summary_model: str
+    embedding_model: str
 
     # ── 路由 Agent ────────────────────────────────────────────────────────────
-    router_enabled: bool = True
-    router_model: str = "qwen3:8b"
-    search_model: str = "qwen3:8b"
-
-    # 路由模型映射（可通过 ROUTE_MODEL_MAP='{...}' 环境变量覆盖）
-    route_model_map: dict[str, str] = {
-        "code":        "qwen3-coder:30b",
-        "search":      "qwen3:8b",
-        "chat":        "qwen3:8b",
-        "search_code": "qwen3-coder:30b",
-    }
+    router_enabled: bool
+    router_model: str
+    search_model: str
+    route_model_map: dict[str, str]
 
     # ── 上下文窗口 ────────────────────────────────────────────────────────────
-    chat_num_ctx: int = 4096
-    summary_num_ctx: int = 2048
-    fetch_webpage_max_display: int = 500
+    chat_num_ctx: int
+    summary_num_ctx: int
+    fetch_webpage_max_display: int
 
     # ── 记忆参数 ──────────────────────────────────────────────────────────────
-    short_term_max_turns: int = 10
-    compress_trigger: int = 8
-    max_summary_length: int = 500
-    short_term_forget_turns: int = 2
+    short_term_max_turns: int
+    short_term_forget_turns: int
+    compress_trigger: int
+    max_summary_length: int
 
     # ── 长期记忆（Qdrant） ────────────────────────────────────────────────────
-    longterm_memory_enabled: bool = True
-    qdrant_url: str = "http://localhost:6333"
-    qdrant_collection: str = "llm_chat_memories"
-    embedding_dim: int = 1024
-    longterm_top_k: int = 3
-    longterm_score_threshold: float = 0.5
-    summary_relevance_threshold: float = 0.4
+    longterm_memory_enabled: bool
+    qdrant_url: str
+    qdrant_collection: str
+    embedding_dim: int
+    longterm_top_k: int
+    longterm_score_threshold: float
+    summary_relevance_threshold: float
 
-    # ── MCP 服务器配置（可通过 MCP_SERVERS='{...}' 环境变量覆盖） ─────────────
-    # 格式 stdio: {"server_name": {"command": "npx", "args": [...], "transport": "stdio"}}
-    # 格式 SSE:   {"server_name": {"url": "http://...", "transport": "sse"}}
+    # ── 语义缓存（Redis Search） ──────────────────────────────────────────────
+    semantic_cache_enabled: bool
+    redis_url: str
+    semantic_cache_index: str
+    semantic_cache_threshold: float
+    semantic_cache_namespace_mode: str
+    # search/search_code 结果的缓存过期时间（小时）；chat/code 永不过期
+    semantic_cache_search_ttl_hours: int
+
+    # ── 数据库 ────────────────────────────────────────────────────────────────
+    database_url: str
+
+    # ── MCP 服务器（可选，默认空） ────────────────────────────────────────────
     mcp_servers: dict[str, Any] = {}
 
     # ── 服务端口 ──────────────────────────────────────────────────────────────
-    backend_host: str = "0.0.0.0"
-    backend_port: int = 8000
+    backend_host: str
+    backend_port: int
 
-    # ── 持久化目录 ────────────────────────────────────────────────────────────
-    conversations_dir: str = "./conversations"
+    # ── 目录 ─────────────────────────────────────────────────────────────────
+    conversations_dir: str
+    log_dir: str
 
-    # ── 数据库 ────────────────────────────────────────────────────────────────
-    database_url: str = "postgresql://chatflow:chatflow123@localhost:5432/chatflow"
-
-    # ── 日志目录 ──────────────────────────────────────────────────────────────
-    log_dir: str = "./logs"
-
-    # ── 默认系统提示词 ────────────────────────────────────────────────────────
+    # ── 系统提示词（长文本，保留在代码中）────────────────────────────────────
     default_system_prompt: str = (
         "你是一个准确、诚实的AI助手，用中文回答用户问题。\n"
         "\n"
@@ -105,6 +104,8 @@ class Settings(BaseSettings):
         "- 需要核实具体事实（某技术/产品的发布时间、来源公司、具体规格等）\n"
         "- 需要查阅外部资料（官方文档、代码库、参考页面等）\n"
         "- 对自己的回答没有十足把握时\n"
+        "\n"
+        "调用工具时，搜索关键词不要加年份（如2024、2025），直接用核心关键词搜索，让搜索引擎返回最新结果。\n"
         "\n"
         "调用工具后，基于工具返回的真实内容作答，不要凭猜测补充工具未返回的信息。\n"
         "对于通用原理、编程概念、数学、翻译、写作等你有把握的问题，直接回答即可。"
@@ -115,7 +116,7 @@ class Settings(BaseSettings):
         "不要遗漏任何重要的事实或数字。"
     )
 
-    # ── 向后兼容：QDRANT_HOST / QDRANT_PORT（从 qdrant_url 派生） ─────────────
+    # ── 向后兼容：从 qdrant_url 派生 ─────────────────────────────────────────
     @property
     def qdrant_host(self) -> str:
         from urllib.parse import urlparse
@@ -128,7 +129,6 @@ class Settings(BaseSettings):
 
     @property
     def api_base_url(self) -> str:
-        """向后兼容别名。"""
         return self.llm_base_url
 
 
@@ -138,7 +138,7 @@ settings = Settings()
 # ── 向后兼容导出（所有现有 `from config import X` 无需修改） ──────────────────
 LLM_BASE_URL              = settings.llm_base_url
 API_KEY                   = settings.api_key
-OLLAMA_BASE_URL           = settings.ollama_base_url
+EMBEDDING_BASE_URL        = settings.embedding_base_url
 API_BASE_URL              = settings.api_base_url
 
 CHAT_MODEL                = settings.chat_model
@@ -155,9 +155,9 @@ SUMMARY_NUM_CTX           = settings.summary_num_ctx
 FETCH_WEBPAGE_MAX_DISPLAY = settings.fetch_webpage_max_display
 
 SHORT_TERM_MAX_TURNS      = settings.short_term_max_turns
+SHORT_TERM_FORGET_TURNS   = settings.short_term_forget_turns
 COMPRESS_TRIGGER          = settings.compress_trigger
 MAX_SUMMARY_LENGTH        = settings.max_summary_length
-SHORT_TERM_FORGET_TURNS   = settings.short_term_forget_turns
 
 LONGTERM_MEMORY_ENABLED   = settings.longterm_memory_enabled
 QDRANT_URL                = settings.qdrant_url
@@ -169,15 +169,21 @@ LONGTERM_TOP_K            = settings.longterm_top_k
 LONGTERM_SCORE_THRESHOLD  = settings.longterm_score_threshold
 SUMMARY_RELEVANCE_THRESHOLD = settings.summary_relevance_threshold
 
+SEMANTIC_CACHE_ENABLED           = settings.semantic_cache_enabled
+REDIS_URL                        = settings.redis_url
+SEMANTIC_CACHE_INDEX             = settings.semantic_cache_index
+SEMANTIC_CACHE_THRESHOLD         = settings.semantic_cache_threshold
+SEMANTIC_CACHE_NAMESPACE_MODE    = settings.semantic_cache_namespace_mode
+SEMANTIC_CACHE_SEARCH_TTL_HOURS  = settings.semantic_cache_search_ttl_hours
+
 MCP_SERVERS               = settings.mcp_servers
 
 BACKEND_HOST              = settings.backend_host
 BACKEND_PORT              = settings.backend_port
 
 CONVERSATIONS_DIR         = settings.conversations_dir
+DATABASE_URL              = settings.database_url
+LOG_DIR                   = settings.log_dir
 
 DEFAULT_SYSTEM_PROMPT     = settings.default_system_prompt
 SUMMARY_SYSTEM_PROMPT     = settings.summary_system_prompt
-
-DATABASE_URL              = settings.database_url
-LOG_DIR                   = settings.log_dir

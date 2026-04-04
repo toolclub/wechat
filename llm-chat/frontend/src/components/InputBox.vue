@@ -169,12 +169,10 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   transition: box-shadow 0.2s, border-color 0.2s;
 }
 .input-card:focus-within {
-  border-color: #a5b4fc;
-  box-shadow: var(--cf-shadow-lg), 0 0 0 3px rgba(99,102,241,0.08);
+  border-color: #c4b5fd;
+  box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(99,102,241,0.07);
 }
-.input-card.is-loading {
-  opacity: 0.8;
-}
+.input-card.is-loading { opacity: 0.75; }
 
 /* 图片预览 */
 .img-previews {

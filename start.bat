@@ -11,7 +11,7 @@ set "ROOT_DIR=%~dp0"
 set "COMPOSE_DIR=%~dp0llm-chat"
 set "CLOUDFLARED=%~dp0cloudflared.exe"
 set "CLOUDFLARED_CONFIG=%~dp0cloudflared-config.yml"
-set "CLOUDFLARED_LOG=%~dp0logs\cloudflared.log"
+set "CLOUDFLARED_LOG=%~dp0llm-chat\logs\cloudflared.log"
 
 REM -- Check Docker is running --
 docker info > nul 2>&1
@@ -22,7 +22,7 @@ if %errorlevel% neq 0 (
 )
 
 REM -- Create logs directory (mounted into container) --
-if not exist "%~dp0logs" mkdir "%~dp0logs"
+if not exist "%~dp0llm-chat\logs" mkdir "%~dp0llm-chat\logs"
 
 echo [1/3] Building and starting all services...
 cd /d "%COMPOSE_DIR%"
@@ -81,7 +81,7 @@ echo   Qdrant:    http://localhost:6333/dashboard
 echo   Tunnel:    https://chatflow-live.com
 echo.
 echo   Logs:
-echo     App logs:    %~dp0logs\
+echo     App logs:    %~dp0llm-chat\logs\
 echo     Tunnel log:  %~dp0logs\cloudflared.log
 echo     Container:   docker compose logs -f backend
 echo.

@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { nextTick, watch, ref, computed, onMounted, onUnmounted } from 'vue'
-import type { Message, SendPayload, AgentStatus } from '../types'
+import type { Message, SendPayload, AgentStatus, CognitiveState } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
 import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
+import AgentStatusBubble from './AgentStatusBubble.vue'
 
 const props = defineProps<{
   messages: Message[]
   loading: boolean
   agentStatus: AgentStatus
-  hasCognitiveContent?: boolean  // 是否有历史认知内容（用于显示展开按钮）
-  panelOpen?: boolean             // 认知面板当前是否展开
+  cognitive: CognitiveState
+  hasCognitiveContent?: boolean
+  panelOpen?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -133,37 +135,50 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           </el-button>
         </el-tooltip>
 
-        <!-- 就绪 -->
-        <el-tag v-if="agentStatus.state === 'idle'" type="success" effect="plain" round :closable="false" class="s-tag">
-          {{ agentStatus.model || '就绪' }}
-        </el-tag>
+        <!-- 统一状态标签（单元素 transition，避免闪烁） -->
+        <transition name="tag-swap" mode="out-in">
+          <el-tag
+            v-if="agentStatus.state === 'idle'"
+            key="idle"
+            type="success" effect="plain" round :closable="false" class="s-tag"
+          ><span class="s-dot s-dot--green"></span>就绪</el-tag>
 
-        <!-- 完成 -->
-        <el-tag v-else-if="agentStatus.state === 'done'" type="success" effect="plain" round :closable="false" class="s-tag">
-          <el-icon style="margin-right:3px"><Check /></el-icon>完成
-        </el-tag>
+          <el-tag
+            v-else-if="agentStatus.state === 'done'"
+            key="done"
+            type="success" effect="plain" round :closable="false" class="s-tag"
+          ><el-icon style="margin-right:3px"><Check /></el-icon>完成</el-tag>
 
-        <!-- 路由中 -->
-        <el-tag v-else-if="agentStatus.state === 'routing'" type="info" effect="plain" round :closable="false" class="s-tag">
-          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>分析中
-        </el-tag>
+          <el-tag
+            v-else-if="agentStatus.state === 'saving'"
+            key="saving"
+            effect="plain" round :closable="false" class="s-tag s-tag--saving"
+          ><el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>保存中</el-tag>
 
-        <!-- 规划中 -->
-        <el-tag v-else-if="agentStatus.state === 'planning'" type="info" effect="plain" round :closable="false" class="s-tag" style="color:#8b5cf6;border-color:#c4b5fd">
-          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>规划中
-        </el-tag>
+          <el-tag
+            v-else-if="agentStatus.state === 'reflecting'"
+            key="reflecting"
+            effect="plain" round :closable="false" class="s-tag s-tag--reflect"
+          ><el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>反思中</el-tag>
 
-        <!-- 生成中 -->
-        <el-tag v-else-if="agentStatus.state === 'thinking'" type="info" effect="plain" round :closable="false" class="s-tag">
-          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
-          {{ agentStatus.model || '模型' }}
-        </el-tag>
+          <el-tag
+            v-else-if="agentStatus.state === 'tool'"
+            key="tool"
+            type="warning" effect="plain" round :closable="false" class="s-tag"
+          ><el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>{{ agentStatus.tool || '工具' }}</el-tag>
 
-        <!-- 工具调用 -->
-        <el-tag v-else-if="agentStatus.state === 'tool'" type="warning" effect="plain" round :closable="false" class="s-tag">
-          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
-          {{ agentStatus.tool || '工具调用' }}
-        </el-tag>
+          <el-tag
+            v-else
+            :key="agentStatus.state"
+            type="info" effect="plain" round :closable="false" class="s-tag"
+            :style="agentStatus.state === 'planning' ? 'color:#8b5cf6;border-color:#c4b5fd' : ''"
+          >
+            <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
+            {{ agentStatus.state === 'routing' ? '分析中'
+             : agentStatus.state === 'planning' ? '规划中'
+             : '推理中' }}
+          </el-tag>
+        </transition>
 
         <!-- 停止按钮 -->
         <el-button
@@ -228,12 +243,13 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             :key="i"
             :message="msg"
           />
-          <!-- 打字指示器 -->
+          <!-- 阶段状态气泡（替换旧的三点打字指示器） -->
           <div
             v-if="loading && messages.length > 0 && messages[messages.length-1].role === 'assistant' && !messages[messages.length-1].content"
-            class="typing"
+            class="status-bubble-wrap"
           >
-            <span></span><span></span><span></span>
+            <div class="assistant-avatar-dot"></div>
+            <AgentStatusBubble :status="agentStatus" :cognitive="cognitive" />
           </div>
         </div>
       </div>
@@ -282,14 +298,15 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   100% { background-position: -200% center; }
 }
 
-/* Header */
+/* ── Header ── */
 .chat-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
-  background: rgba(243,244,248,0.8);
-  backdrop-filter: blur(8px);
+  padding: 11px 20px;
+  background: rgba(250,250,252,0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--cf-border-soft);
   flex-shrink: 0;
   z-index: 10;
@@ -297,64 +314,84 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 .header-left {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   color: var(--cf-text-2);
 }
-.header-logo-icon { flex-shrink: 0; }
+.header-logo-icon { flex-shrink: 0; opacity: 0.75; }
 .header-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--cf-text-1);
+  letter-spacing: -0.2px;
 }
 .header-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
 }
-/* ── 状态标签 el-tag 全局 override ── */
+
+/* ── 状态标签 ── */
 :deep(.s-tag) {
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
-  padding: 0 12px;
-  height: 28px;
-  box-shadow: 0 1px 5px rgba(0,0,0,0.07);
+  padding: 0 11px;
+  height: 27px;
+  border-radius: 99px !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   transition: all 0.2s;
+  letter-spacing: 0.1px;
 }
-/* 旋转加载图标 */
+.s-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+.s-dot--green {
+  background: #22c55e;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.5); }
+  50%       { box-shadow: 0 0 0 4px rgba(34,197,94,0); }
+}
 .s-spin {
   font-size: 12px !important;
-  animation: s-rotate 1s linear infinite;
+  animation: s-rotate 0.9s linear infinite;
   transform-origin: center;
 }
 @keyframes s-rotate { to { transform: rotate(360deg); } }
 
-/* 停止按钮 */
+/* ── 停止按钮 ── */
 :deep(.stop-btn) {
   font-family: inherit;
-  height: 28px;
+  height: 27px;
   padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
-  box-shadow: 0 1px 4px rgba(220,38,38,0.15);
+  border-radius: 99px !important;
+  box-shadow: 0 1px 5px rgba(220,38,38,0.18);
+  transition: all 0.15s;
 }
 :deep(.stop-btn:hover) {
-  box-shadow: 0 2px 8px rgba(220,38,38,0.25);
+  box-shadow: 0 3px 10px rgba(220,38,38,0.28);
   transform: translateY(-1px);
 }
 
-/* 空状态 */
+/* ── 空状态 ── */
 .empty-view {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 32px 28px 48px;
+  padding: 32px 28px 52px;
   gap: 28px;
 }
 .hero {
@@ -362,37 +399,42 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .hero-icon-wrap {
-  width: 68px; height: 68px;
-  border-radius: 20px;
-  background: #ffffff;
-  border: 1.5px solid #e5e7eb;
+  width: 72px; height: 72px;
+  border-radius: 22px;
+  background: linear-gradient(145deg, #ffffff 0%, #f5f3ff 100%);
+  border: 1.5px solid #e0deff;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 4px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.07), 0 1px 3px rgba(0,0,0,0.05);
+  margin-bottom: 2px;
+  box-shadow: 0 4px 20px rgba(99,102,241,0.12), 0 1px 4px rgba(0,0,0,0.06);
 }
 .hero-title {
-  font-size: 28px;
-  font-weight: 700;
+  font-size: 30px;
+  font-weight: 800;
   color: var(--cf-text-1);
-  letter-spacing: -0.5px;
+  letter-spacing: -0.8px;
   line-height: 1.2;
+  background: linear-gradient(135deg, #0f172a 0%, #334155 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 .hero-sub {
   font-size: 13.5px;
   color: var(--cf-text-4);
   font-weight: 400;
+  letter-spacing: 0.1px;
 }
 
-/* 快捷操作 */
+/* ── 快捷操作 ── */
 .suggestions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 9px;
   justify-content: center;
   max-width: 680px;
 }
@@ -403,37 +445,33 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   padding: 9px 16px;
   background: var(--cf-card);
   border: 1.5px solid var(--cf-border);
-  border-radius: 22px;
+  border-radius: 24px;
   font-size: 13px;
   font-weight: 500;
   color: var(--cf-text-2);
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.18s;
+  transition: all 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
   box-shadow: var(--cf-shadow-xs);
 }
 .sug-card:hover {
   background: var(--cf-active);
-  border-color: #a5b4fc;
+  border-color: #c4b5fd;
   color: var(--cf-indigo);
-  transform: translateY(-2px);
-  box-shadow: var(--cf-shadow-sm);
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: 0 6px 20px rgba(99,102,241,0.18);
 }
-.sug-icon {
-  font-size: 14px;
-}
-.sug-label {
-  font-weight: 500;
-}
+.sug-icon { font-size: 14px; }
+.sug-label { font-weight: 500; }
 .empty-info {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--cf-text-5);
 }
 
-/* 对话区 */
+/* ── 对话区 ── */
 .chat-body {
   flex: 1;
   display: flex;
@@ -443,7 +481,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 .messages-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 0 16px;
+  padding: 20px 0 12px;
 }
 .messages-inner {
   max-width: 740px;
@@ -460,23 +498,28 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   width: 100%;
 }
 
-/* 打字指示器 */
-.typing {
+/* ── 状态气泡容器 ── */
+.status-bubble-wrap {
   display: flex;
-  gap: 5px;
-  padding: 10px 0 0 44px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
 }
-.typing span {
-  width: 7px; height: 7px;
+.assistant-avatar-dot {
+  width: 30px; height: 30px;
   border-radius: 50%;
-  background: var(--cf-indigo);
-  opacity: 0.4;
-  animation: bounce 1.3s ease-in-out infinite;
+  background: linear-gradient(135deg, #6366f1, #a5b4fc);
+  flex-shrink: 0;
+  margin-top: 2px;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.28);
 }
-.typing span:nth-child(2) { animation-delay: 0.18s; }
-.typing span:nth-child(3) { animation-delay: 0.36s; }
-@keyframes bounce {
-  0%, 80%, 100% { transform: translateY(0); opacity: 0.3; }
-  40% { transform: translateY(-7px); opacity: 1; }
-}
+
+/* ── 标签切换过渡 ── */
+.tag-swap-enter-active,
+.tag-swap-leave-active { transition: opacity .15s, transform .15s; }
+.tag-swap-enter-from   { opacity: 0; transform: translateY(-4px) scale(.94); }
+.tag-swap-leave-to     { opacity: 0; transform: translateY(4px)  scale(.94); }
+
+:deep(.s-tag--saving)  { color: #64748b !important; border-color: #cbd5e1 !important; }
+:deep(.s-tag--reflect) { color: #059669 !important; border-color: #6ee7b7 !important; }
 </style>

@@ -7,6 +7,8 @@
   2. 滑动窗口内的历史消息（HumanMessage / AIMessage）
      ─ forget_mode=True 时只保留最近 SHORT_TERM_FORGET_TURNS 轮
 """
+from datetime import date
+
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from config import SHORT_TERM_FORGET_TURNS, SHORT_TERM_MAX_TURNS, DEFAULT_SYSTEM_PROMPT
@@ -32,13 +34,11 @@ def build_messages(
         list[BaseMessage]，可直接传给 ChatOllama.ainvoke()
     """
     # ── 1. 系统提示 ────────────────────────────────────────────────────────────
+    base_prompt = conv.system_prompt if conv and conv.system_prompt else DEFAULT_SYSTEM_PROMPT
+    today = date.today().strftime("%Y年%m月%d日")
     system_parts: list[str] = [
-        (conv.system_prompt if conv and conv.system_prompt else DEFAULT_SYSTEM_PROMPT)
+        f"{base_prompt}\n\n当前日期：{today}。搜索时直接用核心关键词，不要手动添加年份。"
     ]
-
-    if tool_names:
-        tools_str = "、".join(tool_names)
-        system_parts.append(f"\n你拥有以下工具可以调用：{tools_str}。遇到需要计算、搜索、查询时间等任务请主动使用。")
 
     if not forget_mode:
         # 中期摘要

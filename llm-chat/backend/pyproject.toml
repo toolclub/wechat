@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm-chat-backend"
 version = "2.0.0"
-description = "本地 LLM 对话后端服务 - LangChain 重构版"
+description = "LLM 对话后端服务 - LangChain 重构版"
 requires-python = ">=3.11"
 dependencies = [
     # ── Web 框架 ──
@@ -35,12 +35,20 @@ dependencies = [
     "pydantic-settings>=2.3.0",
 
     # ── 内置工具依赖 ──
-    "ddgs>=1.0.0",
+    "ddgs>=9.0.0",  # 使用 AsyncDDGS 原生异步接口，不阻塞 event loop
+
+    # ── 环境变量加密 ──
+    "cryptography>=42.0.0",
+    "pyyaml>=6.0.0",
 
     # ── 数据库 ──
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",
     "greenlet>=3.0.0",
+
+     # ── 语义缓存 ──
+    "redis[hiredis]>=5.0.0",
+    "numpy>=1.26.0",
 ]
 
 [project.scripts]

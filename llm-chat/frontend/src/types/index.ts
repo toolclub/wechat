@@ -28,9 +28,20 @@ export interface PlanStep {
   result?: string
 }
 
+export interface StepRecord {
+  index: number
+  title: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  toolCalls: ToolCallRecord[]
+  thinking: string
+  content: string
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
+  steps?: StepRecord[]
   images?: string[]
   timestamp?: number
   toolCalls?: ToolCallRecord[]
@@ -58,7 +69,7 @@ export interface SendPayload {
 }
 
 export interface AgentStatus {
-  state: 'idle' | 'routing' | 'planning' | 'thinking' | 'tool' | 'done'
+  state: 'idle' | 'routing' | 'planning' | 'thinking' | 'tool' | 'reflecting' | 'saving' | 'done'
   model: string
   tool?: string
   intent?: string

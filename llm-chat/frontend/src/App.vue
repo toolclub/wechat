@@ -70,6 +70,7 @@ const currentGoal = computed(() => {
         :messages="chat.messages.value"
         :loading="chat.loading.value"
         :agentStatus="chat.agentStatus.value"
+        :cognitive="chat.cognitive.value"
         :has-cognitive-content="hasCognitiveContent"
         :panel-open="panelOpen"
         :class="showCognitivePanel ? 'chat-with-panel' : 'chat-full'"
@@ -96,22 +97,47 @@ const currentGoal = computed(() => {
 
 <style>
 :root {
-  --cf-bg: #f3f4f8;
-  --cf-card: #ffffff;
-  --cf-border: #e5e7eb;
-  --cf-border-soft: #ececf1;
-  --cf-text-1: #111827;
-  --cf-text-2: #374151;
-  --cf-text-3: #6b7280;
-  --cf-text-4: #9ca3af;
-  --cf-text-5: #d1d5db;
-  --cf-indigo: #6366f1;
-  --cf-active: #f5f3ff;
-  --cf-shadow-xs: 0 1px 3px rgba(0,0,0,0.06);
-  --cf-shadow-sm: 0 2px 8px rgba(0,0,0,0.08);
-  --cf-sidebar-w: 220px;
+  /* 背景 & 表面 */
+  --cf-bg:          #f0f2f7;
+  --cf-sidebar:     #fafafa;
+  --cf-card:        #ffffff;
+  --cf-hover:       #f4f5f9;
+  --cf-active:      #eeecff;
+
+  /* 边框 */
+  --cf-border:      #e4e7ef;
+  --cf-border-soft: #eceef4;
+
+  /* 文字 */
+  --cf-text-1: #0f172a;
+  --cf-text-2: #334155;
+  --cf-text-3: #64748b;
+  --cf-text-4: #94a3b8;
+  --cf-text-5: #cbd5e1;
+
+  /* 主色 */
+  --cf-indigo:  #6366f1;
+  --cf-indigo-d:#4f46e5;
+  --cf-green:   #22c55e;
+  --cf-red:     #ef4444;
+  --cf-amber:   #f59e0b;
+
+  /* 阴影 */
+  --cf-shadow-xs: 0 1px 3px rgba(15,23,42,0.06);
+  --cf-shadow-sm: 0 2px 8px rgba(15,23,42,0.08);
+  --cf-shadow-md: 0 4px 16px rgba(15,23,42,0.10);
+  --cf-shadow-lg: 0 8px 32px rgba(15,23,42,0.12);
+
+  /* 圆角 */
+  --cf-radius-sm: 8px;
+  --cf-radius-md: 12px;
+  --cf-radius-lg: 16px;
+
+  --cf-sidebar-w: 232px;
 }
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 html, body {
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
@@ -120,7 +146,15 @@ html, body {
   color: var(--cf-text-1);
   background: var(--cf-bg);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
+/* 全局滚动条 */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
 #app { height: 100%; }
 </style>
 

@@ -1,46 +1,51 @@
 """
 LangGraph Agent 图构建与全局单例管理
 
-认知图结构（启用路由时）：
+完整图结构（ROUTER_ENABLED=true）：
     START
       │
       ▼
-    route_model        ← 判断意图（chat/code/search/search_code）
+    semantic_cache_check   ← 语义缓存检查（最前置节点）
       │
-      ▼
-    retrieve_context   ← 检索 RAG + 组装历史消息
+    cache_routing?
+      ├── save_response     ← Cache HIT：跳过 LLM 全流程，直接保存
       │
-      ▼
-    planner            ← 生成执行计划（search/search_code 路由触发）
-      │
-      ▼
-    call_model         ← LLM 推理（当前步骤）
-      │
-    should_continue?
-      ├── "tools"      ← ToolNode 并发执行工具
-      │      │
-      │      ▼
-      │   call_model_after_tool  ← 工具后 LLM 综合（answer_model）
-      │      │
-      │   should_continue_after_tool?
-      │      ├── "tools"         ← 继续调用更多工具
-      │      └── "reflector"     ← 评估步骤完成情况
-      │
-      └── "reflector"  ← 无工具调用时直接评估
-               │
-           reflector_routing?
-               ├── "call_model"    ← 继续下一步（continue/retry）
-               └── "save_response" ← 所有步骤完成
-                        │
-                        ▼
-                   compress_memory
-                        │
-                        ▼
-                       END
+      └── route_model       ← Cache MISS：进入正常流程
+            │
+            ▼
+          retrieve_context  ← 检索 RAG + 组装历史消息
+            │
+            ▼
+          planner           ← 生成执行计划（search/search_code 路由触发）
+            │
+            ▼
+          call_model        ← LLM 推理（当前步骤）
+            │
+          should_continue?
+            ├── "tools"      ← ToolNode 并发执行工具
+            │      │
+            │      ▼
+            │   call_model_after_tool  ← 工具后 LLM 综合（answer_model）
+            │      │
+            │   should_continue_after_tool?
+            │      ├── "tools"         ← 继续调用更多工具
+            │      └── "reflector"     ← 评估步骤完成情况
+            │
+            └── "reflector"  ← 无工具调用时直接评估
+                     │
+                 reflector_routing?
+                     ├── "call_model"    ← 继续下一步（continue/retry）
+                     └── "save_response" ← 所有步骤完成
+                              │
+                              ▼
+                         compress_memory
+                              │
+                              ▼
+                             END
 
 无计划时（chat/code 路由）：
+    semantic_cache_check → (miss) → route_model → retrieve_context → planner →
     call_model → (无工具) → save_response → compress_memory → END
-    call_model → tools → call_model_after_tool → save_response → compress_memory → END
 """
 import logging
 from typing import Any
@@ -50,7 +55,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import CHAT_MODEL, ROUTER_ENABLED
-from graph.edges import should_continue, should_continue_after_tool, reflector_routing
+from graph.edges import cache_routing, should_continue, should_continue_after_tool, reflector_routing
 from graph.nodes import (
     compress_memory,
     make_call_model,
@@ -60,6 +65,7 @@ from graph.nodes import (
     make_retrieve_context,
     route_model,
     save_response,
+    semantic_cache_check,
 )
 from graph.state import GraphState
 
@@ -81,6 +87,7 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     graph = StateGraph(GraphState)
 
     # ── 注册节点 ────────────────────────────────────────────────────────────
+    graph.add_node("semantic_cache_check", semantic_cache_check)
     graph.add_node("retrieve_context", retrieve_fn)
     graph.add_node("planner", planner_fn)
     graph.add_node("call_model", call_model_fn)
@@ -131,13 +138,24 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     graph.add_edge("save_response", "compress_memory")
     graph.add_edge("compress_memory", END)
 
-    # ── 入口（路由模式 vs 直连） ─────────────────────────────────────────────
+    # ── 入口：semantic_cache_check 始终是第一个节点 ──────────────────────────
+    graph.add_edge(START, "semantic_cache_check")
+
+    # cache_routing：命中 → save_response；未命中 → 第一个实际处理节点
     if ROUTER_ENABLED:
         graph.add_node("route_model", route_model)
-        graph.add_edge(START, "route_model")
+        graph.add_conditional_edges(
+            "semantic_cache_check",
+            cache_routing,
+            {"save_response": "save_response", "after_cache": "route_model"},
+        )
         graph.add_edge("route_model", "retrieve_context")
     else:
-        graph.add_edge(START, "retrieve_context")
+        graph.add_conditional_edges(
+            "semantic_cache_check",
+            cache_routing,
+            {"save_response": "save_response", "after_cache": "retrieve_context"},
+        )
 
     return graph.compile()
 

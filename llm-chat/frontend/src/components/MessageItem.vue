@@ -2,8 +2,8 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
-import type { Message } from '../types'
-import { CopyDocument, Check, Search, Clock, Cpu, Document } from '@element-plus/icons-vue'
+import type { Message, ToolCallRecord, StepRecord } from '../types'
+import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, Close } from '@element-plus/icons-vue'
 import CodePreview from './CodePreview.vue'
 
 const PREVIEWABLE = new Set(['html','svg','css','javascript','js','typescript','ts','vue','jsx','tsx','react'])
@@ -122,19 +122,41 @@ markedInstance.use({
 // ─── Props ───
 const props = defineProps<{ message: Message }>()
 
-// ─── 内容渲染 ───
-const renderedContent = computed(() => {
-  if (props.message.role !== 'assistant') return ''
-  let content = (props.message.content || '')
-    .replace(/<think>[\s\S]*?<\/think>\n*/g, '')   // 去除完整 think 块
-  // 流式进行中时可能只有开头的 <think>，直接隐藏未完成的推理部分
+// ─── 统一渲染段落：多步模式每步一段，普通模式一段 ───────────────────────────
+interface Section {
+  step: StepRecord | null   // null = 普通无步骤消息
+  toolCalls: ToolCallRecord[]
+  thinking: string
+  content: string
+}
+const sections = computed<Section[]>(() => {
+  if (props.message.role !== 'assistant') return []
+  if (props.message.steps?.length) {
+    return props.message.steps.map(step => ({
+      step,
+      toolCalls: step.toolCalls,
+      thinking: step.thinking,
+      content: step.content,
+    }))
+  }
+  return [{
+    step: null,
+    toolCalls: props.message.toolCalls ?? [],
+    thinking: props.message.thinking ?? '',
+    content: props.message.content ?? '',
+  }]
+})
+
+// ─── Markdown 内容渲染（去除 think 块残留） ─────────────────────────────────
+function renderContent(raw: string): string {
+  let content = raw.replace(/<think>[\s\S]*?<\/think>\n*/g, '')
   const thinkStart = content.indexOf('<think>')
   if (thinkStart !== -1) content = content.slice(0, thinkStart)
   return markedInstance.parse(content.trim()) as string
-})
+}
 
-// ─── 代码块事件委托 ───
-const contentEl = ref<HTMLElement>()
+// ─── 代码块事件委托（挂载在整个 ai-content-wrap 上） ────────────────────────
+const contentWrapEl = ref<HTMLElement>()
 const previewVisible = ref(false)
 const previewCode = ref('')
 const previewLang = ref('html')
@@ -167,35 +189,55 @@ function handleContentClick(e: MouseEvent) {
   }
 }
 
-onMounted(() => contentEl.value?.addEventListener('click', handleContentClick))
-onUnmounted(() => contentEl.value?.removeEventListener('click', handleContentClick))
+onMounted(() => contentWrapEl.value?.addEventListener('click', handleContentClick))
+onUnmounted(() => contentWrapEl.value?.removeEventListener('click', handleContentClick))
 
 // ─── 整条消息复制 ───
 const copied = ref(false)
 async function copy() {
   try {
-    await navigator.clipboard.writeText(props.message.content)
+    const text = props.message.steps?.length
+      ? props.message.steps.map(s => s.content).filter(Boolean).join('\n\n')
+      : props.message.content
+    await navigator.clipboard.writeText(text)
     copied.value = true
     setTimeout(() => { copied.value = false }, 2000)
   } catch {}
 }
 
-// ─── 工具折叠 ───
-const collapsed = ref<Record<number, boolean>>({})
-function toggle(i: number) { collapsed.value[i] = !collapsed.value[i] }
-function isCollapsed(i: number) { return collapsed.value[i] ?? false }
+// ─── 推理过程折叠（key = sectionIndex） ────────────────────────────────────
+const thinkExpanded = ref<Record<number, boolean>>({})
+function toggleThink(si: number) { thinkExpanded.value[si] = !thinkExpanded.value[si] }
+function isThinkExpanded(si: number) { return thinkExpanded.value[si] ?? false }
 
+// ─── 工具折叠（key = "sectionIndex-toolIndex"） ─────────────────────────────
+const collapsed = ref<Record<string, boolean>>({})
+function toggle(si: number, ti: number) {
+  const k = `${si}-${ti}`
+  collapsed.value[k] = !collapsed.value[k]
+}
+function isCollapsed(si: number, ti: number) { return collapsed.value[`${si}-${ti}`] ?? false }
+
+// 工具执行完成后 1.2s 自动折叠
 watch(
-  () => props.message.toolCalls?.map(t => t.done),
-  (dones, prev) => {
-    dones?.forEach((done, i) => {
-      if (done && !prev?.[i]) {
-        setTimeout(() => { collapsed.value[i] = true }, 1200)
+  () => sections.value.flatMap((sec, si) =>
+    sec.toolCalls.map((tc, ti) => ({ si, ti, done: tc.done }))
+  ),
+  (items, prev) => {
+    items.forEach((item, idx) => {
+      if (item.done && !prev?.[idx]?.done) {
+        setTimeout(() => { collapsed.value[`${item.si}-${item.ti}`] = true }, 1200)
       }
     })
   },
   { deep: true }
 )
+
+// ─── 整条消息是否有可复制内容 ───────────────────────────────────────────────
+const hasContent = computed(() => {
+  if (props.message.steps?.length) return props.message.steps.some(s => s.content)
+  return !!props.message.content
+})
 </script>
 
 <template>
@@ -258,131 +300,153 @@ watch(
           <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#111827" opacity="0.4"/>
         </svg>
       </div>
-      <div class="ai-content-wrap">
 
-        <!-- 工具调用块 -->
-        <div v-if="message.toolCalls?.length" class="tool-calls">
-          <div v-for="(tc, i) in message.toolCalls" :key="i"
-               :class="['tool-block', (tc.name === 'web_search' || tc.name === 'fetch_webpage') ? 'tool-block-sources' : '']">
+      <!-- ai-content-wrap 挂载代码块点击委托 -->
+      <div class="ai-content-wrap" ref="contentWrapEl">
 
-            <!-- web_search -->
-            <template v-if="tc.name === 'web_search'">
-              <div class="tool-header tool-header-flat">
-                <span class="tool-status-icon">
-                  <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                    <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                    <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                  </svg>
-                </span>
-                <el-icon style="font-size:13px; color:#6366f1"><Search /></el-icon>
-                <span class="tool-label">搜索了网络</span>
-                <span class="tool-query">「{{ (tc.input as any).query }}」</span>
-                <span v-if="!tc.done" class="tool-pending">搜索中...</span>
-              </div>
-              <div v-if="tc.searchItems?.length" class="search-url-list">
-                <a
-                  v-for="(item, si) in tc.searchItems"
-                  :key="si"
-                  :href="item.url"
-                  target="_blank"
-                  class="search-url-row"
-                  :title="item.title || item.url"
-                >
-                  <span class="url-status">
-                    <svg v-if="item.status === 'done'" width="12" height="12" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
-                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.4" stroke-linecap="round"/>
+        <!-- ── 统一渲染段落（步骤或普通消息） ── -->
+        <div
+          v-for="(sec, si) in sections" :key="si"
+          :class="['section-wrap', { 'has-step': !!sec.step, 'step-done': sec.step?.status === 'done', 'step-running': sec.step?.status === 'running', 'step-failed': sec.step?.status === 'failed' }]"
+        >
+
+          <!-- 步骤标题行（多步时显示） -->
+          <div v-if="sec.step" class="step-hdr">
+            <div class="step-badge" :class="sec.step.status">
+              <el-icon v-if="sec.step.status === 'done'" class="step-icon"><Check /></el-icon>
+              <el-icon v-else-if="sec.step.status === 'running'" class="step-icon step-spin"><Loading /></el-icon>
+              <el-icon v-else-if="sec.step.status === 'failed'" class="step-icon"><Close /></el-icon>
+              <span v-else class="step-num">{{ si + 1 }}</span>
+            </div>
+            <span class="step-title">{{ sec.step.title }}</span>
+          </div>
+
+          <!-- 工具调用块 -->
+          <div v-if="sec.toolCalls.length" class="tool-calls">
+            <div v-for="(tc, ti) in sec.toolCalls" :key="ti"
+                 :class="['tool-block', (tc.name === 'web_search' || tc.name === 'fetch_webpage') ? 'tool-block-sources' : '']">
+
+              <!-- web_search -->
+              <template v-if="tc.name === 'web_search'">
+                <div class="tool-header tool-header-flat">
+                  <span class="tool-status-icon">
+                    <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
-                    <svg v-else-if="item.status === 'fail'" width="12" height="12" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6" stroke="#ef4444" stroke-width="1.5"/>
-                      <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
-                    </svg>
-                    <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" class="spin">
+                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
                       <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
                     </svg>
                   </span>
-                  <img
-                    :src="faviconUrl(item.url)"
-                    class="url-favicon"
-                    @error="($event.target as HTMLImageElement).style.display='none'"
-                  />
-                  <span class="url-text">{{ item.url }}</span>
-                </a>
-              </div>
-            </template>
-
-            <!-- fetch_webpage -->
-            <template v-else-if="tc.name === 'fetch_webpage'">
-              <div class="tool-header tool-header-flat">
-                <span class="tool-status-icon">
-                  <svg v-if="tc.done && tc.fetchStatus === 'fail'" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="6.5" stroke="#ef4444" stroke-width="1.5"/>
-                    <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
-                  </svg>
-                  <svg v-else-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                    <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                    <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                  </svg>
-                </span>
-                <el-icon style="font-size:13px; color:#0ea5e9"><Document /></el-icon>
-                <span class="tool-label">{{ tc.done && tc.fetchStatus === 'fail' ? '读取失败' : (tc.done ? '读取了网页' : '正在阅读') }}</span>
-                <span v-if="(tc.input as any).url" class="tool-query">
-                  <a :href="(tc.input as any).url" target="_blank" class="fetch-url-link" @click.stop>
-                    <img
-                      :src="faviconUrl((tc.input as any).url)"
-                      class="url-favicon"
-                      style="margin-right:3px"
-                      @error="($event.target as HTMLImageElement).style.display='none'"
-                    />{{ (tc.input as any).url }}
-                  </a>
-                </span>
-                <span v-if="!tc.done" class="tool-pending">读取中...</span>
-              </div>
-            </template>
-
-            <!-- 其他工具 -->
-            <template v-else>
-              <div class="tool-header" @click="toggle(i)">
-                <span class="tool-status-icon">
-                  <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                    <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                    <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                  </svg>
-                </span>
-                <el-icon :style="{ color: toolMeta(tc.name).color }" style="font-size:13px">
-                  <component :is="toolMeta(tc.name).icon" />
-                </el-icon>
-                <span class="tool-label">{{ toolMeta(tc.name).label }}</span>
-                <span v-if="!tc.done" class="tool-pending">执行中...</span>
-                <span class="tool-chevron" :class="{ open: !isCollapsed(i) }">›</span>
-              </div>
-              <Transition name="slide">
-                <div v-show="!isCollapsed(i)" class="tool-body">
-                  <div class="tool-output-plain">
-                    <span class="tool-tag">结果</span>
-                    <span>{{ tc.output }}</span>
-                  </div>
+                  <el-icon style="font-size:13px; color:#6366f1"><Search /></el-icon>
+                  <span class="tool-label">搜索了网络</span>
+                  <span class="tool-query">「{{ (tc.input as any).query }}」</span>
+                  <span v-if="!tc.done" class="tool-pending">搜索中...</span>
                 </div>
-              </Transition>
-            </template>
+                <div v-if="tc.searchItems?.length" class="search-url-list">
+                  <a v-for="(item, ii) in tc.searchItems" :key="ii"
+                     :href="item.url" target="_blank"
+                     class="search-url-row" :title="item.title || item.url">
+                    <span class="url-status">
+                      <svg v-if="item.status === 'done'" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
+                        <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.4" stroke-linecap="round"/>
+                      </svg>
+                      <svg v-else-if="item.status === 'fail'" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <circle cx="8" cy="8" r="6" stroke="#ef4444" stroke-width="1.5"/>
+                        <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                      </svg>
+                      <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" class="spin">
+                        <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                      </svg>
+                    </span>
+                    <img :src="faviconUrl(item.url)" class="url-favicon"
+                         @error="($event.target as HTMLImageElement).style.display='none'" />
+                    <span class="url-text">{{ item.url }}</span>
+                  </a>
+                </div>
+              </template>
 
+              <!-- fetch_webpage -->
+              <template v-else-if="tc.name === 'fetch_webpage'">
+                <div class="tool-header tool-header-flat">
+                  <span class="tool-status-icon">
+                    <svg v-if="tc.done && tc.fetchStatus === 'fail'" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6.5" stroke="#ef4444" stroke-width="1.5"/>
+                      <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                    </svg>
+                    <svg v-else-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
+                      <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                    </svg>
+                  </span>
+                  <el-icon style="font-size:13px; color:#0ea5e9"><Document /></el-icon>
+                  <span class="tool-label">{{ tc.done && tc.fetchStatus === 'fail' ? '读取失败' : (tc.done ? '读取了网页' : '正在阅读') }}</span>
+                  <span v-if="(tc.input as any).url" class="tool-query">
+                    <a :href="(tc.input as any).url" target="_blank" class="fetch-url-link" @click.stop>
+                      <img :src="faviconUrl((tc.input as any).url)" class="url-favicon" style="margin-right:3px"
+                           @error="($event.target as HTMLImageElement).style.display='none'" />
+                      {{ (tc.input as any).url }}
+                    </a>
+                  </span>
+                  <span v-if="!tc.done" class="tool-pending">读取中...</span>
+                </div>
+              </template>
+
+              <!-- 其他工具 -->
+              <template v-else>
+                <div class="tool-header" @click="toggle(si, ti)">
+                  <span class="tool-status-icon">
+                    <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
+                      <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                    </svg>
+                  </span>
+                  <el-icon :style="{ color: toolMeta(tc.name).color }" style="font-size:13px">
+                    <component :is="toolMeta(tc.name).icon" />
+                  </el-icon>
+                  <span class="tool-label">{{ toolMeta(tc.name).label }}</span>
+                  <span v-if="!tc.done" class="tool-pending">执行中...</span>
+                  <span class="tool-chevron" :class="{ open: !isCollapsed(si, ti) }">›</span>
+                </div>
+                <Transition name="slide">
+                  <div v-show="!isCollapsed(si, ti)" class="tool-body">
+                    <div class="tool-output-plain">
+                      <span class="tool-tag">结果</span>
+                      <span>{{ tc.output }}</span>
+                    </div>
+                  </div>
+                </Transition>
+              </template>
+
+            </div>
           </div>
-        </div>
 
-        <!-- Markdown 内容 -->
-        <div ref="contentEl" class="ai-content markdown-body" v-html="renderedContent"></div>
+          <!-- 推理过程（可折叠） -->
+          <div v-if="sec.thinking" class="think-block">
+            <button class="think-toggle" @click="toggleThink(si)">
+              <el-icon class="think-icon" :class="{ expanded: isThinkExpanded(si) }"><ArrowDown /></el-icon>
+              <span>推理过程</span>
+            </button>
+            <Transition name="think-slide">
+              <div v-if="isThinkExpanded(si)" class="think-body">{{ sec.thinking }}</div>
+            </Transition>
+          </div>
+
+          <!-- Markdown 内容 -->
+          <div v-if="sec.content" class="ai-content markdown-body" v-html="renderContent(sec.content)"></div>
+
+        </div>
+        <!-- /sections -->
 
         <!-- 操作行 -->
-        <div v-if="message.content" class="ai-actions">
+        <div v-if="hasContent" class="ai-actions">
           <el-tooltip :content="copied ? '已复制！' : '复制内容'" placement="top" :show-after="300">
             <button class="action-btn" :class="{ copied }" @click="copy">
               <el-icon><component :is="copied ? Check : CopyDocument" /></el-icon>
@@ -574,9 +638,58 @@ watch(
   color: var(--cf-text-1);
   letter-spacing: -0.1px;
 }
+/* think-block 在多步骤模式内的间距 */
+.section-wrap.has-step .think-block { margin-bottom: 8px; }
+
+/* ── 多步骤段落 ── */
+.section-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.section-wrap.has-step {
+  border-left: 2px solid #e5e7eb;
+  padding-left: 14px;
+  margin-bottom: 16px;
+  padding-bottom: 4px;
+}
+.section-wrap.has-step.step-running { border-left-color: #93c5fd; }
+.section-wrap.has-step.step-done    { border-left-color: #6ee7b7; }
+.section-wrap.has-step.step-failed  { border-left-color: #fca5a5; }
+
+/* 步骤标题行 */
+.step-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.step-badge {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 700;
+  transition: all .2s;
+}
+.step-badge.pending { background: #f3f4f6; color: #9ca3af; border: 1.5px solid #e5e7eb; }
+.step-badge.running { background: #dbeafe; color: #2563eb; border: 1.5px solid #93c5fd; }
+.step-badge.done    { background: #d1fae5; color: #059669; border: 1.5px solid #6ee7b7; }
+.step-badge.failed  { background: #fee2e2; color: #dc2626; border: 1.5px solid #fca5a5; }
+.step-icon  { font-size: 11px; }
+.step-spin  { animation: spin 1.1s linear infinite; }
+.step-num   { font-size: 10px; line-height: 1; }
+.step-title {
+  font-size: 12.5px; font-weight: 600; color: #374151;
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.section-wrap.step-running .step-title { color: #1d4ed8; }
+.section-wrap.step-done    .step-title { color: #6b7280; }
+.section-wrap.step-failed  .step-title { color: #dc2626; }
 
 /* ── 工具调用 ── */
-.tool-calls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.tool-calls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .tool-block {
   border: 1px solid var(--cf-border);
   border-radius: 12px;
@@ -772,4 +885,50 @@ watch(
 .markdown-body th { background: #f3f4f8; font-weight: 600; color: #374151; font-size: 13px; }
 .markdown-body tr:nth-child(even) td { background: #f9fafb; }
 .markdown-body tr:hover td { background: #eef2ff; }
+
+/* ── 推理过程块 ── */
+.think-block {
+  border: 1px solid #e9d5ff;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #faf5ff;
+  margin-bottom: 6px;
+}
+.think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 7px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: #7c3aed;
+  font-weight: 600;
+  text-align: left;
+  user-select: none;
+}
+.think-toggle:hover { background: #f3e8ff; }
+.think-icon {
+  font-size: 11px;
+  transition: transform 0.2s;
+  transform: rotate(-90deg);
+}
+.think-icon.expanded { transform: rotate(0deg); }
+.think-body {
+  padding: 8px 12px 10px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid #e9d5ff;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.think-slide-enter-active,
+.think-slide-leave-active { transition: all 0.2s ease; overflow: hidden; }
+.think-slide-enter-from,
+.think-slide-leave-to { max-height: 0 !important; opacity: 0; padding-top: 0; padding-bottom: 0; }
 </style>

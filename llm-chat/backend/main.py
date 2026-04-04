@@ -39,6 +39,7 @@ from layers.extension import apply_cors
 from db.database import init_engine, get_engine
 from db.models import Base
 from logging_config import setup_logging
+from cache.factory import init_cache
 from config import (
     CHAT_MODEL,
     BACKEND_HOST,
@@ -46,6 +47,7 @@ from config import (
     EMBEDDING_MODEL,
     LONGTERM_MEMORY_ENABLED,
     MCP_SERVERS,
+    SEMANTIC_CACHE_ENABLED,
     API_BASE_URL,
     DATABASE_URL,
     LOG_DIR,
@@ -73,7 +75,13 @@ async def lifespan(app: FastAPI):
     # 2. 从数据库加载对话到内存缓存
     await memory_store.init()
 
-    # 3. 初始化 Qdrant
+    # 3. 初始化语义缓存（Redis Search）
+    try:
+        await init_cache()
+    except Exception as exc:
+        logger.error("语义缓存初始化失败（已降级为 NullCache）: %s", exc)
+
+    # 4. 初始化 Qdrant
     if LONGTERM_MEMORY_ENABLED:
         try:
             await rag_retriever.init_collection()
@@ -82,21 +90,22 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("长期记忆（RAG）已禁用，跳过 Qdrant 初始化")
 
-    # 4. 加载 MCP 工具
+    # 5. 加载 MCP 工具
     if MCP_SERVERS:
         await load_mcp_tools(MCP_SERVERS)
     else:
         logger.info("未配置 MCP 服务器，跳过 MCP 工具加载")
 
-    # 5. 构建 LangGraph Agent 图
+    # 6. 构建 LangGraph Agent 图
     all_tools = get_all_tools()
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
     logger.info(
-        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s",
+        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s",
         CHAT_MODEL,
         len(all_tools),
         "开启" if LONGTERM_MEMORY_ENABLED else "关闭",
+        "开启" if SEMANTIC_CACHE_ENABLED else "关闭",
     )
 
     yield
@@ -231,6 +240,7 @@ async def chat(req: ChatRequest, request: Request):
                 model=req.model or CHAT_MODEL,
                 temperature=req.temperature,
                 client_id=client_id,
+                images=req.images,
             ):
                 if await request.is_disconnected() or stop_event.is_set():
                     yield "data: {\"stopped\": true}\n\n"

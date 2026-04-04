@@ -9,7 +9,10 @@ _cache: dict[str, ChatOpenAI] = {}
 
 
 def get_chat_llm(model: str = CHAT_MODEL, temperature: float = 0.7) -> ChatOpenAI:
-    """返回对话模型实例（按 model+temperature 缓存）。"""
+    """返回对话模型实例（按 model+temperature 缓存，始终 streaming=True）。
+    MiniMax M2.5 流式模式正常，只是以较大 chunk 输出而非逐 token，
+    LangGraph astream_events 会将每个 chunk 作为 on_chat_model_stream 事件触发。
+    """
     key = f"{model}:{temperature}"
     if key not in _cache:
         _cache[key] = ChatOpenAI(
@@ -17,6 +20,7 @@ def get_chat_llm(model: str = CHAT_MODEL, temperature: float = 0.7) -> ChatOpenA
             base_url=LLM_BASE_URL,
             api_key=API_KEY,
             temperature=temperature,
+            streaming=True,
         )
     return _cache[key]
 

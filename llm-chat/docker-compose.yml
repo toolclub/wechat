@@ -3,13 +3,13 @@ services:
   # ── Qdrant 向量数据库 ─────────────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:latest
+    pull_policy: missing
     container_name: chatflow-qdrant
     restart: unless-stopped
     ports:
-      - "6333:6333"   # REST API / Dashboard
-      - "6334:6334"   # gRPC(可选)
+      - "${QDRANT_PORT}:6333"
     volumes:
-      - D:/docker/qdrant_storage:/qdrant/storage
+      - ${QDRANT_DATA_DIR}:/qdrant/storage
     healthcheck:
       test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/6333"]
       interval: 15s
@@ -20,74 +20,76 @@ services:
   # ── PostgreSQL 关系型数据库 ───────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
+    pull_policy: missing
     container_name: chatflow-postgres
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
-      - D:/docker/postgres_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-chatflow}
-      POSTGRES_USER: ${POSTGRES_USER:-chatflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatflow123}
+      - ${POSTGRES_DATA_DIR}:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatflow} -d ${POSTGRES_DB:-chatflow}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # ── Redis（含 RedisSearch 模块，用于语义缓存）────────────────────────────
+  redis:
+    image: redis/redis-stack:latest
+    pull_policy: missing
+    container_name: chatflow-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - ${REDIS_DATA_DIR}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # ── Python FastAPI 后端 ────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: chatflow-backend:${APP_VERSION}
+    pull_policy: never
     container_name: chatflow-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./logs:/var/log/chatflow
     env_file:
-      - path: .env
-        required: false
-    environment:
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      API_KEY: ${API_KEY:-ollama}
-      CHAT_MODEL: ${CHAT_MODEL:-qwen3:8b}
-      SUMMARY_MODEL: ${SUMMARY_MODEL:-qwen3:8b}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
-      ROUTER_ENABLED: ${ROUTER_ENABLED:-true}
-      ROUTER_MODEL: ${ROUTER_MODEL:-qwen3:8b}
-      SEARCH_MODEL: ${SEARCH_MODEL:-qwen3:8b}
-      QDRANT_URL: http://qdrant:6333
-      LONGTERM_MEMORY_ENABLED: ${LONGTERM_MEMORY_ENABLED:-true}
-      CONVERSATIONS_DIR: /app/conversations
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-chatflow}
-      POSTGRES_USER: ${POSTGRES_USER:-chatflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatflow123}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-chatflow}:${POSTGRES_PASSWORD:-chatflow123}@postgres:5432/${POSTGRES_DB:-chatflow}
-      LOG_DIR: /var/log/chatflow
+      - .env
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    volumes:
+      - ${BACKEND_LOG_HOST_DIR}:/var/log/chatflow
+      - ${SECRET_DIR:-/opt/secret}:/opt/secret:ro   # 密钥文件目录（只读，用于解密 ENC(...) 值）
     depends_on:
       qdrant:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/tools || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:${BACKEND_PORT}/api/tools || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 5
       start_period: 20s
 
-  # ── Vue 前端(Nginx 静态服务 + API 反代)─────────────────────────────────
+  # ── Vue 前端（Nginx 静态服务 + API 反代）─────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: chatflow-frontend:${APP_VERSION}
+    pull_policy: never
     container_name: chatflow-frontend
     restart: unless-stopped
     ports:

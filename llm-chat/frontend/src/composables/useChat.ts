@@ -1,5 +1,5 @@
 import { ref, reactive, computed } from 'vue'
-import type { Message, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep } from '../types'
+import type { Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
 
@@ -9,6 +9,7 @@ interface ConvState {
   agentStatus: AgentStatus
   abortController: AbortController | null
   cognitive: CognitiveState
+  activeStepIndex: number   // which step currently receives tool/thinking/content events; -1 = no steps
 }
 
 function makeConvState(): ConvState {
@@ -18,6 +19,7 @@ function makeConvState(): ConvState {
     agentStatus: { state: 'idle', model: '' },
     abortController: null,
     cognitive: makeEmptyCognitiveState(),
+    activeStepIndex: -1,
   }
 }
 
@@ -169,25 +171,47 @@ export function useChat() {
     s.loading = true
     s.agentStatus = { state: 'routing', model: '' }
     s.abortController = new AbortController()
+    s.activeStepIndex = -1
     s.cognitive = makeEmptyCognitiveState()
     s.cognitive.isActive = true
+
+    // ── 辅助：获取当前活跃步骤（多步模式下） ───────────────────────────────
+    const msg = () => s.messages[assistantIdx]
+    const activeStep = (): StepRecord | null => {
+      const steps = msg().steps
+      if (!steps || s.activeStepIndex < 0) return null
+      return steps[s.activeStepIndex] ?? steps[steps.length - 1] ?? null
+    }
 
     try {
       await api.sendMessage(
         convId, text, '', images,
-        (chunk) => { s.messages[assistantIdx].content += chunk },
+        // onChunk
+        (chunk) => {
+          const step = activeStep()
+          if (step) step.content += chunk
+          else msg().content += chunk
+        },
+        // onToolCall
         (name, input) => {
-          if (!s.messages[assistantIdx].toolCalls) s.messages[assistantIdx].toolCalls = []
-          s.messages[assistantIdx].toolCalls!.push(
-            name === 'fetch_webpage'
-              ? { name, input, done: false, fetchStatus: 'loading' }
-              : { name, input, done: false }
-          )
+          const tc = name === 'fetch_webpage'
+            ? { name, input, done: false, fetchStatus: 'loading' as const }
+            : { name, input, done: false }
+          const step = activeStep()
+          if (step) {
+            step.toolCalls.push(tc)
+          } else {
+            if (!msg().toolCalls) msg().toolCalls = []
+            msg().toolCalls!.push(tc)
+          }
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
           addTrace(s.cognitive, { type: 'tool_call', content: `调用 ${name}: ${JSON.stringify(input).slice(0, 180)}`, toolName: name })
         },
+        // onToolResult
         (name, data) => {
-          const tc = s.messages[assistantIdx].toolCalls?.findLast(t => t.name === name && !t.done)
+          const step = activeStep()
+          const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => t.name === name && !t.done)
           if (tc) {
             if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
             else if (data.results) tc.results = data.results as any
@@ -197,39 +221,70 @@ export function useChat() {
           s.agentStatus = { ...s.agentStatus, state: 'thinking', tool: undefined }
           addTrace(s.cognitive, { type: 'tool_result', content: `${name} 执行完成`, toolName: name })
         },
+        // onSearchItem
         (item) => {
-          const tc = s.messages[assistantIdx].toolCalls?.findLast(t => t.name === 'web_search' && !t.done)
+          const step = activeStep()
+          const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => t.name === 'web_search' && !t.done)
           if (tc) {
             if (!tc.searchItems) tc.searchItems = []
             tc.searchItems.push({ url: item.url, title: item.title, status: item.status as any })
           }
           addTrace(s.cognitive, { type: 'search_item', content: `搜索: ${item.title || item.url}` })
         },
+        // onStatus
         (status, model) => {
-          if (status === 'routing') s.agentStatus = { state: 'routing', model: '' }
-          else if (status === 'planning') s.agentStatus = { ...s.agentStatus, state: 'planning' }
+          if (status === 'routing')        s.agentStatus = { state: 'routing', model: s.agentStatus.model }
+          else if (status === 'planning')  s.agentStatus = { ...s.agentStatus, state: 'planning' }
           else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
+          else if (status === 'saving')    s.agentStatus = { ...s.agentStatus, state: 'saving' }
         },
+        // onRoute
         (model, intent) => { s.agentStatus = { state: 'thinking', model, intent } },
-        (steps) => {
-          s.cognitive.plan = steps
+        // onPlanGenerated
+        (planSteps) => {
+          const m = msg()
+          if (!m.steps) {
+            // 首次建立步骤数组
+            m.steps = planSteps.map((st, i): StepRecord => ({
+              index: i, title: st.title, status: st.status,
+              toolCalls: [], thinking: '', content: '',
+            }))
+            s.activeStepIndex = 0
+          } else {
+            // 更新已有步骤状态（reflector 推送更新）
+            planSteps.forEach((st, i) => {
+              if (m.steps![i]) {
+                m.steps![i].status = st.status
+                m.steps![i].title = st.title
+              } else {
+                m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: '' })
+              }
+            })
+            const runningIdx = planSteps.findIndex(st => st.status === 'running')
+            if (runningIdx >= 0) s.activeStepIndex = runningIdx
+          }
+          s.cognitive.plan = planSteps
           s.cognitive.isActive = true
-          const runningIdx = steps.findIndex((st: any) => st.status === 'running')
-          s.cognitive.currentStepIndex = runningIdx >= 0 ? runningIdx : 0
-          addTrace(s.cognitive, { type: 'info', content: `生成计划：${steps.length} 个步骤` })
+          const ri = planSteps.findIndex(st => st.status === 'running')
+          s.cognitive.currentStepIndex = ri >= 0 ? ri : s.activeStepIndex
         },
+        // onReflection
         (content, decision) => {
           s.cognitive.reflection = content
           s.cognitive.reflectorDecision = decision
-          if (decision === 'continue') s.cognitive.currentStepIndex++
+          s.agentStatus = { ...s.agentStatus, state: 'reflecting' }
           addTrace(s.cognitive, { type: 'reflection', content: `反思（${decision}）: ${content}` })
         },
+        // onDone
         () => {
-          // Force all steps to done on completion
+          // 标记所有步骤完成
+          const m = msg()
+          if (m.steps) {
+            m.steps = m.steps.map(step => ({ ...step, status: step.status === 'failed' ? 'failed' : 'done' }))
+          }
           if (s.cognitive.plan.length > 0) {
-            s.cognitive.plan = s.cognitive.plan.map(step => ({
-              ...step, status: step.status === 'failed' ? 'failed' : 'done',
-            }))
+            s.cognitive.plan = s.cognitive.plan.map(step => ({ ...step, status: step.status === 'failed' ? 'failed' : 'done' }))
           }
           s.agentStatus = { ...s.agentStatus, state: 'done' }
           s.loading = false
@@ -240,11 +295,14 @@ export function useChat() {
           }, 2000)
           loadConversations()
         },
+        // onStopped
         () => {
+          const m = msg()
+          if (m.steps) {
+            m.steps = m.steps.map(step => ({ ...step, status: step.status === 'running' ? 'failed' : step.status }))
+          }
           if (s.cognitive.plan.length > 0) {
-            s.cognitive.plan = s.cognitive.plan.map(step => ({
-              ...step, status: step.status === 'running' ? 'failed' : step.status,
-            }))
+            s.cognitive.plan = s.cognitive.plan.map(step => ({ ...step, status: step.status === 'running' ? 'failed' : step.status }))
           }
           s.loading = false
           s.abortController = null
@@ -252,10 +310,16 @@ export function useChat() {
           s.cognitive.isActive = false
         },
         s.abortController.signal,
+        // onThinking
+        (thinking) => {
+          const step = activeStep()
+          if (step) step.thinking += thinking
+          else msg().thinking = (msg().thinking ?? '') + thinking
+        },
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
-      s.messages[assistantIdx].content = '⚠️ 请求失败，请检查后端和 Ollama 是否正常运行。'
+      s.messages[assistantIdx].content = '⚠️ 网络连接失败，请检查后端服务是否正常运行。'
       s.loading = false
       s.abortController = null
       s.agentStatus = { state: 'idle', model: '' }

@@ -21,6 +21,7 @@
 
 ━━━ 对应关系 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+  CacheHitNodeOutput / CacheHitEndEvent    ← on_chain_end   + semantic_cache_check
   RouteNodeOutput   / RouteEndEvent    ← on_chain_end   + route_model
   PlannerNodeOutput / PlannerEndEvent  ← on_chain_end   + planner
   ReflectorNodeOutput / ReflectorEndEvent ← on_chain_end + reflector
@@ -41,6 +42,13 @@ from graph.state import PlanStep  # 唯一定义，两边共用
 # 层 1：节点输出 TypedDict
 # nodes.py 的节点函数 return 类型注解用这些，同时也是 event data.output 的类型
 # ══════════════════════════════════════════════════════════════════════════════
+
+class CacheHitNodeOutput(TypedDict, total=False):
+    """semantic_cache_check 节点 return 的结构"""
+    cache_hit: bool       # True 表示命中缓存
+    full_response: str    # 命中时：缓存的答案；未命中时：空字符串
+    cache_similarity: float  # 命中时的相似度分数
+
 
 class RouteNodeOutput(TypedDict, total=False):
     """route_model 节点 return 的结构"""
@@ -75,6 +83,25 @@ class CompressNodeOutput(TypedDict, total=False):
 # 层 2：事件包装 dataclass
 # runner.py 的 EventHandler 通过 from_event() 拿到，字段有 IDE 提示
 # ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CacheHitEndEvent:
+    """semantic_cache_check 节点结束事件"""
+    cache_hit: bool
+    full_response: str
+    cache_similarity: float
+
+    @classmethod
+    def from_event(cls, event: dict) -> CacheHitEndEvent:
+        output: CacheHitNodeOutput = event["data"].get("output", {})
+        if not isinstance(output, dict):
+            return cls(cache_hit=False, full_response="", cache_similarity=0.0)
+        return cls(
+            cache_hit=output.get("cache_hit", False),
+            full_response=output.get("full_response", ""),
+            cache_similarity=output.get("cache_similarity", 0.0),
+        )
+
 
 @dataclass
 class RouteEndEvent:

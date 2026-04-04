@@ -21,6 +21,7 @@ class GraphState(TypedDict):
     conv_id: str
     client_id: str                             # 浏览器唯一标识（用于日志分文件）
     user_message: str
+    images: list[str]                          # base64 图片列表（已去除 data: 前缀）
     model: str
     temperature: float
 
@@ -37,6 +38,9 @@ class GraphState(TypedDict):
     tool_model: str
     answer_model: str
     route: str
+
+    # ── 语义缓存 ────────────────────────────────────────────────────────────
+    cache_hit: bool                             # True 表示本轮命中缓存，跳过 LLM
 
     # ── 认知规划 ────────────────────────────────────────────────────────────
     plan: list[PlanStep]

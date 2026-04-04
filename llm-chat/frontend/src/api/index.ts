@@ -2,7 +2,6 @@ import type { PlanStep, ToolHistoryEvent } from '../types'
 
 const API_BASE = ''
 
-// ── 浏览器唯一标识（localStorage 持久化，同浏览器同 origin 共享） ─────────────
 function getClientId(): string {
   let id = localStorage.getItem('cf_client_id')
   if (!id) {
@@ -89,6 +88,7 @@ export async function sendMessage(
   onDone: () => void,
   onStopped: () => void,
   signal?: AbortSignal,
+  onThinking?: (text: string) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -111,36 +111,61 @@ export async function sendMessage(
 
   if (!reader) return
 
+  const IDLE_TIMEOUT_MS = 120_000
+  let lastDataTime = Date.now()
   let buffer = ''
   let streamDone = false
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
 
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      try {
-        const data = JSON.parse(line.slice(6))
-        if (data.content)           onChunk(data.content)
-        if (data.tool_call)         onToolCall(data.tool_call.name, data.tool_call.input)
-        if (data.tool_result)       onToolResult(data.tool_result.name, data.tool_result)
-        if (data.search_item)       onSearchItem(data.search_item)
-        if (data.status)            onStatus(data.status, data.model)
-        if (data.route)             onRoute(data.route.model, data.route.intent)
-        if (data.plan_generated)    onPlanGenerated(data.plan_generated.steps)
-        if (data.reflection)        onReflection(data.reflection.content, data.reflection.decision)
-        // 后端执行出错：把错误信息追加到消息末尾，等待随后的 done 事件
-        if (data.error)             onChunk('\n\n⚠️ ' + data.error)
-        // ping 心跳：前端忽略，仅用于保持 nginx 连接不超时
-        if (data.done)              { streamDone = true; onDone() }
-        if (data.stopped)           { streamDone = true; onStopped() }
-      } catch {}
+  // 用 setInterval 独立检查空闲超时，完全不干扰 reader.read() 的 await
+  const idleTimer = setInterval(() => {
+    if (Date.now() - lastDataTime > IDLE_TIMEOUT_MS) {
+      console.warn('[SSE] 超过 120s 无数据，主动断开')
+      reader.cancel()
     }
+  }, 5000)
+
+  try {
+    while (true) {
+      let done: boolean
+      let value: Uint8Array | undefined
+      try {
+        const result = await reader.read()
+        done = result.done
+        value = result.value
+      } catch {
+        // 流被取消或网络中断，正常退出
+        break
+      }
+      if (done) break
+
+      lastDataTime = Date.now()
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.thinking)       onThinking?.(data.thinking)
+          if (data.content)        onChunk(data.content)
+          if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
+          if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
+          if (data.search_item)    onSearchItem(data.search_item)
+          if (data.status)         onStatus(data.status, data.model)
+          if (data.route)          onRoute(data.route.model, data.route.intent)
+          if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
+          if (data.reflection)     onReflection(data.reflection.content, data.reflection.decision)
+          if (data.error)          onChunk('\n\n⚠️ ' + data.error)
+          if (data.ping)           lastDataTime = Date.now()
+          if (data.done)           { streamDone = true; onDone() }
+          if (data.stopped)        { streamDone = true; onStopped() }
+        } catch {}
+      }
+    }
+  } finally {
+    clearInterval(idleTimer)
   }
-  // 流被意外关闭（nginx 超时/网络中断）且未收到 done：确保 loading 状态被清除
+
   if (!streamDone) onStopped()
 }

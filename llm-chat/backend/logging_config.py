@@ -64,11 +64,11 @@ def get_conv_logger(client_id: str, conv_id: str) -> logging.Logger:
     if key in _conv_loggers:
         return _conv_loggers[key]
 
-    cid = (client_id or "anonymous")[:36]
+    cid = (client_id or "anonymous")[:8]
     client_dir = _log_dir / cid
     client_dir.mkdir(parents=True, exist_ok=True)
 
-    name = f"conv.{cid[:8]}.{conv_id}"
+    name = f"conv.{cid}.{conv_id}"
     logger = logging.getLogger(name)
 
     if not logger.handlers:
