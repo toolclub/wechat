@@ -179,7 +179,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
     </div>
 
     <div class="hint-row">
-      <span class="hint">ChatFlow · 本地 AI · 数据安全</span>
+      <span class="hint">ChatFlow · Agent</span>
       <span class="hint-sep">·</span>
       <span class="hint">Enter 发送 · Shift+Enter 换行</span>
     </div>

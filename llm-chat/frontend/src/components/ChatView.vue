@@ -228,7 +228,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           </svg>
         </div>
         <h1 class="hero-title">我能为你做什么？</h1>
-        <p class="hero-sub">基于本地 AI 模型 · 数据不出本地 · 安全可靠</p>
+        <p class="hero-sub">新一代智能 AI · 随时随地为你服务</p>
       </div>
 
       <InputBox :loading="loading" :centered="true" @send="emit('send', $event)" />
