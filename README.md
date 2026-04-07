@@ -4,12 +4,11 @@
 
 ---
 
-<!-- 演示视频 -->
-<!-- 上传视频后取消下方注释，替换链接即可 -->
-<!--
-[![ChatFlow 演示](视频封面图URL)](视频链接URL)
--->
+## 演示视频
 
+[![点击观看演示](封面图URL)](https://www.bilibili.com/video/BV1bUSZBzEQ7?buvid=YF4C14F4733206BB412BBF37AAC4BDCE11FA&from_spmid=dt.dt.0.0&is_story_h5=false&mid=Qg%2Bfk0sn%2BD%2FajWCc6LzprA%3D%3D&plat_id=504&share_from=ugc&share_medium=iphone&share_plat=ios&share_session_id=1A9CFC59-BA95-421C-8BB2-E4D9C137A7A0&share_source=COPY&share_tag=s_i&spmid=dt.dt.0.0&timestamp=1775481987&unique_k=NdCRSTf&up_id=52293300&vd_source=b6eda8c8d8e6e7dcff168b4fddffd897)
+
+> 点击图片跳转 B 站观看完整演示
 ---
 
 ## 核心特性
