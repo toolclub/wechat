@@ -268,17 +268,22 @@ export function useChat() {
             // 首次建立步骤数组
             m.steps = planSteps.map((st, i): StepRecord => ({
               index: i, title: st.title, status: st.status,
-              toolCalls: [], thinking: '', content: '',
+              toolCalls: [], thinking: '', content: st.result ?? '',
             }))
             s.activeStepIndex = 0
           } else {
             // 更新已有步骤状态（reflector 推送更新）
+            // 中间步骤的内容通过 result 字段传递（这些步骤使用静默模式，不走流式 onChunk）
             planSteps.forEach((st, i) => {
               if (m.steps![i]) {
                 m.steps![i].status = st.status
                 m.steps![i].title = st.title
+                // 中间步骤完成时，用 result 填充 content（静默模式不走 onChunk 流式推送）
+                if (st.result && st.status === 'done' && !m.steps![i].content) {
+                  m.steps![i].content = st.result
+                }
               } else {
-                m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: '' })
+                m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '' })
               }
             })
             const runningIdx = planSteps.findIndex(st => st.status === 'running')
@@ -359,6 +364,30 @@ export function useChat() {
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }
           s.cognitive.isActive = false
         },
+        // onSandboxOutput：沙箱实时终端输出（execute_code/run_shell 执行过程中）
+        // 使用 requestAnimationFrame 批量刷新，减少 Vue 响应式更新频率
+        (() => {
+          const bufMap = new Map<any, string>()
+          let rafScheduled = false
+          function flush() {
+            bufMap.forEach((buf, tc) => { tc.output = (tc.output || '') + buf })
+            bufMap.clear()
+            rafScheduled = false
+          }
+          return (toolName: string, stream: string, text: string) => {
+            const step = activeStep()
+            const toolList = step ? step.toolCalls : msg().toolCalls
+            const tc = toolList?.findLast(t =>
+              (t.name === 'execute_code' || t.name === 'run_shell') && !t.done
+            )
+            if (!tc) return
+            bufMap.set(tc, (bufMap.get(tc) || '') + text)
+            if (!rafScheduled) {
+              rafScheduled = true
+              requestAnimationFrame(flush)
+            }
+          }
+        })(),
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
@@ -452,7 +481,14 @@ export function useChat() {
     await send({ text: backendMessage, images: [], agentMode: true })
   }
 
-  /** 用户点击"继续"按钮：以 agent 模式重新发送"继续"指令，模型从历史中断点接续。 */
+  /**
+   * 用户点击"继续"按钮：发 "继续" 触发后端 Planner 的 DB 续写恢复逻辑。
+   *
+   * 后端 Planner 检测到 "继续" 后：
+   *   1. 从 DB 加载上次中断的计划（含已完成步骤的结果）
+   *   2. 直接跳到第一个未完成步骤执行，跳过已完成步骤，不重跑搜索
+   *   3. call_model 使用 plan_goal（原始任务）而非 "继续" 构建聚焦上下文
+   */
   async function continueLast() {
     if (!currentConvId.value) return
     const s = convStates[currentConvId.value]
@@ -461,11 +497,55 @@ export function useChat() {
     await send({ text: '继续', images: [], agentMode: true })
   }
 
+  /**
+   * 重新生成最后一条 AI 回复：删除最后一轮 (user + assistant)，用原始消息重新发送。
+   */
+  async function regenerate() {
+    if (!currentConvId.value) return
+    const s = convStates[currentConvId.value]
+    if (!s || s.loading) return
+    // Find last user message
+    let lastUserIdx = -1
+    for (let i = s.messages.length - 1; i >= 0; i--) {
+      if (s.messages[i].role === 'user') { lastUserIdx = i; break }
+    }
+    if (lastUserIdx < 0) return
+    const lastUserMsg = s.messages[lastUserIdx]
+    // Remove last user + assistant pair from frontend
+    s.messages.splice(lastUserIdx)
+    // Re-send with same content
+    await send({
+      text: lastUserMsg.content,
+      images: lastUserMsg.images ?? [],
+      agentMode: true,
+    })
+  }
+
+  /**
+   * 编辑用户消息：替换指定消息内容，删除该消息之后的所有消息，重新发送。
+   */
+  async function editMessage(msgIndex: number, newContent: string) {
+    if (!currentConvId.value) return
+    const s = convStates[currentConvId.value]
+    if (!s || s.loading) return
+    const msg = s.messages[msgIndex]
+    if (!msg || msg.role !== 'user') return
+    // Truncate messages from this point
+    s.messages.splice(msgIndex)
+    // Re-send with new content
+    await send({
+      text: newContent,
+      images: msg.images ?? [],
+      agentMode: true,
+    })
+  }
+
   return {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
     canContinue,
     loadConversations, selectConversation, restoreFromHash,
     newConversation, removeConversation,
     send, cancelStream, stopConversation, applyModifiedPlan, submitClarification, continueLast,
+    regenerate, editMessage,
   }
 }

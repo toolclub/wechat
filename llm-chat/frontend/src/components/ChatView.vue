@@ -23,6 +23,8 @@ const emit = defineEmits<{
   togglePanel: []                 // 切换认知面板展开/折叠
   clarificationSubmit: [answers: Record<string, string | string[]>]
   continue: []                    // 用户点击"继续"按钮
+  regenerate: []
+  editMessage: [payload: { index: number; content: string }]
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
@@ -265,6 +267,9 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             :is-last-loading="loading && i === messages.length - 1 && msg.role === 'assistant'"
             :agent-status="(loading && i === messages.length - 1 && msg.role === 'assistant') ? agentStatus : undefined"
             :cognitive="(loading && i === messages.length - 1 && msg.role === 'assistant') ? cognitive : undefined"
+            :message-index="i"
+            @regenerate="emit('regenerate')"
+            @edit-message="emit('editMessage', $event)"
           />
           <!-- 澄清卡片：附加在最后一条 assistant 消息下方 -->
           <template

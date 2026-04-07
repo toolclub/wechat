@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
 import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState } from '../types'
@@ -16,6 +18,10 @@ const TOOL_META: Record<string, { label: string; icon: any; color: string }> = {
   fetch_webpage:     { label: '阅读了网页',  icon: Document, color: '#0ea5e9' },
   get_current_time:  { label: '获取了时间',  icon: Clock,    color: '#0ea5e9' },
   calculator:        { label: '执行了计算',  icon: Cpu,      color: '#10b981' },
+  execute_code:      { label: '执行了代码',  icon: Cpu,      color: '#10b981' },
+  run_shell:         { label: '执行了命令',  icon: Cpu,      color: '#10b981' },
+  sandbox_write:     { label: '写入了文件',  icon: Document, color: '#f59e0b' },
+  sandbox_read:      { label: '读取了文件',  icon: Document, color: '#0ea5e9' },
 }
 function toolMeta(name: string) {
   return TOOL_META[name] ?? { label: `调用了 ${name}`, icon: Cpu, color: '#6b7280' }
@@ -26,6 +32,10 @@ function faviconUrl(url: string) {
 }
 
 // ─── Marked + highlight.js 实例 ───
+
+// 流式渲染时跳过 hljs（大内容会阻塞主线程），通过 renderContent(raw, streaming=true) 激活
+let _skipHljs = false
+
 function buildCodeHtml(rawToken: any): string {
   const text: string = typeof rawToken === 'object' && rawToken !== null
     ? (rawToken.text ?? '')
@@ -45,7 +55,10 @@ function buildCodeHtml(rawToken: any): string {
 
   let highlighted: string
   try {
-    if (hljs.getLanguage(language)) {
+    // 流式大内容：跳过 hljs（避免每 token 触发 O(n²) 语法高亮阻塞主线程）
+    if (_skipHljs) {
+      highlighted = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    } else if (hljs.getLanguage(language)) {
       highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value
     } else {
       highlighted = hljs.highlightAuto(text).value
@@ -152,12 +165,22 @@ markedInstance.use({
   }],
 })
 
+// LaTeX 公式支持：$...$ 行内、$$...$$ 块级
+import markedKatex from 'marked-katex-extension'
+markedInstance.use(markedKatex({ throwOnError: false }))
+
 // ─── Props ───
 const props = defineProps<{
   message: Message
   isLastLoading?: boolean
   agentStatus?: AgentStatus
   cognitive?: CognitiveState
+  messageIndex?: number
+}>()
+
+const emit = defineEmits<{
+  regenerate: []
+  editMessage: [payload: { index: number; content: string }]
 }>()
 
 const emptyCognitive = makeEmptyCognitiveState()
@@ -188,7 +211,10 @@ const sections = computed<Section[]>(() => {
 })
 
 // ─── Markdown 内容渲染（去除 think 块残留） ─────────────────────────────────
-function renderContent(raw: string): string {
+// streaming=true：流式模式，大内容（>3000字）跳过 hljs，避免主线程阻塞
+const _SKIP_HLJS_THRESHOLD = 3000
+
+function renderContent(raw: string, streaming = false): string {
   let content = raw.replace(/<think>[\s\S]*?<\/think>\n*/g, '')
   const thinkStart = content.indexOf('<think>')
   if (thinkStart !== -1) content = content.slice(0, thinkStart)
@@ -203,11 +229,17 @@ function renderContent(raw: string): string {
   // 防止 --- 被 marked 误解析为 setext h2 标题（在 --- 前插入空行）
   trimmed = trimmed.replace(/([^\n]+)\n(-{3,})(\n|$)/g, '$1\n\n$2$3')
 
-  // 模型直接输出裸 HTML 页面时（没有 markdown 代码块包裹），自动包裹为 html 代码块渲染
-  if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
-    return buildCodeHtml({ text: trimmed, lang: 'html' })
+  // 流式大内容：激活 _skipHljs 标志，对本次 buildCodeHtml 调用生效
+  _skipHljs = streaming && trimmed.length > _SKIP_HLJS_THRESHOLD
+  try {
+    // 模型直接输出裸 HTML 页面时（没有 markdown 代码块包裹），自动包裹为 html 代码块渲染
+    if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+      return buildCodeHtml({ text: trimmed, lang: 'html' })
+    }
+    return markedInstance.parse(trimmed) as string
+  } finally {
+    _skipHljs = false
   }
-  return markedInstance.parse(trimmed) as string
 }
 
 // ─── 代码块事件委托（挂载在整个 ai-content-wrap 上） ────────────────────────
@@ -247,6 +279,56 @@ function handleContentClick(e: MouseEvent) {
 onMounted(() => contentWrapEl.value?.addEventListener('click', handleContentClick))
 onUnmounted(() => contentWrapEl.value?.removeEventListener('click', handleContentClick))
 
+// ─── 节流渲染（防止大代码块 O(n²) 渲染冻结浏览器） ────────────────────────────
+// 每次 token 到来都重新 renderContent + hljs.highlight 全量内容代价很高（尤其是大 HTML 页面）。
+// 超过 _RENDER_LARGE_CHARS 时：
+//   - 节流至每 THROTTLE_MS 更新一次
+//   - 流式期间（isLastLoading）跳过 hljs，用纯转义占位，保证每帧都能渲染
+//   - 流式结束后（isLastLoading→false）触发最终全量 hljs 高亮
+const _RENDER_THROTTLE_MS  = 100  // 超过阈值时节流间隔（ms）
+const _RENDER_LARGE_CHARS  = 3000 // 内容字节数超过此值时启用节流（同 _SKIP_HLJS_THRESHOLD）
+
+const renderedHtml = ref<string[]>([])
+let _renderTimer: ReturnType<typeof setTimeout> | null = null
+
+function _doRender(streaming = false) {
+  _renderTimer = null
+  renderedHtml.value = sections.value.map(s => renderContent(s.content, streaming))
+}
+
+watch(
+  sections,
+  (secs) => {
+    const streaming = props.isLastLoading ?? false
+    const maxLen = Math.max(0, ...secs.map(s => s.content.length))
+    if (maxLen < _RENDER_LARGE_CHARS) {
+      // 小内容：立即渲染，不节流（无需跳过 hljs）
+      if (_renderTimer !== null) { clearTimeout(_renderTimer); _renderTimer = null }
+      renderedHtml.value = secs.map(s => renderContent(s.content, false))
+    } else if (_renderTimer === null) {
+      // 大内容：节流 + 流式期间跳过 hljs，避免每 token 全量高亮阻塞主线程
+      _renderTimer = setTimeout(() => _doRender(streaming), _RENDER_THROTTLE_MS)
+    }
+    // else: 已有待执行的定时器，等它触发即可
+  },
+  { deep: true, immediate: true },
+)
+
+// 流式结束后触发最终全量 hljs 高亮（之前跳过 hljs 的占位内容替换为正式高亮版本）
+watch(
+  () => props.isLastLoading,
+  (loading) => {
+    if (!loading) {
+      if (_renderTimer !== null) { clearTimeout(_renderTimer); _renderTimer = null }
+      _doRender(false)
+    }
+  },
+)
+
+onUnmounted(() => {
+  if (_renderTimer !== null) { clearTimeout(_renderTimer); _renderTimer = null }
+})
+
 // ─── 整条消息复制 ───
 const copied = ref(false)
 async function copy() {
@@ -273,26 +355,54 @@ function toggle(si: number, ti: number) {
 }
 function isCollapsed(si: number, ti: number) { return collapsed.value[`${si}-${ti}`] ?? false }
 
-// 工具执行完成后 1.2s 自动折叠
-watch(
-  () => sections.value.flatMap((sec, si) =>
-    sec.toolCalls.map((tc, ti) => ({ si, ti, done: tc.done }))
-  ),
-  (items, prev) => {
-    items.forEach((item, idx) => {
-      if (item.done && !prev?.[idx]?.done) {
-        setTimeout(() => { collapsed.value[`${item.si}-${item.ti}`] = true }, 1200)
-      }
-    })
-  },
-  { deep: true }
-)
+// 工具执行完成后不自动折叠（保持展开，方便用户查看结果）
+
+// ─── 沙箱工具分组：连续沙箱操作合并为一个终端块 ───────────────────────────────
+const SANDBOX_TOOLS = new Set(['execute_code', 'run_shell', 'sandbox_write', 'sandbox_read'])
+
+interface SandboxGroupItem { tc: ToolCallRecord; ti: number }
+type ToolGroup =
+  | { type: 'single'; tc: ToolCallRecord; ti: number }
+  | { type: 'sandbox'; tools: SandboxGroupItem[]; firstTi: number }
+
+function getToolGroups(toolCalls: ToolCallRecord[]): ToolGroup[] {
+  const groups: ToolGroup[] = []
+  let buf: SandboxGroupItem[] = []
+  const flush = () => {
+    if (buf.length) { groups.push({ type: 'sandbox', tools: [...buf], firstTi: buf[0].ti }); buf = [] }
+  }
+  toolCalls.forEach((tc, ti) => {
+    if (SANDBOX_TOOLS.has(tc.name)) { buf.push({ tc, ti }) }
+    else { flush(); groups.push({ type: 'single', tc, ti }) }
+  })
+  flush()
+  return groups
+}
+
+function toggleSandbox(si: number) { const k = `${si}-sbx`; collapsed.value[k] = !collapsed.value[k] }
+function isSandboxCollapsed(si: number) { return collapsed.value[`${si}-sbx`] ?? false }
+function isSandboxRunning(tools: SandboxGroupItem[]) { return tools.some(t => !t.tc.done) }
 
 // ─── 整条消息是否有可复制内容 ───────────────────────────────────────────────
 const hasContent = computed(() => {
   if (props.message.steps?.length) return props.message.steps.some(s => s.content)
   return !!props.message.content
 })
+
+// ─── 消息编辑 ───
+const isEditing = ref(false)
+const editContent = ref('')
+function startEdit() {
+  editContent.value = props.message.content
+  isEditing.value = true
+}
+function submitEdit() {
+  if (editContent.value.trim() && props.messageIndex !== undefined) {
+    emit('editMessage', { index: props.messageIndex, content: editContent.value.trim() })
+  }
+  isEditing.value = false
+}
+function cancelEdit() { isEditing.value = false }
 </script>
 
 <template>
@@ -336,8 +446,22 @@ const hasContent = computed(() => {
           </div>
         </div>
 
+        <!-- Editing mode -->
+        <div v-else-if="isEditing" class="edit-wrap">
+          <textarea v-model="editContent" class="edit-textarea" rows="3" @keydown.ctrl.enter="submitEdit"></textarea>
+          <div class="edit-actions">
+            <button class="edit-btn edit-cancel" @click="cancelEdit">取消</button>
+            <button class="edit-btn edit-submit" @click="submitEdit">发送</button>
+          </div>
+        </div>
         <!-- Plain text bubble -->
-        <div v-else-if="message.content" class="user-bubble">{{ message.content }}</div>
+        <div v-else-if="message.content" class="user-bubble" @dblclick="startEdit">{{ message.content }}</div>
+        <!-- User message hover actions -->
+        <div v-if="message.content && !isEditing" class="user-actions">
+          <button class="action-btn-sm" @click="startEdit" title="编辑消息">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+        </div>
       </div>
       <div class="user-avatar">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
@@ -384,111 +508,230 @@ const hasContent = computed(() => {
             <span class="step-title">{{ sec.step.title }}</span>
           </div>
 
-          <!-- 工具调用块 -->
+          <!-- 工具调用块（沙箱操作合并为统一终端） -->
           <div v-if="sec.toolCalls.length" class="tool-calls">
-            <div v-for="(tc, ti) in sec.toolCalls" :key="ti"
-                 :class="['tool-block', (tc.name === 'web_search' || tc.name === 'fetch_webpage') ? 'tool-block-sources' : '']">
+            <template v-for="(group, gi) in getToolGroups(sec.toolCalls)" :key="gi">
 
-              <!-- web_search -->
-              <template v-if="tc.name === 'web_search'">
-                <div class="tool-header tool-header-flat">
-                  <span class="tool-status-icon">
-                    <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                      <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                    </svg>
-                  </span>
-                  <el-icon style="font-size:13px; color:#6366f1"><Search /></el-icon>
-                  <span class="tool-label">搜索了网络</span>
-                  <span class="tool-query">「{{ (tc.input as any).query }}」</span>
-                  <span v-if="!tc.done" class="tool-pending">搜索中...</span>
+              <!-- ═══ 非沙箱工具：保持原有样式 ═══ -->
+              <template v-if="group.type === 'single'">
+                <div :class="['tool-block', (group.tc.name === 'web_search' || group.tc.name === 'fetch_webpage') ? 'tool-block-sources' : '']">
+
+                  <!-- web_search -->
+                  <template v-if="group.tc.name === 'web_search'">
+                    <div class="tool-header tool-header-flat">
+                      <span class="tool-status-icon">
+                        <svg v-if="group.tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                          <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
+                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                        </svg>
+                      </span>
+                      <el-icon style="font-size:13px; color:#6366f1"><Search /></el-icon>
+                      <span class="tool-label">搜索了网络</span>
+                      <span class="tool-query">「{{ (group.tc.input as any).query }}」</span>
+                      <span v-if="!group.tc.done" class="tool-pending">搜索中...</span>
+                    </div>
+                    <div v-if="group.tc.searchItems?.length" class="search-url-list">
+                      <a v-for="(item, ii) in group.tc.searchItems" :key="ii"
+                         :href="item.url" target="_blank"
+                         class="search-url-row" :title="item.title || item.url">
+                        <span class="url-status">
+                          <svg v-if="item.status === 'done'" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                            <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
+                            <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.4" stroke-linecap="round"/>
+                          </svg>
+                          <svg v-else-if="item.status === 'fail'" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                            <circle cx="8" cy="8" r="6" stroke="#ef4444" stroke-width="1.5"/>
+                            <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                          </svg>
+                          <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" class="spin">
+                            <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                          </svg>
+                        </span>
+                        <img :src="faviconUrl(item.url)" class="url-favicon"
+                             @error="($event.target as HTMLImageElement).style.display='none'" />
+                        <span class="url-text">{{ item.url }}</span>
+                      </a>
+                    </div>
+                  </template>
+
+                  <!-- fetch_webpage -->
+                  <template v-else-if="group.tc.name === 'fetch_webpage'">
+                    <div class="tool-header tool-header-flat">
+                      <span class="tool-status-icon">
+                        <svg v-if="group.tc.done && group.tc.fetchStatus === 'fail'" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6.5" stroke="#ef4444" stroke-width="1.5"/>
+                          <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                        </svg>
+                        <svg v-else-if="group.tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                          <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
+                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                        </svg>
+                      </span>
+                      <el-icon style="font-size:13px; color:#0ea5e9"><Document /></el-icon>
+                      <span class="tool-label">{{ group.tc.done && group.tc.fetchStatus === 'fail' ? '读取失败' : (group.tc.done ? '读取了网页' : '正在阅读') }}</span>
+                      <span v-if="(group.tc.input as any).url" class="tool-query">
+                        <a :href="(group.tc.input as any).url" target="_blank" class="fetch-url-link" @click.stop>
+                          <img :src="faviconUrl((group.tc.input as any).url)" class="url-favicon" style="margin-right:3px"
+                               @error="($event.target as HTMLImageElement).style.display='none'" />
+                          {{ (group.tc.input as any).url }}
+                        </a>
+                      </span>
+                      <span v-if="!group.tc.done" class="tool-pending">读取中...</span>
+                    </div>
+                  </template>
+
+                  <!-- 其他工具 -->
+                  <template v-else>
+                    <div class="tool-header" @click="toggle(si, group.ti)">
+                      <span class="tool-status-icon">
+                        <svg v-if="group.tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
+                          <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
+                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                        </svg>
+                      </span>
+                      <el-icon :style="{ color: toolMeta(group.tc.name).color }" style="font-size:13px">
+                        <component :is="toolMeta(group.tc.name).icon" />
+                      </el-icon>
+                      <span class="tool-label">{{ toolMeta(group.tc.name).label }}</span>
+                      <span v-if="!group.tc.done" class="tool-pending">执行中...</span>
+                      <span class="tool-chevron" :class="{ open: !isCollapsed(si, group.ti) }">›</span>
+                    </div>
+                    <Transition name="slide">
+                      <div v-show="!isCollapsed(si, group.ti)" class="tool-body">
+                        <div class="tool-output-plain">
+                          <span class="tool-tag">结果</span>
+                          <span>{{ group.tc.output }}</span>
+                        </div>
+                      </div>
+                    </Transition>
+                  </template>
+
                 </div>
-                <div v-if="tc.searchItems?.length" class="search-url-list">
-                  <a v-for="(item, ii) in tc.searchItems" :key="ii"
-                     :href="item.url" target="_blank"
-                     class="search-url-row" :title="item.title || item.url">
-                    <span class="url-status">
-                      <svg v-if="item.status === 'done'" width="12" height="12" viewBox="0 0 16 16" fill="none">
-                        <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
-                        <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.4" stroke-linecap="round"/>
-                      </svg>
-                      <svg v-else-if="item.status === 'fail'" width="12" height="12" viewBox="0 0 16 16" fill="none">
-                        <circle cx="8" cy="8" r="6" stroke="#ef4444" stroke-width="1.5"/>
-                        <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
-                      </svg>
-                      <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" class="spin">
-                        <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+              </template>
+
+              <!-- ═══ 沙箱工具组：统一终端块（ChatFlow Sandbox） ═══ -->
+              <template v-else>
+                <div class="sandbox-block">
+                  <!-- 终端标题栏 -->
+                  <div class="term-titlebar" @click="toggleSandbox(si)">
+                    <svg class="term-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                    <span class="term-title">ChatFlow Sandbox</span>
+                    <span class="term-ops-count" v-if="(group as any).tools.length > 1">{{ (group as any).tools.length }} ops</span>
+                    <span class="tool-chevron" :class="{ open: !isSandboxCollapsed(si) }">›</span>
+                    <!-- ChatFlow sparkle 图标 — 运行时呼吸闪烁 -->
+                    <span class="term-cf-logo" :class="{ active: isSandboxRunning((group as any).tools) }">
+                      <svg width="16" height="16" viewBox="0 0 32 32" fill="none">
+                        <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="currentColor"/>
+                        <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="currentColor" opacity="0.45"/>
                       </svg>
                     </span>
-                    <img :src="faviconUrl(item.url)" class="url-favicon"
-                         @error="($event.target as HTMLImageElement).style.display='none'" />
-                    <span class="url-text">{{ item.url }}</span>
-                  </a>
-                </div>
-              </template>
-
-              <!-- fetch_webpage -->
-              <template v-else-if="tc.name === 'fetch_webpage'">
-                <div class="tool-header tool-header-flat">
-                  <span class="tool-status-icon">
-                    <svg v-if="tc.done && tc.fetchStatus === 'fail'" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6.5" stroke="#ef4444" stroke-width="1.5"/>
-                      <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
-                    </svg>
-                    <svg v-else-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                      <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                    </svg>
-                  </span>
-                  <el-icon style="font-size:13px; color:#0ea5e9"><Document /></el-icon>
-                  <span class="tool-label">{{ tc.done && tc.fetchStatus === 'fail' ? '读取失败' : (tc.done ? '读取了网页' : '正在阅读') }}</span>
-                  <span v-if="(tc.input as any).url" class="tool-query">
-                    <a :href="(tc.input as any).url" target="_blank" class="fetch-url-link" @click.stop>
-                      <img :src="faviconUrl((tc.input as any).url)" class="url-favicon" style="margin-right:3px"
-                           @error="($event.target as HTMLImageElement).style.display='none'" />
-                      {{ (tc.input as any).url }}
-                    </a>
-                  </span>
-                  <span v-if="!tc.done" class="tool-pending">读取中...</span>
-                </div>
-              </template>
-
-              <!-- 其他工具 -->
-              <template v-else>
-                <div class="tool-header" @click="toggle(si, ti)">
-                  <span class="tool-status-icon">
-                    <svg v-if="tc.done" width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="6.5" stroke="#22c55e" stroke-width="1.5"/>
-                      <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                      <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
-                    </svg>
-                  </span>
-                  <el-icon :style="{ color: toolMeta(tc.name).color }" style="font-size:13px">
-                    <component :is="toolMeta(tc.name).icon" />
-                  </el-icon>
-                  <span class="tool-label">{{ toolMeta(tc.name).label }}</span>
-                  <span v-if="!tc.done" class="tool-pending">执行中...</span>
-                  <span class="tool-chevron" :class="{ open: !isCollapsed(si, ti) }">›</span>
-                </div>
-                <Transition name="slide">
-                  <div v-show="!isCollapsed(si, ti)" class="tool-body">
-                    <div class="tool-output-plain">
-                      <span class="tool-tag">结果</span>
-                      <span>{{ tc.output }}</span>
-                    </div>
                   </div>
-                </Transition>
+
+                  <!-- 终端内容：所有沙箱操作顺序展示 -->
+                  <Transition name="slide">
+                    <div v-show="!isSandboxCollapsed(si)" class="term-body">
+                      <template v-for="(item, ii) in (group as any).tools" :key="ii">
+                        <!-- 操作间分隔线 -->
+                        <div v-if="ii > 0" class="term-divider"></div>
+
+                        <!-- sandbox_write -->
+                        <template v-if="item.tc.name === 'sandbox_write'">
+                          <div class="term-line term-line--dimmed">
+                            <span class="term-prompt-sign">$</span>
+                            <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
+                          </div>
+                          <pre v-if="(item.tc.input as any).content" class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
+                          <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
+                          <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
+                        </template>
+
+                        <!-- sandbox_read -->
+                        <template v-else-if="item.tc.name === 'sandbox_read'">
+                          <div class="term-line">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-cmd-text">cat {{ (item.tc.input as any).path || 'file' }}</span>
+                          </div>
+                          <pre v-if="item.tc.done && item.tc.output" class="term-code-inline">{{ item.tc.output }}</pre>
+                        </template>
+
+                        <!-- execute_code -->
+                        <template v-else-if="item.tc.name === 'execute_code'">
+                          <template v-if="(item.tc.input as any).code">
+                            <div class="term-line term-line--dimmed">
+                              <span class="term-prompt-sign">$</span>
+                              <span>cat &gt; {{ ({python:'main.py',javascript:'main.js',java:'Main.java',shell:'run.sh'} as any)[(item.tc.input as any).language] || 'code' }} &lt;&lt; 'EOF'</span>
+                            </div>
+                            <pre class="term-code-inline">{{ (item.tc.input as any).code }}</pre>
+                            <div class="term-line term-line--dimmed"><span>EOF</span></div>
+                          </template>
+                          <div class="term-line">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-cmd-text">{{ ({python:'python3 main.py',javascript:'node main.js',java:'javac Main.java && java Main',shell:'bash run.sh'} as any)[(item.tc.input as any).language] || 'run' }}</span>
+                          </div>
+                          <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          <template v-if="item.tc.done && item.tc.output">
+                            <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
+                              <div v-if="line.startsWith('root@sandbox:')" class="term-line">
+                                <span class="term-prompt-user">{{ line.split('$')[0] }}$</span>
+                                <span class="term-cmd-text">{{ line.split('$ ').slice(1).join('$ ') }}</span>
+                              </div>
+                              <div v-else-if="line.startsWith('$ ')" class="term-line">
+                                <span class="term-prompt-sign">$</span>
+                                <span class="term-cmd-text">{{ line.slice(2) }}</span>
+                              </div>
+                              <div v-else-if="line.startsWith('[stderr]')" class="term-line term-line--err">{{ line.replace('[stderr] ', '') }}</div>
+                              <div v-else-if="line.startsWith('[exit_code')" class="term-line term-line--err">{{ line }}</div>
+                              <div v-else-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
+                              <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
+                            </template>
+                          </template>
+                        </template>
+
+                        <!-- run_shell -->
+                        <template v-else-if="item.tc.name === 'run_shell'">
+                          <div v-if="(item.tc.input as any).command" class="term-line">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-cmd-text">{{ (item.tc.input as any).command }}</span>
+                          </div>
+                          <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          <template v-if="item.tc.done && item.tc.output">
+                            <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
+                              <div v-if="line.startsWith('root@sandbox:')" class="term-line">
+                                <span class="term-prompt-user">{{ line.split('$')[0] }}$</span>
+                                <span class="term-cmd-text">{{ line.split('$ ').slice(1).join('$ ') }}</span>
+                              </div>
+                              <div v-else-if="line.startsWith('$ ')" class="term-line">
+                                <span class="term-prompt-sign">$</span>
+                                <span class="term-cmd-text">{{ line.slice(2) }}</span>
+                              </div>
+                              <div v-else-if="line.startsWith('[stderr]')" class="term-line term-line--err">{{ line.replace('[stderr] ', '') }}</div>
+                              <div v-else-if="line.startsWith('[exit_code')" class="term-line term-line--err">{{ line }}</div>
+                              <div v-else-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
+                              <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
+                            </template>
+                          </template>
+                        </template>
+                      </template>
+
+                      <!-- 运行中：底部闪烁光标 -->
+                      <div v-if="isSandboxRunning((group as any).tools)" class="term-line term-cursor-line">
+                        <span class="term-cursor">▋</span>
+                      </div>
+                    </div>
+                  </Transition>
+                </div>
               </template>
 
-            </div>
+            </template>
           </div>
 
           <!-- 推理过程（可折叠白卡） -->
@@ -517,18 +760,24 @@ const hasContent = computed(() => {
             </Transition>
           </div>
 
-          <!-- Markdown 内容 -->
-          <div v-if="sec.content" class="ai-content markdown-body" v-html="renderContent(sec.content)"></div>
+          <!-- Markdown 内容（renderedHtml 节流缓存，防止大文档 O(n²) 渲染） -->
+          <div v-if="sec.content" class="ai-content markdown-body" v-html="renderedHtml[si] ?? ''"></div>
 
         </div>
         <!-- /sections -->
 
         <!-- 操作行 -->
-        <div v-if="hasContent" class="ai-actions">
+        <div v-if="hasContent || messageIndex !== undefined" class="ai-actions">
           <el-tooltip :content="copied ? '已复制！' : '复制内容'" placement="top" :show-after="300">
             <button class="action-btn" :class="{ copied }" @click="copy">
               <el-icon><component :is="copied ? Check : CopyDocument" /></el-icon>
               <span>{{ copied ? '已复制' : '复制' }}</span>
+            </button>
+          </el-tooltip>
+          <el-tooltip content="重新生成" placement="top" :show-after="300">
+            <button class="action-btn" @click="emit('regenerate')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+              <span>重新生成</span>
             </button>
           </el-tooltip>
         </div>
@@ -552,6 +801,9 @@ const hasContent = computed(() => {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  /* 长对话虚拟渲染优化：屏幕外消息跳过渲染，滚动到可见时自动渲染 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;  /* 预估消息高度，防止滚动条跳动 */
 }
 
 /* 用户 */
@@ -901,6 +1153,37 @@ const hasContent = computed(() => {
 .action-btn:hover { border-color: #a5b4fc; color: var(--cf-indigo); background: var(--cf-active); }
 .action-btn.copied { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
 
+/* User message actions */
+.user-actions {
+  display: flex; gap: 4px; opacity: 0; transition: opacity 0.2s;
+}
+.msg.user:hover .user-actions { opacity: 1; }
+.action-btn-sm {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 6px;
+  background: var(--cf-card); border: 1.5px solid var(--cf-border);
+  color: var(--cf-text-4); cursor: pointer; transition: all 0.15s;
+}
+.action-btn-sm:hover { border-color: #a5b4fc; color: var(--cf-indigo); background: var(--cf-active); }
+
+/* Edit mode */
+.edit-wrap { width: 100%; max-width: 500px; }
+.edit-textarea {
+  width: 100%; padding: 10px 14px; border: 1.5px solid var(--cf-indigo);
+  border-radius: 12px; font-size: 14px; font-family: inherit;
+  resize: vertical; min-height: 60px; background: var(--cf-card);
+  color: var(--cf-text-1); outline: none; line-height: 1.6;
+}
+.edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.edit-btn {
+  padding: 5px 14px; border-radius: 8px; font-size: 12.5px;
+  font-weight: 500; font-family: inherit; cursor: pointer; border: none;
+}
+.edit-cancel { background: var(--cf-hover); color: var(--cf-text-3); }
+.edit-cancel:hover { background: var(--cf-border); }
+.edit-submit { background: var(--cf-indigo); color: #fff; }
+.edit-submit:hover { opacity: 0.9; }
+
 </style>
 
 <style>
@@ -1072,4 +1355,173 @@ const hasContent = computed(() => {
 .think-slide-leave-to { max-height: 0 !important; opacity: 0; }
 .think-slide-enter-to,
 .think-slide-leave-from { max-height: 320px; opacity: 1; }
+
+/* ── 沙箱终端样式（Bilibili 浅色风格） ── */
+.sandbox-block {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #e3e5e7;
+  background: #ffffff;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+  margin-bottom: 6px;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.sandbox-block:hover {
+  border-color: #d0d3d6;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.09);
+}
+
+/* 标题栏 */
+.term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background: #f6f7f8;
+  border-bottom: 1px solid #e3e5e7;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.term-titlebar:hover { background: #eef0f2; }
+
+.term-icon { color: #9499a0; flex-shrink: 0; }
+
+.term-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: #18191c;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: 0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-ops-count {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #9499a0;
+  background: #f1f2f3;
+  padding: 1px 7px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+/* ChatFlow Logo 图标（右侧） */
+.term-cf-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: #f1f2f3;
+  color: #9499a0;
+  flex-shrink: 0;
+  transition: all 0.3s ease;
+}
+.term-cf-logo.active {
+  color: #00aeec;
+  background: rgba(0, 174, 236, 0.08);
+  animation: cf-logo-pulse 1.8s ease-in-out infinite;
+}
+@keyframes cf-logo-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.9); }
+}
+
+/* 终端体 */
+.term-body {
+  padding: 12px 16px 14px;
+  max-height: 520px;
+  overflow-y: auto;
+  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  background: #fafbfc;
+}
+
+/* 操作间分隔线 */
+.term-divider {
+  height: 1px;
+  background: #e3e5e7;
+  margin: 8px 0;
+}
+
+/* 每一行 */
+.term-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #18191c;
+  min-height: 1.7em;
+}
+.term-line--dimmed { color: #9499a0; }
+.term-line--out    { color: #18191c; }
+.term-line--ok     { color: #00b578; font-size: 12px; }
+.term-line--err    { color: #f25d59; }
+.term-line--meta   { color: #9499a0; font-size: 11px; margin-top: 4px; }
+
+/* Prompt */
+.term-prompt-user {
+  color: #00aeec;
+  font-weight: 700;
+  margin-right: 0;
+}
+.term-prompt-sign {
+  color: #00aeec;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.term-cmd-text { color: #18191c; font-weight: 500; }
+
+/* 内联代码展示 */
+.term-code-inline {
+  margin: 2px 0 2px 18px;
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #61666d;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #f1f2f3;
+  border-radius: 6px;
+  border: 1px solid #e3e5e7;
+}
+
+/* 流式实时输出（执行中） */
+.term-stream-output {
+  margin: 4px 0;
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #18191c;
+  font-size: 12.5px;
+  line-height: 1.7;
+  max-height: 400px;
+  overflow-y: auto;
+  background: #f6f7f8;
+  border-radius: 6px;
+}
+
+/* 闪烁光标 */
+.term-cursor-line { min-height: 1.7em; }
+.term-cursor {
+  color: #00aeec;
+  animation: blink-cursor 1s step-end infinite;
+  font-weight: 700;
+}
+@keyframes blink-cursor { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* 折叠的 chevron */
+.sandbox-block .tool-chevron {
+  font-size: 16px; color: #9499a0;
+  transform: rotate(90deg); transition: transform 0.25s;
+  line-height: 1; flex-shrink: 0;
+}
+.sandbox-block .tool-chevron.open { transform: rotate(-90deg); }
 </style>

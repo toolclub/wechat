@@ -29,3 +29,6 @@ BUILTIN_TOOLS = [
     web_search,
     fetch_webpage,
 ]
+
+# 沙箱工具不在此注册——由 main.py lifespan 中 SSH 连接成功后动态注册。
+# 原因：沙箱可能未部署，若 import 时注册，模型会看到工具但调用全部失败。

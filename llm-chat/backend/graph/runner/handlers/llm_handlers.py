@@ -21,6 +21,9 @@ from graph.runner.utils import sse
 # 需要推送 thinking 状态的节点集合
 _LLM_NODES = frozenset({"call_model", "call_model_after_tool"})
 
+# 需要转发流式 thinking/token 事件的节点集合（包括 planner/reflector）
+_STREAMING_NODES = frozenset({"call_model", "call_model_after_tool", "planner", "reflector"})
+
 # MiniMax 等模型在流式模式下可能输出的工具调用文本残留（需过滤）
 _TOOL_CALL_ARTIFACTS = ("<minimax:tool_call>", "[TOOL_CALL]")
 
@@ -62,7 +65,7 @@ class LLMStreamHandler(EventHandler):
         return (
             event_type == "on_custom_event"
             and event_name in ("llm_token", "llm_thinking")
-            and node_name in _LLM_NODES
+            and node_name in _STREAMING_NODES
         )
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
@@ -134,6 +137,7 @@ class CallModelEndHandler(EventHandler):
     on_chat_model_stream 不触发，ctx.call_model_streamed 始终为 False。
     此 handler 从 on_chain_end 的节点输出中读取 full_response 并推送。
 
+    所有步骤（含中间步骤）均推送内容，确保前端实时可见推理过程。
     有工具调用时由 call_model_after_tool 负责内容，此处跳过。
     """
 
@@ -182,8 +186,8 @@ class CallModelAfterToolEndHandler(EventHandler):
     call_model_after_tool 节点结束处理器。
 
     与 CallModelEndHandler 逻辑类似：
-    - 原生 AsyncOpenAI 调用时 ctx.after_tool_streamed 始终为 False
-    - 从节点输出的 full_response 读取并推送完整内容
+    - 所有步骤（含中间步骤）均流式输出，ctx.after_tool_streamed 通常为 True
+    - 仅在流式未触发时从 full_response 补发完整内容
     """
 
     def matches(self, event_type: str, node_name: str, event_name: str) -> bool:

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
   Plus, Search, ChatDotRound, Delete, Connection,
@@ -35,6 +35,40 @@ function doDelete(id: string) {
   pendingDelete.value = null
   emit('delete', id)
 }
+
+import * as api from '../api'
+
+// 重命名
+const editingId = ref<string | null>(null)
+const editTitle = ref('')
+function startRename(id: string, title: string) {
+  editingId.value = id
+  editTitle.value = title
+  nextTick(() => {
+    const input = document.querySelector('.rename-input') as HTMLInputElement
+    input?.focus()
+    input?.select()
+  })
+}
+async function finishRename(id: string) {
+  const trimmed = editTitle.value.trim()
+  if (trimmed && editingId.value === id) {
+    await api.renameConversation(id, trimmed)
+    // Refresh list to show new title
+    emit('select', id)  // trigger reload
+  }
+  editingId.value = null
+}
+function cancelRename() { editingId.value = null }
+
+// ── 暗色模式 ──
+const isDark = ref(localStorage.getItem('cf_dark') === '1')
+function toggleDark() {
+  isDark.value = !isDark.value
+  document.body.classList.toggle('dark', isDark.value)
+  localStorage.setItem('cf_dark', isDark.value ? '1' : '0')
+}
+onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
 </script>
 
 <template>
@@ -98,7 +132,15 @@ function doDelete(id: string) {
         @click="emit('select', conv.id)"
       >
         <el-icon class="conv-icon"><ChatDotRound /></el-icon>
-        <span class="conv-title">{{ conv.title }}</span>
+        <input v-if="editingId === conv.id"
+          v-model="editTitle"
+          class="rename-input"
+          @blur="finishRename(conv.id)"
+          @keydown.enter="finishRename(conv.id)"
+          @keydown.escape="cancelRename"
+          @click.stop
+        />
+        <span v-else class="conv-title" @dblclick.stop="startRename(conv.id, conv.title)">{{ conv.title }}</span>
         <span v-if="props.activeConvIds?.has(conv.id) && conv.id !== currentConvId" class="conv-active-dot" title="后台生成中"></span>
 
         <!-- 删除操作 -->
@@ -117,6 +159,15 @@ function doDelete(id: string) {
 
     <!-- 底部：运行状态 -->
     <div class="sidebar-footer">
+      <button class="dark-toggle" @click="toggleDark" :title="isDark ? '切换亮色' : '切换暗色'">
+        <svg v-if="isDark" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+        </svg>
+        <span>{{ isDark ? '亮色模式' : '暗色模式' }}</span>
+      </button>
       <div class="model-status">
         <span class="status-dot pulse"></span>
         <span class="status-text">智能路由 · 自动选模型</span>
@@ -286,6 +337,18 @@ function doDelete(id: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1.5px solid var(--cf-indigo);
+  border-radius: 5px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--cf-card);
+  color: var(--cf-text-1);
+  outline: none;
+}
 .conv-actions {
   opacity: 0;
   display: flex;
@@ -345,4 +408,28 @@ function doDelete(id: string) {
 }
 .status-text { font-size: 11.5px; color: #15803d; font-weight: 500; flex: 1; }
 .status-icon { font-size: 12px; color: #15803d; opacity: 0.55; }
+
+/* ── Dark toggle ── */
+.dark-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 13px;
+  margin-bottom: 8px;
+  background: none;
+  border: 1px solid var(--cf-border-soft);
+  border-radius: var(--cf-radius-sm);
+  color: var(--cf-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.dark-toggle:hover {
+  background: var(--cf-hover);
+  color: var(--cf-text-1);
+  border-color: var(--cf-border);
+}
 </style>

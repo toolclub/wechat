@@ -162,7 +162,7 @@ class ReflectorNode(BaseNode):
         updated_plan = self._mark_step(updated_plan, next_idx, "running")
 
         step_results = self._accumulate_step_results(state, full_response)
-        self._persist_step(state, current_idx, full_response, next_idx)
+        await self._persist_step(state, current_idx, full_response, next_idx)
 
         step_msg = self._build_step_message(updated_plan, current_idx, next_idx, total, step_results)
 
@@ -223,10 +223,25 @@ class ReflectorNode(BaseNode):
         decision        = "done"
         reflection_text = "评估完成"
         try:
-            completion = await llm.ainvoke(messages_for_llm)
-            if not completion.choices:
-                raise ValueError("LLM 返回空 choices")
-            raw = (completion.choices[0].message.content or "").strip()
+            # 流式调用：逐 token 推送 thinking 事件给前端，避免长时间静默
+            from langchain_core.callbacks.manager import adispatch_custom_event
+
+            _THINK_PREFIX = "\x00THINK\x00"
+            content_parts: list[str] = []
+            async for delta in llm.astream(messages_for_llm, temperature=0.1):
+                if delta.startswith(_THINK_PREFIX):
+                    thinking_text = delta[len(_THINK_PREFIX):]
+                    await adispatch_custom_event(
+                        "llm_thinking", {"content": thinking_text, "node": "reflector"},
+                    )
+                else:
+                    content_parts.append(delta)
+                    await adispatch_custom_event(
+                        "llm_thinking", {"content": delta, "node": "reflector"},
+                    )
+            raw = "".join(content_parts).strip()
+            if not raw:
+                raise ValueError("LLM 返回空内容")
             if "```" in raw:
                 for part in raw.split("```"):
                     part = part.strip()

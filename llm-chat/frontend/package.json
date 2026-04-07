@@ -13,7 +13,9 @@
     "@element-plus/icons-vue": "^2.3.2",
     "element-plus": "^2.13.6",
     "highlight.js": "^11.11.1",
+    "katex": "^0.16.45",
     "marked": "^13.0.0",
+    "marked-katex-extension": "^5.1.8",
     "tslib": "^2.8.1",
     "vue": "^3.5.13"
   },

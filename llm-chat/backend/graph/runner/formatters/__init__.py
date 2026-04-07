@@ -8,13 +8,19 @@ formatters 包：工具结果格式化器注册表
 from graph.runner.formatters.base import ToolResultFormatter
 from graph.runner.formatters.fetch_webpage import FetchWebpageFormatter
 from graph.runner.formatters.generic import GenericToolFormatter
+from graph.runner.formatters.sandbox import SandboxFormatter
 from graph.runner.formatters.web_search import WebSearchFormatter
 
 # ── 工具名 → 格式化器实例映射 ─────────────────────────────────────────────────
 # 未在此注册的工具自动使用 DEFAULT_FORMATTER
+_sandbox_fmt = SandboxFormatter()
 REGISTRY: dict[str, ToolResultFormatter] = {
     "web_search":    WebSearchFormatter(),
     "fetch_webpage": FetchWebpageFormatter(),
+    "execute_code":  _sandbox_fmt,
+    "run_shell":     _sandbox_fmt,
+    "sandbox_write": _sandbox_fmt,
+    "sandbox_read":  _sandbox_fmt,
 }
 
 DEFAULT_FORMATTER: ToolResultFormatter = GenericToolFormatter()

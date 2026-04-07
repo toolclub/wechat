@@ -56,42 +56,54 @@ class CallModelAfterToolNode(BaseNode):
 
     async def execute(self, state: GraphState) -> dict:
         """
-        综合工具结果，生成最终回复。
+        综合工具结果，生成最终回复（或继续调用更多工具）。
 
-        步骤：
-          1. 保留最近 _MAX_MESSAGES 条消息（避免上下文过长）
-          2. 注入步骤边界指令（计划模式）
-          3. 含图片 → 视觉路径
-          4. 无图片 → 主 LLM 路径
+        工具绑定策略：
+          - 无计划模式 + 有沙箱工具 → 绑定工具（允许 write 后继续 execute）
+          - 计划模式中间步骤 → 绑定工具（允许多轮工具调用）
+          - 计划模式末步 → 不绑工具（强制流式生成最终产品）
         """
         model       = state["answer_model"]
         temperature = state["temperature"]
         conv_id     = state.get("conv_id", "")
         plan        = state.get("plan", [])
         current_idx = state.get("current_step_index", 0)
+        route       = state.get("route", "")
+
+        is_last = not plan or current_idx >= len(plan) - 1
 
         messages = list(state["messages"])
-        messages = messages[-_MAX_MESSAGES:]  # 截取最近消息
+        messages = messages[-_MAX_MESSAGES:]
 
         # ── 计划模式：注入步骤边界指令 ──────────────────────────────────────
         if plan and current_idx < len(plan):
             messages = self._inject_boundary(messages, plan, current_idx)
 
+        # ── 工具绑定决策 ──────────────────────────────────────────────────────
+        # 计划末步不绑工具（强制流式输出最终产品）
+        # 其他情况绑定工具，让模型可以在看到第一轮工具结果后继续调用更多工具
+        # 典型场景：sandbox_write 后需要 execute_code 运行
+        use_tools = bool(self._tools) and not (plan and is_last)
+        tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
+
         logger.info(
-            "call_model_after_tool 开始 | conv=%s | model=%s | step=%s/%s | messages=%d",
+            "call_model_after_tool 开始 | conv=%s | model=%s | step=%s/%s | "
+            "is_last=%s | use_tools=%s | messages=%d",
             conv_id, model,
             current_idx + 1 if plan else "-",
             len(plan) if plan else "-",
+            is_last, use_tools,
             len(messages),
         )
 
-        # VisionNode 已在上游完成图片分析，vision_description 写入 state。
-        # 此处无需再走视觉路径；仅当 VisionNode 降级失败时才回退。
         vision_desc = state.get("vision_description", "")
         if state.get("images") and not vision_desc:
-            return await self._vision_path(state, messages, model, temperature, conv_id)
+            return await self._vision_path(state, messages, model, temperature, conv_id, is_last=is_last)
         else:
-            return await self._llm_path(messages, model, temperature, conv_id)
+            return await self._llm_path(
+                messages, model, temperature, conv_id,
+                is_last=is_last, tools_schema=tools_schema,
+            )
 
     def _inject_boundary(
         self,
@@ -198,9 +210,6 @@ class CallModelAfterToolNode(BaseNode):
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
     _VISION_TIMEOUT = 300.0
 
-    # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
-    _VISION_TIMEOUT = 300.0
-
     async def _vision_path(
         self,
         state: GraphState,
@@ -208,25 +217,37 @@ class CallModelAfterToolNode(BaseNode):
         model: str,
         temperature: float,
         conv_id: str,
+        is_last: bool = True,
     ) -> dict:
-        """含图片时走视觉路径，流式输出最终回复（不绑定工具）。"""
+        """含图片时走视觉路径。所有步骤均流式输出（中间步骤也实时可见）。"""
         vision_model = VISION_MODEL or model
         vision_llm   = get_vision_llm(model=vision_model, temperature=temperature)
         oai_messages = self._to_openai_messages(messages)
 
+        step_label = "末步" if is_last else "中间步骤"
         logger.info(
-            "call_model_after_tool (vision) 请求发出 | conv=%s | model=%s | msgs=%d",
-            conv_id, vision_model, len(oai_messages),
+            "call_model_after_tool (vision) 请求发出（流式，%s） | conv=%s | model=%s | msgs=%d",
+            step_label, conv_id, vision_model, len(oai_messages),
         )
         from logging_config import log_prompt
         log_prompt(conv_id, "call_model_after_tool_vision", vision_model, oai_messages)
 
         try:
-            return await self._stream_tokens(
+            result = await self._stream_tokens(
                 vision_llm, oai_messages, temperature, conv_id,
                 node="call_model_after_tool",
                 timeout=self._VISION_TIMEOUT,
             )
+            stream_err = result.pop("_stream_error", None)
+            if stream_err:
+                if self._is_audit_error(stream_err):
+                    logger.warning("call_model_after_tool (vision) 流式触发内容审核 | conv=%s", conv_id)
+                    return self._audit_fallback()
+                logger.warning(
+                    "call_model_after_tool (vision) 流式异常但保留部分内容 | conv=%s | partial_len=%d",
+                    conv_id, len(result.get("full_response", "")),
+                )
+            return result
         except asyncio.TimeoutError:
             logger.error(
                 "call_model_after_tool (vision) 超时 %.0fs | conv=%s | model=%s",
@@ -249,22 +270,56 @@ class CallModelAfterToolNode(BaseNode):
         model: str,
         temperature: float,
         conv_id: str,
+        is_last: bool = True,
+        tools_schema: list | None = None,
     ) -> dict:
-        """主 LLM 路径，不绑定工具，全程流式输出。使用 BaseNode._stream_tokens 共享实现。"""
+        """
+        主 LLM 路径。
+
+        tools_schema 非空时：非流式调用（需要完整 tool_calls JSON），
+                           模型可继续调用工具（如 write 后 execute）。
+        tools_schema 为空时：流式调用（逐 token 输出最终回复）。
+        """
         llm          = get_chat_llm(model=model, temperature=temperature)
         oai_messages = self._to_openai_messages(messages)
 
-        logger.info(
-            "call_model_after_tool LLM 请求（流式） | conv=%s | model=%s | msgs=%d",
-            conv_id, model, len(oai_messages),
-        )
         from logging_config import log_prompt
-        log_prompt(conv_id, "call_model_after_tool", model, oai_messages)
 
+        step_label = "末步" if is_last else "中间步骤"
+        mode_label = "非流式+工具" if tools_schema else "流式"
+        logger.info(
+            "call_model_after_tool LLM 请求（%s，%s） | conv=%s | model=%s | msgs=%d",
+            mode_label, step_label, conv_id, model, len(oai_messages),
+        )
+        log_prompt(conv_id, "call_model_after_tool", model, oai_messages)
         try:
-            return await self._stream_tokens(
+            # ── 绑定工具时：流式调用（thinking/content 实时推送 + tool_calls 收集）──
+            if tools_schema:
+                result = await self._stream_tokens_with_tools(
+                    llm, oai_messages, tools_schema, temperature,
+                    conv_id, "call_model_after_tool",
+                )
+                stream_err = result.pop("_stream_error", None)
+                if stream_err:
+                    if self._is_audit_error(stream_err):
+                        return self._audit_fallback()
+                return result
+
+            # ── 不绑工具时：流式输出 ──
+            result = await self._stream_tokens(
                 llm, oai_messages, temperature, conv_id, node="call_model_after_tool"
             )
+            # _stream_tokens 中途异常时返回 partial content + _stream_error 标记
+            stream_err = result.pop("_stream_error", None)
+            if stream_err:
+                if self._is_audit_error(stream_err):
+                    logger.warning("call_model_after_tool 流式触发内容审核 | conv=%s", conv_id)
+                    return self._audit_fallback()
+                logger.warning(
+                    "call_model_after_tool 流式异常但保留部分内容 | conv=%s | partial_len=%d",
+                    conv_id, len(result.get("full_response", "")),
+                )
+            return result
         except asyncio.TimeoutError:
             logger.error("call_model_after_tool 超时 | conv=%s | model=%s", conv_id, model)
             raise

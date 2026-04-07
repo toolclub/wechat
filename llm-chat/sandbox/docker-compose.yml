@@ -1,0 +1,88 @@
+# ChatFlow Sandbox Worker 集群
+#
+# ═══════════════════════════════════════════════════════════════
+#  单机启动：
+#    docker compose up -d
+#
+#  3 节点集群启动：
+#    docker compose --profile cluster up -d
+#
+#  .env 对应配置：
+#    单机：  SANDBOX_WORKERS=[{"id":"w1","host":"host.docker.internal","port":2222,"user":"root","password":"sandbox123"}]
+#    集群：  SANDBOX_WORKERS=[{"id":"w1","host":"host.docker.internal","port":2222,"user":"root","password":"sandbox123"},{"id":"w2","host":"host.docker.internal","port":2223,"user":"root","password":"sandbox123"},{"id":"w3","host":"host.docker.internal","port":2224,"user":"root","password":"sandbox123"}]
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ── 默认单节点 ──────────────────────────────────────
+  sandbox-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatflow-sandbox
+    ports:
+      - "2222:22"
+    volumes:
+      - sandbox-data-1:/sandbox
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    restart: unless-stopped
+
+  # ── 集群节点（docker compose --profile cluster up -d）──
+  w1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatflow-sandbox-w1
+    ports:
+      - "2222:22"
+    volumes:
+      - sandbox-data-1:/sandbox
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    restart: unless-stopped
+    profiles: ["cluster"]
+
+  w2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatflow-sandbox-w2
+    ports:
+      - "2223:22"
+    volumes:
+      - sandbox-data-2:/sandbox
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    restart: unless-stopped
+    profiles: ["cluster"]
+
+  w3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatflow-sandbox-w3
+    ports:
+      - "2224:22"
+    volumes:
+      - sandbox-data-3:/sandbox
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    restart: unless-stopped
+    profiles: ["cluster"]
+
+volumes:
+  sandbox-data-1:
+  sandbox-data-2:
+  sandbox-data-3:

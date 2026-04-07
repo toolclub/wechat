@@ -131,6 +131,94 @@ class PlannerNode(BaseNode):
         # chat 路由不规划
         return False
 
+    # ── 续写信号词（用户想继续被中断的任务）──────────────────────────────────────
+    _CONTINUATION_WORDS = frozenset([
+        "继续", "continue", "接着", "接着写", "接着做", "接上",
+        "继续写", "继续做", "继续完成", "接着完成",
+    ])
+
+    @classmethod
+    def _is_continuation(cls, user_msg: str) -> bool:
+        """判断用户是否在要求续写上次被中断的任务。"""
+        return user_msg.strip() in cls._CONTINUATION_WORDS
+
+    async def _try_resume_from_db(self, state: GraphState) -> PlannerNodeOutput | None:
+        """
+        从 DB 加载上次计划，直接跳到第一个未完成步骤。
+
+        返回值：
+          - 成功恢复 → 返回 PlannerNodeOutput（plan / plan_goal / current_step_index / step_results）
+          - 无可恢复计划 → 返回 None（调用方回退到正常规划流程）
+        """
+        conv_id = state.get("conv_id", "")
+        try:
+            from db.plan_store import get_latest_plan_for_conv
+            db_plan = await get_latest_plan_for_conv(conv_id)
+        except Exception as exc:
+            logger.warning("续写：读取 DB 计划失败: %s", exc)
+            return None
+
+        if not db_plan:
+            return None
+
+        steps_raw = db_plan.get("steps", [])
+        if not steps_raw:
+            return None
+
+        # 重建运行时 PlanStep 列表，done 的步骤带上 result
+        plan: list[PlanStep] = []
+        for s in steps_raw:
+            plan.append(PlanStep(
+                id=s.get("id", ""),
+                title=s.get("title", ""),
+                description=s.get("description", ""),
+                status=s.get("status", "pending"),
+                result=s.get("result", ""),
+            ))
+
+        # 找第一个未完成步骤
+        resume_idx = None
+        for i, step in enumerate(plan):
+            if step["status"] != "done":
+                resume_idx = i
+                break
+
+        if resume_idx is None:
+            # 所有步骤已完成，无需续写
+            logger.info("续写：计划所有步骤已完成 | conv=%s | plan_id=%s", conv_id, db_plan.get("id"))
+            return None
+
+        # 当前步骤可能有部分结果（崩溃时 _save_partial_plan_step 写入的）
+        # 将其保留在 plan step 中，供 _build_focused_step_messages 构建续写上下文
+        partial_result = plan[resume_idx].get("result", "")
+
+        # 把续写点标为 running（保留 partial result）
+        plan[resume_idx] = {**plan[resume_idx], "status": "running"}
+
+        # step_results 从已完成步骤的 result 中重建
+        step_results = [
+            plan[i]["result"]
+            for i in range(resume_idx)
+            if plan[i].get("result")
+        ]
+
+        goal = db_plan.get("goal", state.get("user_message", ""))
+        logger.info(
+            "续写：从 DB 恢复计划 | conv=%s | plan_id=%s | resume_step=%d/%d | "
+            "partial_result_len=%d | goal=%.60s",
+            conv_id, db_plan.get("id"), resume_idx + 1, len(plan),
+            len(partial_result), goal,
+        )
+
+        return {
+            "plan":               plan,
+            "plan_id":            db_plan.get("id", ""),
+            "plan_goal":          goal,
+            "current_step_index": resume_idx,
+            "step_iterations":    0,
+            "step_results":       step_results,
+        }
+
     async def execute(self, state: GraphState) -> PlannerNodeOutput:
         """
         规划执行步骤。
@@ -138,13 +226,26 @@ class PlannerNode(BaseNode):
         search / search_code 路由始终规划；
         code 路由在任务复杂时触发规划；
         chat 路由直接返回空计划（自然对话）。
+
+        续写检测：用户发"继续"时，优先从 DB 恢复上次中断的计划，
+        跳过已完成步骤，直接从断点处重新执行，无需重跑步骤 1、2。
         """
         route    = state.get("route", "")
         user_msg = state.get("user_message", "")
 
+        # ── 续写检测：优先从 DB 恢复中断计划 ──────────────────────────────────
+        # 用户说"继续"时，先尝试找上次未完成的计划，直接跳到断点步骤执行，
+        # 避免重新规划和重复搜索，节省时间和 API 费用。
+        if self._is_continuation(user_msg):
+            resumed = await self._try_resume_from_db(state)
+            if resumed:
+                return resumed
+            # 无可恢复计划 → 回退到普通流程（让模型自由续写）
+
         if not self._needs_planning(route, user_msg):
             return {
                 "plan":               [],
+                "plan_goal":          "",
                 "current_step_index": 0,
                 "step_iterations":    0,
                 "step_results":       [],
@@ -204,13 +305,33 @@ class PlannerNode(BaseNode):
             {"role": "user",   "content": planning_msg},
         ]
 
-        # ── 层 1：重试拿到非空 content ──────────────────────────────────────
+        # ── 层 1：流式调用，逐 token 推送 thinking 事件给前端 ──────────────
+        from langchain_core.callbacks.manager import adispatch_custom_event
         from logging_config import log_prompt
         log_prompt(state.get("conv_id", ""), "planner", model, messages)
+
+        _THINK_PREFIX = "\x00THINK\x00"
         content = ""
         for attempt in range(3):
-            completion = await llm.ainvoke(messages)
-            raw = completion.choices[0].message.content or ""
+            content_parts: list[str] = []
+            try:
+                async for delta in llm.astream(messages, temperature=0.1):
+                    if delta.startswith(_THINK_PREFIX):
+                        thinking_text = delta[len(_THINK_PREFIX):]
+                        await adispatch_custom_event(
+                            "llm_thinking", {"content": thinking_text, "node": "planner"},
+                        )
+                    else:
+                        content_parts.append(delta)
+                        await adispatch_custom_event(
+                            "llm_thinking", {"content": delta, "node": "planner"},
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "Planner 流式调用异常 [第%d/3次] | error=%s", attempt + 1, exc,
+                )
+                continue
+            raw = "".join(content_parts)
             content = raw.strip()
             logger.info(
                 "Planner 原始响应 [第%d次] | model=%s | len=%d | raw='%.200s'",
@@ -322,6 +443,7 @@ class PlannerNode(BaseNode):
         return {
             "plan":               plan_steps,
             "plan_id":            plan_id,
+            "plan_goal":          user_msg,
             "current_step_index": 0,
             "step_iterations":    0,
             "step_results":       [],

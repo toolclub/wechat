@@ -84,7 +84,7 @@
 | **Ollama（本地）** | qwen3、qwen2.5vl、bge-m3 | 全功能本地运行 |
 | **OpenAI** | gpt-4o、text-embedding-3 | 高精度云端 |
 | **智谱 GLM** | GLM-4、GLM-4.6V | 中文优化 + 视觉 |
-| **MiniMax** | MiniMax-M2.7 | 长上下文 + 多模态 |
+| **MiniMax** | MiniMax-M2.7-highspeed | 长上下文 + 多模态 |
 | **其他** | 任意 OpenAI 兼容接口 | 自由配置 |
 
 ---

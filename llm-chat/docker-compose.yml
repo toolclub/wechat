@@ -66,6 +66,8 @@ services:
       - .env
     ports:
       - "${BACKEND_PORT}:${BACKEND_PORT}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 上让容器能访问宿主机（沙箱 SSH）
     volumes:
       - ${BACKEND_LOG_HOST_DIR}:/var/log/chatflow
       - ${SECRET_DIR:-/opt/secret}:/opt/secret:ro   # 密钥文件目录（只读，用于解密 ENC(...) 值）

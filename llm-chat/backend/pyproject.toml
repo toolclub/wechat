@@ -50,6 +50,9 @@ dependencies = [
      # ── 语义缓存 ──
     "redis[hiredis]>=5.0.0",
     "numpy>=1.26.0",
+
+    # ── 沙箱代码执行（SSH 连接） ──
+    "asyncssh>=2.14.0",
 ]
 
 [project.scripts]

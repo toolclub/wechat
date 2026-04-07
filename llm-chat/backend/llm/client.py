@@ -151,5 +151,96 @@ class LLMClient:
             elif hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 yield "\x00THINK\x00" + delta.reasoning_content
 
+    async def astream_with_tools(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[ChatCompletionToolParam],
+        temperature: float | None = None,
+        timeout: float = 180.0,
+    ) -> tuple[str, str, list[dict]]:
+        """
+        流式调用 LLM（绑定工具）：边流式输出 thinking/content，边收集 tool_calls。
+
+        OpenAI 流式 function calling 协议：
+          chunk.choices[0].delta.tool_calls = [{"index":0, "id":"call_xxx", "function":{"name":"...", "arguments":"片段"}}]
+          多个 chunk 的 arguments 拼接成完整 JSON。
+
+        返回 (content, thinking, tool_calls_list)：
+          - content: 完整文本内容
+          - thinking: 推理过程（reasoning_content）
+          - tool_calls_list: [{"id":"...", "name":"...", "arguments":"完整JSON"}]
+
+        调用方（_stream_tokens_with_tools）负责在迭代过程中 dispatch SSE events。
+        此方法只负责 HTTP 流式请求 + 拼装结果。
+        """
+        temp = temperature if temperature is not None else self.temperature
+
+        create_kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temp,
+            "stream": True,
+            "timeout": timeout,
+        }
+
+        stream: AsyncStream[ChatCompletionChunk] = await self._client.chat.completions.create(
+            **create_kwargs
+        )
+
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        # tool_calls 拼装：index → {id, name, arguments_fragments}
+        tc_builders: dict[int, dict] = {}
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # 文本内容
+            if delta.content:
+                content_parts.append(delta.content)
+                yield ("content", delta.content)
+
+            # 推理过程
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                thinking_parts.append(delta.reasoning_content)
+                yield ("thinking", delta.reasoning_content)
+
+            # tool_calls fragments
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tc_builders:
+                        tc_builders[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                            "arguments": "",
+                        }
+                    else:
+                        if tc_delta.id:
+                            tc_builders[idx]["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            tc_builders[idx]["name"] = tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tc_builders[idx]["arguments"] += tc_delta.function.arguments
+
+        # 拼装最终结果
+        content = "".join(content_parts)
+        thinking = "".join(thinking_parts)
+        tool_calls = [
+            {"id": v["id"], "name": v["name"], "arguments": v["arguments"]}
+            for _, v in sorted(tc_builders.items())
+        ]
+
+        # 通过特殊 yield 传递最终结果
+        import json
+        yield ("__done__", json.dumps({
+            "content": content,
+            "thinking": thinking,
+            "tool_calls": tool_calls,
+        }, ensure_ascii=False))
+
     def __repr__(self) -> str:
         return f"LLMClient(model={self.model!r}, temperature={self.temperature})"

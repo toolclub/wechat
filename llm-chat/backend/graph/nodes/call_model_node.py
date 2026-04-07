@@ -142,14 +142,13 @@ class CallModelNode(BaseNode):
 
         # 工具绑定策略：
         #   search / search_code：始终绑定（需要搜索信息）
-        #   code + 多步计划中间步骤：绑定（可能需要搜索 API 文档等）
-        #   code + 无计划 / chat：不绑定
+        #   code：始终绑定（可能需要执行代码、搜索文档等）
+        #   chat：不绑定（纯对话不需要工具）
         is_intermediate_plan_step = bool(plan) and cur_idx < len(plan) - 1
         use_tools = bool(
             self._tools and (
                 not route
-                or route in ("search", "search_code")
-                or (route == "code" and is_intermediate_plan_step)
+                or route in ("search", "search_code", "code")
             )
         )
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
@@ -241,7 +240,8 @@ class CallModelNode(BaseNode):
 
         total       = len(plan)
         is_last     = current_idx >= total - 1
-        user_msg    = state.get("user_message", "")
+        # 续写场景：user_message 是"继续"，用 plan_goal 还原原始任务目标
+        user_msg    = state.get("plan_goal") or state.get("user_message", "")
         vision_desc = state.get("vision_description", "")
         conv_id     = state.get("conv_id", "")
 
@@ -283,19 +283,34 @@ class CallModelNode(BaseNode):
                     AIMessage(content=f"【步骤{i + 1}：{title}的执行结果】\n{result}")
                 )
 
-        # ── 当前步骤指令 ─────────────────────────────────────────────────────
+        # ── 当前步骤指令（含断点续传的部分结果） ──────────────────────────────
         current_step = plan[current_idx]
+        # 当前步骤可能有部分结果（崩溃时 _save_partial_plan_step 写入的）
+        # 若有，注入到上下文中让模型从中断处继续，而非从头开始
+        partial_result = current_step.get("result", "")
+
         if is_last:
             step_instruction = (
                 f"请基于以上所有步骤的执行结果，完成最终任务：\n"
                 f"{current_step['description']}"
             )
+            if partial_result:
+                step_instruction += (
+                    f"\n\n⚠️ 上次执行此步骤时中断了，以下是已生成的部分内容：\n"
+                    f"{partial_result}\n\n"
+                    f"请从中断处接着输出，不要重复上面已有的内容。"
+                )
         else:
             step_instruction = (
                 f"\n\n---\n**[执行步骤 {current_idx + 1}/{total}]: {current_step['title']}**\n"
                 f"具体任务：{current_step['description']}\n"
                 "请使用工具完成此步骤，收集所需信息。"
             )
+            if partial_result:
+                step_instruction += (
+                    f"\n\n上次执行中断，以下是已有的部分结果：\n{partial_result}\n"
+                    f"请从中断处继续。"
+                )
         messages.append(HumanMessage(content=step_instruction))
 
         logger.info(
@@ -339,20 +354,28 @@ class CallModelNode(BaseNode):
 
         try:
             if use_tools:
-                # 工具调用须非流式，拿到完整 JSON
-                completion = await vision_llm.ainvoke(
-                    oai_messages,
-                    tools=tools_schema,
-                    timeout=self._VISION_TIMEOUT,
+                # 工具调用也流式：thinking 实时可见 + tool_calls 收集
+                result = await self._stream_tokens_with_tools(
+                    vision_llm, oai_messages, tools_schema, temperature,
+                    conv_id, "call_model_vision", timeout=self._VISION_TIMEOUT,
                 )
-                return self._build_response(completion, conv_id, "vision")
+                stream_err = result.pop("_stream_error", None)
+                if stream_err and self._is_audit_error(stream_err):
+                    return self._audit_fallback()
+                return result
             else:
                 # 无工具时流式，使用 BaseNode._stream_tokens 逐 token 推送前端
-                return await self._stream_tokens(
+                result = await self._stream_tokens(
                     vision_llm, oai_messages, temperature, conv_id,
                     node="call_model_vision",
                     timeout=self._VISION_TIMEOUT,
                 )
+                stream_err = result.pop("_stream_error", None)
+                if stream_err:
+                    if self._is_audit_error(stream_err):
+                        logger.warning("call_model (vision) 流式触发内容审核 | conv=%s", conv_id)
+                        return self._audit_fallback()
+                return result
         except asyncio.TimeoutError:
             logger.error(
                 "call_model (vision) 超时 %.0fs | conv=%s | model=%s",
@@ -360,6 +383,9 @@ class CallModelNode(BaseNode):
             )
             raise
         except Exception as exc:
+            if self._is_audit_error(exc):
+                logger.warning("call_model (vision) 触发内容审核 | conv=%s", conv_id)
+                return self._audit_fallback()
             logger.error(
                 "call_model (vision) 异常 | conv=%s | model=%s | error=%s",
                 conv_id, vision_model, exc, exc_info=True,
@@ -394,16 +420,38 @@ class CallModelNode(BaseNode):
 
         try:
             if use_tools:
-                # 绑定工具时非流式，确保 tool_calls JSON 完整返回
-                completion = await llm.ainvoke(oai_messages, tools=tools_schema, timeout=180.0)
-                return self._build_response(completion, conv_id, "llm")
+                # 绑定工具时也走流式：thinking/content 实时推送，tool_calls 同步收集
+                result = await self._stream_tokens_with_tools(
+                    llm, oai_messages, tools_schema, temperature, conv_id, "call_model",
+                )
+                stream_err = result.pop("_stream_error", None)
+                if stream_err:
+                    if self._is_audit_error(stream_err):
+                        return self._audit_fallback()
+                return result
             else:
                 # 无工具时流式，逐 token 通过 adispatch_custom_event 推送给前端
-                return await self._stream_tokens(llm, oai_messages, temperature, conv_id, "call_model")
+                result = await self._stream_tokens(llm, oai_messages, temperature, conv_id, "call_model")
+                # _stream_tokens 中途异常时返回 partial content + _stream_error 标记
+                # 审核错误：用优雅降级替换部分内容；其他错误：保留部分内容供断点续传
+                stream_err = result.pop("_stream_error", None)
+                if stream_err:
+                    if self._is_audit_error(stream_err):
+                        logger.warning("call_model 流式触发内容审核 | conv=%s", conv_id)
+                        return self._audit_fallback()
+                    # 非审核错误：保留已流式的部分内容（stream.py 会保存到 DB 供续传）
+                    logger.warning(
+                        "call_model 流式异常但保留部分内容 | conv=%s | partial_len=%d | error=%s",
+                        conv_id, len(result.get("full_response", "")), stream_err,
+                    )
+                return result
         except asyncio.TimeoutError:
             logger.error("call_model 超时 | conv=%s | model=%s", conv_id, model)
             raise
         except Exception as exc:
+            if self._is_audit_error(exc):
+                logger.warning("call_model 触发内容审核 | conv=%s", conv_id)
+                return self._audit_fallback()
             logger.error("call_model LLM 异常 | conv=%s | model=%s | error=%s", conv_id, model, exc, exc_info=True)
             raise
 

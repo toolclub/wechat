@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     # ── MCP 服务器（可选，默认空） ────────────────────────────────────────────
     mcp_servers: dict[str, Any] = {}
 
+    # ── 沙箱代码执行（可选） ──────────────────────────────────────────────────
+    sandbox_enabled: bool = False
+    # JSON 数组：[{"id":"w1","host":"192.168.1.100","port":22,"user":"sandbox","key_file":"~/.ssh/id_rsa"}]
+    sandbox_workers: list[dict[str, Any]] = []
+    sandbox_timeout: int = 30        # 单次执行超时（秒）
+    sandbox_cleanup_hours: int = 12  # session 目录过期清理（小时）
+
     # ── 服务端口 ──────────────────────────────────────────────────────────────
     backend_host: str
     backend_port: int
@@ -116,8 +123,9 @@ class Settings(BaseSettings):
         "- 实时或最新信息（新闻、价格、天气、版本号、赛事结果等）\n"
         "- 你不确定或没有把握的具体事实、数据、文档内容\n"
         "- 需要了解某个你不熟悉的产品、概念、技术细节时\n"
+        "- 需要验证代码、运行脚本、安装依赖、处理数据时，使用 execute_code / run_shell 在沙箱中执行\n"
         "工具返回后只基于实际内容作答，不补充猜测。\n"
-        "无工具可用时直接回答，不要说‘帮你搜索/查一下’之类的话。\n"
+        "无工具可用时直接回答，不要说’帮你搜索/查一下’之类的话。\n"
         "\n"
         "【澄清协议】以下情况必须触发，不得自行假设后直接执行：\n"
         "① 用户意图存在多种解读，需要确认目的\n"
@@ -205,6 +213,11 @@ SEMANTIC_CACHE_NAMESPACE_MODE    = settings.semantic_cache_namespace_mode
 SEMANTIC_CACHE_SEARCH_TTL_HOURS  = settings.semantic_cache_search_ttl_hours
 
 MCP_SERVERS               = settings.mcp_servers
+
+SANDBOX_ENABLED           = settings.sandbox_enabled
+SANDBOX_WORKERS           = settings.sandbox_workers
+SANDBOX_TIMEOUT           = settings.sandbox_timeout
+SANDBOX_CLEANUP_HOURS     = settings.sandbox_cleanup_hours
 
 BACKEND_HOST              = settings.backend_host
 BACKEND_PORT              = settings.backend_port

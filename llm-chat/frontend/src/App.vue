@@ -88,6 +88,8 @@ const currentConvTitle = computed(() => {
         @toggle-panel="panelOpen = !panelOpen"
         @clarification-submit="chat.submitClarification($event)"
         @continue="chat.continueLast()"
+        @regenerate="chat.regenerate()"
+        @edit-message="chat.editMessage($event.index, $event.content)"
       />
 
       <!-- 右侧：认知面板 -->
@@ -148,6 +150,35 @@ const currentConvTitle = computed(() => {
   --cf-sidebar-w: 240px;
 }
 
+body.dark {
+  --cf-bg:          #0f0f0f;
+  --cf-sidebar:     #1a1a1a;
+  --cf-card:        #1a1a1a;
+  --cf-hover:       #2a2a2a;
+  --cf-active:      #1e2433;
+
+  --cf-border:      #2e2e2e;
+  --cf-border-soft: #252525;
+
+  --cf-text-1: #e5e5e5;
+  --cf-text-2: #a3a3a3;
+  --cf-text-3: #737373;
+  --cf-text-4: #525252;
+  --cf-text-5: #404040;
+
+  --cf-indigo:  #818cf8;
+  --cf-indigo-d:#6366f1;
+  --cf-purple:  #a78bfa;
+  --cf-green:   #4ade80;
+  --cf-red:     #f87171;
+  --cf-amber:   #fbbf24;
+
+  --cf-shadow-xs: 0 2px 8px rgba(0,0,0,0.3);
+  --cf-shadow-sm: 0 4px 16px rgba(0,0,0,0.4);
+  --cf-shadow-md: 0 8px 24px rgba(0,0,0,0.5);
+  --cf-shadow-lg: 0 12px 32px rgba(0,0,0,0.6);
+}
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -168,6 +199,82 @@ html, body {
 ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
 
 #app { height: 100%; }
+
+/* ── Dark mode: body & scrollbar ── */
+body.dark {
+  background: var(--cf-bg);
+  color: var(--cf-text-1);
+}
+body.dark ::-webkit-scrollbar-thumb { background: #404040; }
+body.dark ::-webkit-scrollbar-thumb:hover { background: #525252; }
+
+/* Dark mode overrides for components with hardcoded colors */
+body.dark .chat-view,
+body.dark .messages-scroll { background: #141414; }
+body.dark .chat-header { background: #1a1a1a; border-bottom-color: var(--cf-border); box-shadow: 0 1px 6px rgba(0,0,0,0.3); }
+body.dark .user-bubble { background: #2a2a2a; color: #e5e5e5; }
+body.dark .ai-avatar { background: #1a1a1a; border-color: #333; }
+body.dark .user-avatar { background: #2a2a2a; border-color: #333; }
+body.dark .hero-title { background: linear-gradient(135deg, #e5e5e5 0%, #818cf8 100%); -webkit-background-clip: text; background-clip: text; }
+body.dark .hero-icon-wrap { background: #1a1a1a; border-color: #333; }
+body.dark .header-brand-icon { background: #1a1a1a; border-color: #333; }
+body.dark .logo-icon { background: #1a1a1a; border-color: #333; }
+
+/* Dark code blocks */
+body.dark .markdown-body .code-block { background: #1e1e1e; border-color: #333; }
+body.dark .markdown-body .code-header { background: #252525; border-bottom-color: #333; }
+body.dark .markdown-body .code-lang-badge { color: #a3a3a3; }
+body.dark .markdown-body .code-pre { background: #1e1e1e; }
+body.dark .markdown-body code { background: #2a2a3a; color: #a78bfa; border-color: #333; }
+body.dark .markdown-body th { background: #252525; color: #e5e5e5; }
+body.dark .markdown-body th, body.dark .markdown-body td { border-color: #333; }
+body.dark .markdown-body tr:nth-child(even) td { background: #1e1e1e; }
+body.dark .markdown-body tr:hover td { background: #1e2433; }
+body.dark .markdown-body blockquote { background: #1a1a2a; color: #a3a3a3; border-left-color: #6366f1; }
+body.dark .markdown-body h1, body.dark .markdown-body h2, body.dark .markdown-body h3 { color: #e5e5e5; }
+body.dark .markdown-body h2 { border-bottom-color: #333; }
+body.dark .markdown-body strong { color: #e5e5e5; }
+body.dark .markdown-body a { color: #818cf8; text-decoration-color: #4338ca; }
+
+/* Dark mode for tool blocks and think blocks */
+body.dark .tool-block { background: #1a1a1a; border-color: #2e2e2e; }
+body.dark .tool-block-sources .tool-header-flat { background: #1a1a1a; border-color: #2e2e2e; border-left-color: #6366f1; }
+body.dark .think-block { background: #1a1a2a; border-color: #2e2e3e; }
+body.dark .think-body { background: #151520; border-top-color: #2e2e3e; }
+
+/* Dark mode for step borders */
+body.dark .section-wrap.has-step { border-left-color: #333; }
+
+/* Dark SVG fills in logo/icons */
+body.dark .sidebar-logo svg path,
+body.dark .header-brand-icon svg path,
+body.dark .hero-icon-wrap svg path,
+body.dark .ai-avatar svg path { fill: #e5e5e5; }
+body.dark .user-avatar svg circle { fill: #a3a3a3; }
+body.dark .user-avatar svg path { stroke: #a3a3a3; }
+
+/* Dark workflow card */
+body.dark .wf-card { background: #1a1a2a; border-color: #2e2e3e; }
+body.dark .wf-card-header { background: #1e1e2e; border-bottom-color: #2e2e3e; }
+
+/* Dark mode model status in sidebar */
+body.dark .model-status { background: linear-gradient(135deg, #0a1a0a, #0a200a); border-color: #1a3a1a; }
+body.dark .status-text { color: #4ade80; }
+body.dark .status-icon { color: #4ade80; }
+
+/* Dark input area */
+body.dark .input-card { background: #1a1a1a; border-color: #333; }
+body.dark .the-textarea { color: #e5e5e5; }
+body.dark .input-card:focus-within { border-color: #6366f1; box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(99,102,241,0.15); }
+
+/* Dark continue button */
+body.dark .continue-btn { background: #1a1a1a; }
+
+/* Dark empty state suggestions */
+body.dark .sug-card { background: #1a1a1a; border-color: #333; color: var(--cf-text-2); }
+
+/* Dark cognitive panel */
+body.dark .ai-avatar--breathing { background: #1a1a2e !important; }
 </style>
 
 <style scoped>

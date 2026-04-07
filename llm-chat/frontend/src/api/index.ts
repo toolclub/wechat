@@ -69,6 +69,14 @@ export async function deleteConversation(id: string) {
   })
 }
 
+export async function renameConversation(id: string, title: string) {
+  await fetch(`${API_BASE}/api/conversations/${id}`, {
+    method: 'PATCH',
+    headers: commonHeaders(),
+    body: JSON.stringify({ title }),
+  })
+}
+
 export async function stopStream(convId: string): Promise<void> {
   await fetch(`${API_BASE}/api/chat/${convId}/stop`, {
     method: 'POST',
@@ -112,6 +120,7 @@ export async function sendMessage(
   onThinking?: (text: string) => void,
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
+  onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -135,7 +144,7 @@ export async function sendMessage(
 
   if (!reader) return
 
-  const IDLE_TIMEOUT_MS = 120_000
+  const IDLE_TIMEOUT_MS = 300_000  // 5 分钟：生成大 HTML / 长文档时 LLM 可能持续输出 2~3 分钟
   let lastDataTime = Date.now()
   let buffer = ''
   let streamDone = false
@@ -173,6 +182,7 @@ export async function sendMessage(
           const data = JSON.parse(line.slice(6))
           if (data.thinking)        onThinking?.(data.thinking)
           if (data.clarification)  onClarification?.(data.clarification)
+          if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
           if (data.content)        onChunk(data.content)
           if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
           if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)

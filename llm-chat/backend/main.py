@@ -96,20 +96,49 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("未配置 MCP 服务器，跳过 MCP 工具加载")
 
+    # 5.5 初始化沙箱代码执行
+    # 策略：SSH 连接成功后才注册沙箱工具，连接失败则不注册。
+    # 这样模型根本看不到沙箱工具，不会尝试调用后失败。
+    # 无需先启动沙箱再启后端——后端正常启动，沙箱连不上只是少几个工具。
+    sandbox_ok = False
+    from config import SANDBOX_ENABLED, SANDBOX_WORKERS, SANDBOX_TIMEOUT, SANDBOX_CLEANUP_HOURS
+    if SANDBOX_ENABLED and SANDBOX_WORKERS:
+        from sandbox.manager import sandbox_manager
+        try:
+            await sandbox_manager.init(SANDBOX_WORKERS, SANDBOX_TIMEOUT, SANDBOX_CLEANUP_HOURS)
+            if sandbox_manager.available:
+                # SSH 连接成功，动态注册沙箱工具
+                from tools import register_tool
+                from tools.builtin.sandbox_tools import execute_code, run_shell, sandbox_write, sandbox_read
+                for t in [execute_code, run_shell, sandbox_write, sandbox_read]:
+                    register_tool(t)
+                sandbox_ok = True
+                logger.info("沙箱工具已注册（4 个）")
+            else:
+                logger.warning("沙箱 Worker 全部连接失败，沙箱工具未注册（模型不可见）")
+        except Exception as exc:
+            logger.error("沙箱初始化异常，沙箱工具未注册: %s", exc)
+    else:
+        logger.info("沙箱代码执行已禁用（SANDBOX_ENABLED=false 或无 Worker 配置）")
+
     # 6. 构建 LangGraph Agent 图
     all_tools = get_all_tools()
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
     logger.info(
-        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s",
+        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s | 沙箱: %s",
         CHAT_MODEL,
         len(all_tools),
         "开启" if LONGTERM_MEMORY_ENABLED else "关闭",
         "开启" if SEMANTIC_CACHE_ENABLED else "关闭",
+        "开启" if sandbox_ok else "关闭",
     )
 
     yield
     # ── 关闭 ──
+    if sandbox_ok:
+        from sandbox.manager import sandbox_manager
+        await sandbox_manager.shutdown()
 
 
 app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
@@ -324,6 +353,18 @@ async def get_memory_debug(conv_id: str):
         "long_term_stored_pairs": lt_count if LONGTERM_MEMORY_ENABLED else "(已禁用)",
         "active_tools": get_tool_names(),
     }
+
+
+# ── 沙箱集群状态接口 ─────────────────────────────────────────────────────────
+
+@app.get("/api/sandbox/status")
+async def sandbox_status():
+    """查看沙箱 Worker 集群状态：健康数、session 分布、各节点状态。"""
+    from config import SANDBOX_ENABLED
+    if not SANDBOX_ENABLED:
+        return {"enabled": False}
+    from sandbox.manager import sandbox_manager
+    return {"enabled": True, **sandbox_manager.status()}
 
 
 # ── Embedding 测试接口 ────────────────────────────────────────────────────────
