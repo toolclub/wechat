@@ -261,8 +261,8 @@ class PlannerNode(BaseNode):
 
         # ── 持久化计划到 DB（非阻断，失败仅记录日志） ──────────────────────────
         plan_id = ""
-        if len(plan_steps) > 1:
-            # 单步任务不需要 DB 状态管理
+        if plan_steps:
+            # 始终持久化，单步计划也保存，供前端刷新后恢复认知面板
             plan_id = str(uuid.uuid4())
             vision_desc = state.get("vision_description", "")
             goal = (

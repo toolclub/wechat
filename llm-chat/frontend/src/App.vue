@@ -81,11 +81,13 @@ const currentConvTitle = computed(() => {
         :has-cognitive-content="hasCognitiveContent"
         :panel-open="panelOpen"
         :conv-title="currentConvTitle"
+        :can-continue="chat.canContinue.value"
         :class="showCognitivePanel ? 'chat-with-panel' : 'chat-full'"
         @send="chat.send($event)"
         @stop="chat.stopConversation()"
         @toggle-panel="panelOpen = !panelOpen"
         @clarification-submit="chat.submitClarification($event)"
+        @continue="chat.continueLast()"
       />
 
       <!-- 右侧：认知面板 -->

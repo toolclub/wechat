@@ -164,8 +164,18 @@ class CallModelAfterToolNode(BaseNode):
             if type(m).__name__ == "AIMessage" and getattr(m, "tool_calls", None):
                 ai_tool_msg = m
 
-        # 提取所有 ToolMessage
-        tool_msgs = [m for m in messages if type(m).__name__ == "ToolMessage"]
+        # 只提取与 ai_tool_msg 的 tool_call_id 对应的 ToolMessage。
+        # 多步执行时 state["messages"] 会积累前几步的 ToolMessage，
+        # 若一并发给 MiniMax 会触发 "tool call id is invalid (2013)"。
+        if ai_tool_msg and getattr(ai_tool_msg, "tool_calls", None):
+            valid_ids = {tc["id"] for tc in ai_tool_msg.tool_calls}
+            tool_msgs = [
+                m for m in messages
+                if type(m).__name__ == "ToolMessage"
+                and getattr(m, "tool_call_id", None) in valid_ids
+            ]
+        else:
+            tool_msgs = [m for m in messages if type(m).__name__ == "ToolMessage"]
 
         focused_system = SystemMessage(content=(
             f"你是一个信息采集助手。请根据工具返回的结果，"

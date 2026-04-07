@@ -10,6 +10,7 @@ interface ConvState {
   abortController: AbortController | null
   cognitive: CognitiveState
   activeStepIndex: number   // which step currently receives tool/thinking/content events; -1 = no steps
+  canContinue: boolean      // true when the last response was interrupted (e.g. recursion limit)
 }
 
 function makeConvState(): ConvState {
@@ -20,6 +21,7 @@ function makeConvState(): ConvState {
     abortController: null,
     cognitive: makeEmptyCognitiveState(),
     activeStepIndex: -1,
+    canContinue: false,
   }
 }
 
@@ -47,6 +49,9 @@ export function useChat() {
     currentConvId.value
       ? convStates[currentConvId.value]?.cognitive ?? makeEmptyCognitiveState()
       : makeEmptyCognitiveState()
+  )
+  const canContinue = computed<boolean>(() =>
+    currentConvId.value ? convStates[currentConvId.value]?.canContinue ?? false : false
   )
   const activeConvIds = computed<Set<string>>(
     () => new Set(Object.keys(convStates).filter(id => convStates[id].loading))
@@ -114,10 +119,23 @@ export function useChat() {
       timestamp: m.timestamp,
     }))
     s.cognitive = makeEmptyCognitiveState()
-    // 加载工具调用历史（供刷新后复现）
+    s.canContinue = false
+    // 并行加载工具调用历史 + 最新执行计划（供刷新后复现）
     try {
-      const toolEvents = await api.fetchConvTools(id)
+      const [toolEvents, latestPlan] = await Promise.all([
+        api.fetchConvTools(id),
+        api.fetchLatestPlan(id),
+      ])
       s.cognitive.historyEvents = toolEvents
+      if (latestPlan) {
+        s.cognitive.plan = latestPlan.steps.map(st => ({
+          id: st.id,
+          title: st.title,
+          description: st.description ?? '',
+          status: st.status,
+          result: st.result ?? '',
+        }))
+      }
     } catch {}
   }
 
@@ -174,6 +192,7 @@ export function useChat() {
     s.activeStepIndex = -1
     s.cognitive = makeEmptyCognitiveState()
     s.cognitive.isActive = true
+    s.canContinue = false
 
     // ── 辅助：获取当前活跃步骤（多步模式下） ───────────────────────────────
     const msg = () => s.messages[assistantIdx]
@@ -332,6 +351,14 @@ export function useChat() {
           s.agentStatus = { ...s.agentStatus, state: 'idle' }
           s.cognitive.isActive = false
         },
+        // onInterrupted：后端中断（recursion limit 等），已保存部分响应，可以继续
+        () => {
+          s.canContinue = true
+          s.loading = false
+          s.abortController = null
+          s.agentStatus = { state: 'idle', model: s.agentStatus.model }
+          s.cognitive.isActive = false
+        },
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
@@ -425,10 +452,20 @@ export function useChat() {
     await send({ text: backendMessage, images: [], agentMode: true })
   }
 
+  /** 用户点击"继续"按钮：以 agent 模式重新发送"继续"指令，模型从历史中断点接续。 */
+  async function continueLast() {
+    if (!currentConvId.value) return
+    const s = convStates[currentConvId.value]
+    if (!s || s.loading) return
+    s.canContinue = false
+    await send({ text: '继续', images: [], agentMode: true })
+  }
+
   return {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
+    canContinue,
     loadConversations, selectConversation, restoreFromHash,
     newConversation, removeConversation,
-    send, cancelStream, stopConversation, applyModifiedPlan, submitClarification,
+    send, cancelStream, stopConversation, applyModifiedPlan, submitClarification, continueLast,
   }
 }

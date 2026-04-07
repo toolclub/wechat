@@ -84,6 +84,14 @@ export async function fetchConvTools(convId: string): Promise<ToolHistoryEvent[]
   return data.events || []
 }
 
+export async function fetchLatestPlan(convId: string): Promise<{ id: string; goal: string; steps: PlanStep[] } | null> {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/plan`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  const data = await res.json()
+  return data.plan || null
+}
+
 export async function sendMessage(
   conversationId: string,
   message: string,
@@ -103,6 +111,7 @@ export async function sendMessage(
   signal?: AbortSignal,
   onThinking?: (text: string) => void,
   onClarification?: (data: ClarificationData) => void,
+  onInterrupted?: () => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -172,7 +181,7 @@ export async function sendMessage(
           if (data.route)          onRoute(data.route.model, data.route.intent)
           if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
           if (data.reflection)     onReflection(data.reflection.content, data.reflection.decision)
-          if (data.error)          onChunk('\n\n⚠️ ' + data.error)
+          if (data.error)          { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
           if (data.ping)           lastDataTime = Date.now()
           if (data.done)           { streamDone = true; onDone() }
           if (data.stopped)        { streamDone = true; onStopped() }

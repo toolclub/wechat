@@ -296,6 +296,16 @@ async def get_conversation_tools(conv_id: str):
     return {"events": events}
 
 
+# ── 执行计划接口 ───────────────────────────────────────────────────────────────
+
+@app.get("/api/conversations/{conv_id}/plan")
+async def get_conversation_plan(conv_id: str):
+    """获取对话最新的执行计划（供前端刷新后恢复认知面板）。"""
+    from db.plan_store import get_latest_plan_for_conv
+    plan = await get_latest_plan_for_conv(conv_id)
+    return {"plan": plan}
+
+
 # ── 记忆调试接口 ───────────────────────────────────────────────────────────────
 
 @app.get("/api/conversations/{conv_id}/memory")

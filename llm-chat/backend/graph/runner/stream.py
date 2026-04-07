@@ -14,6 +14,7 @@ stream_response：SSE 流驱动主函数
 """
 import asyncio
 import logging
+import re
 from typing import AsyncGenerator
 
 from graph.agent import get_graph, get_simple_graph
@@ -88,6 +89,7 @@ async def stream_response(
 
     async def _graph_producer() -> None:
         event_count = 0
+        _accumulated_response = ""  # 追踪最近一次 LLM 节点输出的 full_response
         try:
             async for event in graph.astream_events(
                 initial_state,
@@ -98,6 +100,13 @@ async def stream_response(
                 etype = event.get("event", "")
                 ename = event.get("name", "")
                 enode = event.get("metadata", {}).get("langgraph_node", "")
+                # 追踪 LLM 节点输出，供异常时保存
+                if etype == "on_chain_end" and enode in ("call_model", "call_model_after_tool"):
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict):
+                        fr = output.get("full_response", "")
+                        if fr:
+                            _accumulated_response = fr
                 # 只记录关键节点事件，避免日志爆炸
                 if etype in (
                     "on_chain_start", "on_chain_end",
@@ -119,8 +128,13 @@ async def stream_response(
                 "图执行失败 | conv=%s | events=%d | error=%s",
                 conv_id, event_count, exc, exc_info=True,
             )
+            # 若已有部分响应（如 GraphRecursionError 中断），保存到 DB
+            # 这样用户说"继续"时，模型能从历史中知道之前做到了哪里
+            can_continue = bool(_accumulated_response)
+            if can_continue:
+                await _save_partial_response(conv_id, user_message, _accumulated_response)
             try:
-                await queue.put(("error", exc))
+                await queue.put(("error", {"exc": exc, "can_continue": can_continue}))
             except Exception:
                 pass
         finally:
@@ -160,8 +174,12 @@ async def stream_response(
                 logger.info("心跳已发送到前端 | conv=%s", conv_id)
                 yield sse({"ping": True})
             elif kind == "error":
-                logger.error("SSE 收到图错误 | conv=%s | error=%s", conv_id, str(_event))
-                yield sse({"error": str(_event)})
+                err_info = _event if isinstance(_event, dict) else {"exc": _event, "can_continue": False}
+                logger.error("SSE 收到图错误 | conv=%s | error=%s", conv_id, str(err_info.get("exc")))
+                yield sse({
+                    "error": str(err_info.get("exc", _event)),
+                    "can_continue": err_info.get("can_continue", False),
+                })
                 # 继续等待 done 信号，确保 finally 正常执行
             elif kind == "done":
                 graph_done = True
@@ -177,3 +195,25 @@ async def stream_response(
             logger.info("SSE 流正常结束 | conv=%s | compressed=%s", conv_id, ctx.compressed)
         else:
             logger.info("SSE 流异常结束（未收到 done） | conv=%s", conv_id)
+
+
+async def _save_partial_response(conv_id: str, user_message: str, full_response: str) -> None:
+    """
+    图执行异常中断（如 GraphRecursionError）时，将已生成的部分响应保存到数据库。
+
+    保存后，用户说"继续"时模型能从历史中感知到之前做到了哪里，实现真正的断点续接。
+    若 full_response 去除 think 块后为空则不保存（避免写入脏数据）。
+    """
+    stripped = re.sub(r"<think>[\s\S]*?</think>", "", full_response).strip()
+    if not stripped:
+        return
+    try:
+        from memory import store as memory_store
+        content_to_save = stripped + "\n\n[由于执行步骤超出限制，以上为部分结果。如需继续请告知。]"
+        await memory_store.add_message(conv_id, "user", user_message.replace("\x00", ""))
+        await memory_store.add_message(conv_id, "assistant", content_to_save.replace("\x00", ""))
+        logger.info(
+            "已保存中断前的部分响应 | conv=%s | response_len=%d", conv_id, len(stripped)
+        )
+    except Exception as exc:
+        logger.warning("保存部分响应失败（不影响主流程）: %s", exc)

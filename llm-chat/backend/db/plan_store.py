@@ -13,7 +13,7 @@ plan_store：执行计划的 DB 持久化层
 import logging
 import time
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select, update as sa_update, desc
 
 from db.database import AsyncSessionLocal
 from db.models import PlanStepModel
@@ -100,6 +100,32 @@ async def save_step_result(
             "保存步骤结果失败（不影响主流程）| plan_id=%s | step=%d | error=%s",
             plan_id, step_index, exc,
         )
+
+
+async def get_latest_plan_for_conv(conv_id: str) -> dict | None:
+    """
+    获取对话最新的执行计划（按 created_at 降序取第一条）。
+    供前端刷新后恢复认知面板使用。
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(PlanStepModel)
+                .where(PlanStepModel.conv_id == conv_id)
+                .order_by(desc(PlanStepModel.created_at))
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if not row:
+                return None
+            return {
+                "id":    row.id,
+                "goal":  row.goal,
+                "steps": list(row.steps or []),
+            }
+    except Exception as exc:
+        logger.error("读取最新计划失败 | conv=%s | error=%s", conv_id, exc)
+        return None
 
 
 async def get_plan(plan_id: str) -> dict | None:

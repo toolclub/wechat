@@ -14,6 +14,7 @@ const props = defineProps<{
   hasCognitiveContent?: boolean
   panelOpen?: boolean
   convTitle?: string        // 当前对话标题（第一条用户消息 / 后端生成摘要）
+  canContinue?: boolean     // true 时在最后一条消息下方显示"继续"按钮
 }>()
 
 const emit = defineEmits<{
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   stop: []
   togglePanel: []                 // 切换认知面板展开/折叠
   clarificationSubmit: [answers: Record<string, string | string[]>]
+  continue: []                    // 用户点击"继续"按钮
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
@@ -278,6 +280,18 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             </div>
           </template>
           <!-- 状态气泡已移入 MessageItem 内联渲染，与头像对齐 -->
+
+          <!-- 继续按钮：当上一次响应因异常中断时显示 -->
+          <div v-if="canContinue && !loading" class="continue-wrap">
+            <button class="continue-btn" @click="emit('continue')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">
+                <polyline points="13 17 18 12 13 7"/>
+                <polyline points="6 17 11 12 6 7"/>
+              </svg>
+              继续
+            </button>
+            <span class="continue-hint">上次响应被中断，点击从断点继续</span>
+          </div>
         </div>
       </div>
 
@@ -617,4 +631,35 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
 :deep(.s-tag--saving)  { color: #64748b !important; border-color: #cbd5e1 !important; }
 :deep(.s-tag--reflect) { color: #059669 !important; border-color: #6ee7b7 !important; }
+
+/* 继续按钮 */
+.continue-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 48px 4px;
+}
+.continue-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1.5px solid var(--cf-indigo);
+  background: #fff;
+  color: var(--cf-indigo);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.continue-btn:hover {
+  background: var(--cf-indigo);
+  color: #fff;
+}
+.continue-hint {
+  font-size: 12px;
+  color: var(--cf-text-3);
+}
 </style>
