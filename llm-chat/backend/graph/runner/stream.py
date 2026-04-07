@@ -82,6 +82,7 @@ async def stream_response(
         "step_iterations":    0,
         "reflector_decision": "",
         "reflection":         "",
+        "step_results":       [],
     }
 
     # ── 后台任务：驱动图执行，把事件放入队列 ─────────────────────────────────

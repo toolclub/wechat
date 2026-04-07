@@ -56,6 +56,7 @@ class GraphState(TypedDict):
     reflection: str
     reflector_decision: str
     step_iterations: int
+    step_results: list[str]      # 每步 full_response 的累积列表（reflector 写入，save_response 读取）
 
     # ── 澄清问询（模型无法直接回答时，向用户确认意图） ───────────────────────
     needs_clarification: bool   # True 表示本轮需要用户澄清，跳过 DB 保存

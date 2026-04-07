@@ -21,7 +21,6 @@ import json
 import logging
 import re
 
-from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
@@ -141,17 +140,23 @@ class CallModelNode(BaseNode):
         temperature = state["temperature"]
         conv_id     = state.get("conv_id", "")
 
-        # search/search_code 路由绑定工具；chat/code 路由不绑定
-        use_tools    = bool(self._tools and (not route or route in ("search", "search_code")))
+        # 工具绑定策略：
+        #   search / search_code：始终绑定（需要搜索信息）
+        #   code + 多步计划中间步骤：绑定（可能需要搜索 API 文档等）
+        #   code + 无计划 / chat：不绑定
+        is_intermediate_plan_step = bool(plan) and cur_idx < len(plan) - 1
+        use_tools = bool(
+            self._tools and (
+                not route
+                or route in ("search", "search_code")
+                or (route == "code" and is_intermediate_plan_step)
+            )
+        )
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
 
         # ── 多步计划末步强制流式（不绑工具） ───────────────────────────────
-        # 仅对"多步计划的最后一步"禁用工具：
-        #   - 多步时，末步任务是"生成产品"，前面各步已完成信息收集，
-        #     无需再搜索；禁工具 → 走 _stream_tokens 流式路径，逐 token 推送。
-        #   - 单步时不禁：单步需要先搜索再生成，工具调用后走
-        #     call_model_after_tool（已是流式），不能在此处断掉工具。
-        #     若单步禁工具，模型想调工具却没有 schema，会输出 [TOOL_CALL] 文本 artifact。
+        # 末步任务是"生成产品"，前面各步已完成信息收集，无需再搜索；
+        # 禁工具 → 走 _stream_tokens 流式路径，逐 token 推送给前端。
         if use_tools and len(plan) > 1 and cur_idx >= len(plan) - 1:
             use_tools = False
             tools_schema = None
@@ -342,7 +347,7 @@ class CallModelNode(BaseNode):
                 )
                 return self._build_response(completion, conv_id, "vision")
             else:
-                # 无工具时流式，逐 token 推送前端（与主 LLM 路径一致）
+                # 无工具时流式，使用 BaseNode._stream_tokens 逐 token 推送前端
                 return await self._stream_tokens(
                     vision_llm, oai_messages, temperature, conv_id,
                     node="call_model_vision",
@@ -402,57 +407,7 @@ class CallModelNode(BaseNode):
             logger.error("call_model LLM 异常 | conv=%s | model=%s | error=%s", conv_id, model, exc, exc_info=True)
             raise
 
-    @staticmethod
-    async def _stream_tokens(
-        llm,
-        oai_messages: list,
-        temperature: float,
-        conv_id: str,
-        node: str,
-        timeout: float = 180.0,
-    ) -> dict:
-        """
-        流式 LLM 调用：逐 token yield，通过 adispatch_custom_event 发出事件。
-
-        LLMStreamHandler 在 astream_events 中监听这些事件，实时推送给前端。
-        节点返回时 full_response 包含完整内容，CallModelEndHandler 因
-        ctx.*_streamed=True 而跳过重复发送。
-
-        支持推理模型（GLM/DeepSeek-R1 等）的 thinking token：
-          - "\x00THINK\x00" 前缀的 delta 作为 thinking 事件分发
-          - 普通 delta 作为 llm_token 事件分发
-        """
-        content_parts: list[str] = []
-        thinking_parts: list[str] = []
-        token_count = 0
-        _THINK_PREFIX = "\x00THINK\x00"
-
-        async for delta in llm.astream(oai_messages, temperature=temperature, timeout=timeout):
-            token_count += 1
-            if delta.startswith(_THINK_PREFIX):
-                # 推理 token
-                thinking_text = delta[len(_THINK_PREFIX):]
-                thinking_parts.append(thinking_text)
-                await adispatch_custom_event("llm_thinking", {"content": thinking_text, "node": node})
-            else:
-                content_parts.append(delta)
-                await adispatch_custom_event("llm_token", {"content": delta, "node": node})
-
-        full_content = "".join(content_parts)
-        full_thinking = "".join(thinking_parts)
-        logger.info(
-            "call_model 流式完成 | conv=%s | node=%s | tokens=%d | content_len=%d | thinking_len=%d",
-            conv_id, node, token_count, len(full_content), len(full_thinking),
-        )
-        # _was_streamed=True：告知 EndHandler 本次已逐 token 推送，跳过重复发送
-        result: dict = {
-            "messages":     [AIMessage(content=full_content)],
-            "full_response": full_content,
-            "_was_streamed": True,
-        }
-        if full_thinking:
-            result["full_thinking"] = full_thinking
-        return result
+    # _stream_tokens / _is_audit_error / _audit_fallback 继承自 BaseNode
 
     def _build_response(self, completion, conv_id: str, path: str) -> dict:
         """

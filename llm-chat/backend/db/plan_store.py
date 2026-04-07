@@ -10,10 +10,11 @@ plan_store：执行计划的 DB 持久化层
   - 所有操作均 try/except，失败仅记录日志，不抛异常（不阻断主执行流程）
   - DB 是持久化副本，GraphState.plan 才是运行时权威数据
 """
+import json
 import logging
 import time
 
-from sqlalchemy import select, update as sa_update, desc
+from sqlalchemy import select, text, desc
 
 from db.database import AsyncSessionLocal
 from db.models import PlanStepModel
@@ -63,37 +64,42 @@ async def save_step_result(
     new_current_step: int,
 ) -> None:
     """
-    保存步骤执行结果，并将 current_step 推进到下一步索引。
-    result 截断到 3000 字符，防止 JSONB 过大。
+    原子更新步骤执行结果，不需要先读取整行。
+
+    使用 PostgreSQL jsonb_set 对 steps[step_index] 的 status/result
+    字段做原子写入，消灭读-改-写 round trip，并发安全。
+    result 截断到 3000 字符防止 JSONB 过大。
     """
+    truncated = result[:3000]
+    # jsonb_set path 格式: {index,field}
+    path_status = f"{{{step_index},status}}"
+    path_result = f"{{{step_index},result}}"
+
     try:
         async with AsyncSessionLocal() as session:
-            row = await session.get(PlanStepModel, plan_id)
-            if not row:
-                logger.warning("save_step_result: plan_id=%s 不存在", plan_id)
-                return
-
-            steps = list(row.steps or [])
-            if 0 <= step_index < len(steps):
-                steps[step_index] = {
-                    **steps[step_index],
-                    "status": "done",
-                    "result": result[:3000],
-                }
-
             await session.execute(
-                sa_update(PlanStepModel)
-                .where(PlanStepModel.id == plan_id)
-                .values(
-                    steps=steps,
-                    current_step=new_current_step,
-                    updated_at=time.time(),
-                )
+                text(
+                    "UPDATE plan_steps"
+                    "   SET steps       = jsonb_set(jsonb_set(steps, :p_status, :v_status::jsonb),"
+                    "                               :p_result, :v_result::jsonb),"
+                    "       current_step = :next_step,"
+                    "       updated_at   = :now"
+                    " WHERE id = :plan_id"
+                ),
+                {
+                    "p_status": path_status,
+                    "v_status": json.dumps("done"),
+                    "p_result": path_result,
+                    "v_result": json.dumps(truncated),
+                    "next_step": new_current_step,
+                    "now":       time.time(),
+                    "plan_id":   plan_id,
+                },
             )
             await session.commit()
         logger.info(
             "步骤结果已存DB | plan_id=%s | step=%d → next=%d | result_len=%d",
-            plan_id, step_index, new_current_step, len(result),
+            plan_id, step_index, new_current_step, len(truncated),
         )
     except Exception as exc:
         logger.error(

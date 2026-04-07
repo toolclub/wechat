@@ -106,14 +106,17 @@ class SaveResponseNode(BaseNode):
         # ── 写入用户消息 ────────────────────────────────────────────────────
         await memory_store.add_message(conv_id, "user", self._sanitize_for_db(user_msg_to_save))
 
-        # ── 写入 AI 回复（含工具调用摘要） ──────────────────────────────────
+        # ── 写入 AI 回复（含多步摘要 + 工具调用摘要） ───────────────────────────
+        # 多步计划：将所有步骤结果保存，下次对话时模型能看到完整执行过程
         if full_response:
-            tool_summary     = self._build_tool_summary(state)
-            content_to_save  = (
-                full_response + "\n\n" + tool_summary
-                if tool_summary
-                else full_response
-            )
+            tool_summary    = self._build_tool_summary(state)
+            step_context    = self._build_step_context(state)
+            parts           = [full_response]
+            if step_context:
+                parts.append(step_context)
+            if tool_summary:
+                parts.append(tool_summary)
+            content_to_save = "\n\n".join(parts)
             await memory_store.add_message(
                 conv_id, "assistant", self._sanitize_for_db(content_to_save)
             )
@@ -283,6 +286,32 @@ class SaveResponseNode(BaseNode):
                     if name:
                         events.append({"tool_name": name, "tool_input": args or {}})
         return events
+
+    @staticmethod
+    def _build_step_context(state: GraphState) -> str:
+        """
+        为多步计划构建执行过程摘要，保存到 DB 作为下次对话的上下文。
+
+        只有在计划步骤数 > 1 且有中间步骤结果时才生成，避免单步任务冗余。
+        """
+        step_results = list(state.get("step_results") or [])
+        plan         = state.get("plan", [])
+
+        # 无多步结果或单步任务不生成摘要
+        if len(step_results) <= 1 or len(plan) <= 1:
+            return ""
+
+        # 中间步骤摘要（不含最后一步，因为最后一步就是 full_response）
+        lines: list[str] = []
+        for i, result in enumerate(step_results[:-1]):
+            title = plan[i]["title"] if i < len(plan) else f"步骤{i + 1}"
+            short = result[:200] + ("..." if len(result) > 200 else "")
+            lines.append(f"- 步骤{i + 1}（{title}）：{short}")
+
+        if not lines:
+            return ""
+
+        return "【执行过程摘要】\n" + "\n".join(lines)
 
     @staticmethod
     def _build_tool_summary(state: GraphState) -> str:

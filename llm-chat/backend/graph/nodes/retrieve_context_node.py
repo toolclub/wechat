@@ -127,4 +127,5 @@ class RetrieveContextNode(BaseNode):
             "step_iterations":    0,
             "reflector_decision": "",
             "reflection":         "",
+            "step_results":       [],
         }

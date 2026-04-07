@@ -103,25 +103,53 @@ class PlannerNode(BaseNode):
     def name(self) -> str:
         return "planner"
 
+    # ── 触发复杂代码规划的关键信号 ─────────────────────────────────────────────
+    _COMPLEX_CODE_SIGNALS = frozenset([
+        "然后", "接着", "之后", "最后", "第一步", "第二步", "首先",
+        "分析", "比较", "调研", "研究", "写一篇", "写一份", "制定",
+        "重构", "优化", "分多步", "分阶段", "步骤",
+    ])
+    # 超过此长度的 code 任务视为复杂，触发规划
+    _COMPLEX_CODE_LENGTH = 150
+
+    @classmethod
+    def _needs_planning(cls, route: str, user_msg: str) -> bool:
+        """
+        判断当前请求是否需要规划。
+
+        - search / search_code 路由：始终规划
+        - code 路由：消息过长或含多步信号时规划（复杂编程任务）
+        - chat 路由：不规划（直接对话响应更自然）
+        - 未指定路由：规划（保守策略）
+        """
+        if not route or route in ("search", "search_code"):
+            return True
+        if route == "code":
+            is_long      = len(user_msg.strip()) > cls._COMPLEX_CODE_LENGTH
+            has_signals  = any(sig in user_msg for sig in cls._COMPLEX_CODE_SIGNALS)
+            return is_long or has_signals
+        # chat 路由不规划
+        return False
+
     async def execute(self, state: GraphState) -> PlannerNodeOutput:
         """
         规划执行步骤。
 
-        chat / code 路由无需规划，直接返回空计划。
-        search / search_code 路由调用 LLM 生成步骤。
+        search / search_code 路由始终规划；
+        code 路由在任务复杂时触发规划；
+        chat 路由直接返回空计划（自然对话）。
         """
-        route = state.get("route", "")
+        route    = state.get("route", "")
+        user_msg = state.get("user_message", "")
 
-        # 非搜索类路由跳过规划
-        needs_planning = not route or route in ("search", "search_code")
-        if not needs_planning:
+        if not self._needs_planning(route, user_msg):
             return {
                 "plan":               [],
                 "current_step_index": 0,
                 "step_iterations":    0,
+                "step_results":       [],
             }
 
-        user_msg    = state["user_message"]
         images      = state.get("images", [])
         vision_desc = state.get("vision_description", "")
 
@@ -296,4 +324,5 @@ class PlannerNode(BaseNode):
             "plan_id":            plan_id,
             "current_step_index": 0,
             "step_iterations":    0,
+            "step_results":       [],
         }

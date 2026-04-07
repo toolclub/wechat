@@ -12,13 +12,17 @@ CallModelAfterToolNode：工具执行后的 LLM 综合节点
   - 不绑定工具（boundary 注入已限制工具调用）
   - 支持内容审核错误的优雅降级
 
+共享逻辑（继承自 BaseNode）：
+  - _stream_tokens  → 流式 LLM 调用 + thinking token 处理
+  - _is_audit_error → 内容审核错误判断
+  - _audit_fallback → 审核降级响应
+
 工厂注入：
   - tools: 仅用于与 CallModelNode 保持结构对称，此节点实际不使用
 """
 import asyncio
 import logging
 
-from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_MODEL
@@ -27,9 +31,6 @@ from graph.state import GraphState
 from llm.chat import get_chat_llm, get_vision_llm
 
 logger = logging.getLogger("graph.nodes.call_model_after_tool")
-
-# 内容审核错误标识（MiniMax 等厂商的特定错误码）
-_AUDIT_MARKERS = ("1027", "sensitive")
 
 # 每步最多保留最近消息条数（多步执行场景需要早期工具结果）
 _MAX_MESSAGES = 20
@@ -197,6 +198,9 @@ class CallModelAfterToolNode(BaseNode):
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
     _VISION_TIMEOUT = 300.0
 
+    # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
+    _VISION_TIMEOUT = 300.0
+
     async def _vision_path(
         self,
         state: GraphState,
@@ -217,27 +221,12 @@ class CallModelAfterToolNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(conv_id, "call_model_after_tool_vision", vision_model, oai_messages)
 
-        content_parts: list[str] = []
-        thinking_parts: list[str] = []
-        token_count = 0
-        _THINK_PREFIX = "\x00THINK\x00"
-
         try:
-            async for delta in vision_llm.astream(
-                oai_messages, temperature=temperature, timeout=self._VISION_TIMEOUT
-            ):
-                token_count += 1
-                if delta.startswith(_THINK_PREFIX):
-                    thinking_text = delta[len(_THINK_PREFIX):]
-                    thinking_parts.append(thinking_text)
-                    await adispatch_custom_event(
-                        "llm_thinking", {"content": thinking_text, "node": "call_model_after_tool"}
-                    )
-                else:
-                    content_parts.append(delta)
-                    await adispatch_custom_event(
-                        "llm_token", {"content": delta, "node": "call_model_after_tool"}
-                    )
+            return await self._stream_tokens(
+                vision_llm, oai_messages, temperature, conv_id,
+                node="call_model_after_tool",
+                timeout=self._VISION_TIMEOUT,
+            )
         except asyncio.TimeoutError:
             logger.error(
                 "call_model_after_tool (vision) 超时 %.0fs | conv=%s | model=%s",
@@ -254,21 +243,6 @@ class CallModelAfterToolNode(BaseNode):
             )
             raise
 
-        full_content = "".join(content_parts)
-        full_thinking = "".join(thinking_parts)
-        logger.info(
-            "call_model_after_tool (vision) 流式完成 | conv=%s | tokens=%d | content_len=%d | thinking_len=%d",
-            conv_id, token_count, len(full_content), len(full_thinking),
-        )
-        result: dict = {
-            "messages":     [AIMessage(content=full_content)],
-            "full_response": full_content,
-            "_was_streamed": True,
-        }
-        if full_thinking:
-            result["full_thinking"] = full_thinking
-        return result
-
     async def _llm_path(
         self,
         messages: list,
@@ -276,13 +250,7 @@ class CallModelAfterToolNode(BaseNode):
         temperature: float,
         conv_id: str,
     ) -> dict:
-        """主 LLM 路径，不绑定工具，全程流式输出。
-
-        与 _vision_path 保持一致：
-          - 普通 token → llm_token 事件
-          - reasoning_content 型模型（GLM/DeepSeek）thinking token（\\x00THINK\\x00 前缀）
-            → llm_thinking 事件，不混入 full_response
-        """
+        """主 LLM 路径，不绑定工具，全程流式输出。使用 BaseNode._stream_tokens 共享实现。"""
         llm          = get_chat_llm(model=model, temperature=temperature)
         oai_messages = self._to_openai_messages(messages)
 
@@ -293,25 +261,10 @@ class CallModelAfterToolNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(conv_id, "call_model_after_tool", model, oai_messages)
 
-        _THINK_PREFIX = "\x00THINK\x00"
-        content_parts:  list[str] = []
-        thinking_parts: list[str] = []
-        token_count = 0
-
         try:
-            async for delta in llm.astream(oai_messages, temperature=temperature):
-                token_count += 1
-                if delta.startswith(_THINK_PREFIX):
-                    thinking_text = delta[len(_THINK_PREFIX):]
-                    thinking_parts.append(thinking_text)
-                    await adispatch_custom_event(
-                        "llm_thinking", {"content": thinking_text, "node": "call_model_after_tool"}
-                    )
-                else:
-                    content_parts.append(delta)
-                    await adispatch_custom_event(
-                        "llm_token", {"content": delta, "node": "call_model_after_tool"}
-                    )
+            return await self._stream_tokens(
+                llm, oai_messages, temperature, conv_id, node="call_model_after_tool"
+            )
         except asyncio.TimeoutError:
             logger.error("call_model_after_tool 超时 | conv=%s | model=%s", conv_id, model)
             raise
@@ -325,30 +278,4 @@ class CallModelAfterToolNode(BaseNode):
             )
             raise
 
-        full_content  = "".join(content_parts)
-        full_thinking = "".join(thinking_parts)
-        logger.info(
-            "call_model_after_tool 流式完成 | conv=%s | model=%s | tokens=%d"
-            " | content_len=%d | thinking_len=%d",
-            conv_id, model, token_count, len(full_content), len(full_thinking),
-        )
-        result: dict = {
-            "messages":     [AIMessage(content=full_content)],
-            "full_response": full_content,
-            "_was_streamed": True,
-        }
-        if full_thinking:
-            result["full_thinking"] = full_thinking
-        return result
-
-    @staticmethod
-    def _is_audit_error(exc: Exception) -> bool:
-        """判断是否为内容审核错误（MiniMax 1027 等）。"""
-        err_str = str(exc)
-        return any(marker in err_str for marker in _AUDIT_MARKERS)
-
-    @staticmethod
-    def _audit_fallback() -> dict:
-        """内容审核错误时的优雅降级响应。"""
-        msg = "抱歉，该内容触发了模型安全审核，无法生成回复。请换个方式描述问题。"
-        return {"messages": [], "full_response": msg}
+    # _stream_tokens / _is_audit_error / _audit_fallback 继承自 BaseNode
