@@ -94,24 +94,44 @@ markedInstance.use({
     code(token: any): string {
       return buildCodeHtml(token)
     },
+
+    // 拦截 marked 识别出的 HTML 块，防止原始 HTML 直接渲染到 DOM
+    // 场景：模型输出 <!DOCTYPE html>... 不包裹代码围栏时，marked 会把它当 HTML 块直接透传
+    html(token: any): string {
+      const raw: string = (token.raw ?? token.text ?? '').trim()
+      // 完整 HTML 页面 → 以代码块形式展示
+      if (/^<!doctype\s+html/i.test(raw) || /^<html[\s>]/i.test(raw)) {
+        return buildCodeHtml({ text: raw, lang: 'html' })
+      }
+      // 其他 raw HTML（如 <br>、<details> 等）→ 转义为可见文本，不执行
+      return raw
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    },
+
     table(token: any): string {
       const header = token.header ?? []
       const rows   = token.rows   ?? []
       const align  = token.align  ?? []
 
+      // parseInline 将单元格内的 **加粗**、`code`、[链接] 等渲染成 HTML
+      const parseCell = (cell: any): string => {
+        const raw = typeof cell === 'object' ? (cell.text ?? '') : String(cell)
+        return markedInstance.parseInline(raw) as string
+      }
+
       const thCells = header.map((cell: any, i: number) => {
         const a = align[i]
         const style = a ? ` style="text-align:${a}"` : ''
-        const txt = typeof cell === 'object' ? (cell.text ?? '') : String(cell)
-        return `<th${style}>${txt}</th>`
+        return `<th${style}>${parseCell(cell)}</th>`
       }).join('')
 
       const bodyRows = rows.map((row: any[]) => {
         const tds = row.map((cell: any, i: number) => {
           const a = align[i]
           const style = a ? ` style="text-align:${a}"` : ''
-          const txt = typeof cell === 'object' ? (cell.text ?? '') : String(cell)
-          return `<td${style}>${txt}</td>`
+          return `<td${style}>${parseCell(cell)}</td>`
         }).join('')
         return `<tr>${tds}</tr>`
       }).join('\n')
@@ -161,7 +181,17 @@ function renderContent(raw: string): string {
   let content = raw.replace(/<think>[\s\S]*?<\/think>\n*/g, '')
   const thinkStart = content.indexOf('<think>')
   if (thinkStart !== -1) content = content.slice(0, thinkStart)
-  const trimmed = content.trim()
+  let trimmed = content.trim()
+
+  // 流式安全：补全未闭合的代码围栏（防止 HTML 在 stream 中途泄露到 DOM）
+  const fenceCount = (trimmed.match(/^```/gm) || []).length
+  if (fenceCount % 2 !== 0) {
+    trimmed = trimmed + '\n```'
+  }
+
+  // 防止 --- 被 marked 误解析为 setext h2 标题（在 --- 前插入空行）
+  trimmed = trimmed.replace(/([^\n]+)\n(-{3,})(\n|$)/g, '$1\n\n$2$3')
+
   // 模型直接输出裸 HTML 页面时（没有 markdown 代码块包裹），自动包裹为 html 代码块渲染
   if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
     return buildCodeHtml({ text: trimmed, lang: 'html' })

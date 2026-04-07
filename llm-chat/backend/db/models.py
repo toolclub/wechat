@@ -77,6 +77,43 @@ class MessageModel(Base):
     )
 
 
+class PlanStepModel(Base):
+    """执行计划表：记录多步骤任务的规划状态和各步骤结果"""
+    __tablename__ = "plan_steps"
+
+    id = Column(
+        String(36), primary_key=True,
+        comment="计划唯一ID（UUID）"
+    )
+    conv_id = Column(
+        String(36), nullable=False,
+        comment="所属对话ID，关联conversations.id",
+        index=True,
+    )
+    goal = Column(
+        Text, nullable=False, default="",
+        comment="用户原始任务目标（含图片描述）"
+    )
+    steps = Column(
+        JSONB, nullable=False, default=list,
+        comment="步骤列表，每项含 {id,title,description,status,result}"
+    )
+    current_step = Column(
+        Integer, nullable=False, default=0,
+        comment="当前执行步骤索引（0-based）"
+    )
+    total_steps = Column(
+        Integer, nullable=False, default=0,
+        comment="总步骤数"
+    )
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_plan_steps_conv_created", "conv_id", "created_at"),
+    )
+
+
 class ToolEventModel(Base):
     """工具调用事件表：记录每个对话中使用的工具调用历史"""
     __tablename__ = "tool_events"

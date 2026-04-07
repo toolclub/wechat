@@ -51,6 +51,7 @@ class GraphState(TypedDict):
 
     # ── 认知规划 ────────────────────────────────────────────────────────────
     plan: list[PlanStep]
+    plan_id: str                 # plan_steps 表主键（planner 写入，后续节点只读）
     current_step_index: int
     reflection: str
     reflector_decision: str

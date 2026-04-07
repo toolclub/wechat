@@ -145,12 +145,12 @@ class CallModelEndHandler(EventHandler):
         )
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        # 流式已发则跳过（兼容未来可能添加的自定义流式实现）
-        if ctx.call_model_streamed:
-            return
-
         output = event.get("data", {}).get("output", {})
         if not isinstance(output, dict):
+            return
+
+        # 双重保险：节点标记 OR ctx 标记任意一个为 True 则已流式发送过，跳过
+        if output.get("_was_streamed") or ctx.call_model_streamed:
             return
 
         # 有工具调用时由 call_model_after_tool 负责内容，跳过
@@ -193,12 +193,15 @@ class CallModelAfterToolEndHandler(EventHandler):
         )
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
-        # 流式已发则跳过
-        if ctx.after_tool_streamed:
+        output = event.get("data", {}).get("output", {})
+        if not isinstance(output, dict):
             return
 
-        output = event.get("data", {}).get("output", {})
-        full_response = output.get("full_response", "") if isinstance(output, dict) else ""
+        # 双重保险：节点标记 OR ctx 标记任意一个为 True 则已流式发送过，跳过
+        if output.get("_was_streamed") or ctx.after_tool_streamed:
+            return
+
+        full_response = output.get("full_response", "")
         if not full_response:
             return
 

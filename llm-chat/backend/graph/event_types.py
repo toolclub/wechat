@@ -60,6 +60,7 @@ class RouteNodeOutput(TypedDict, total=False):
 class PlannerNodeOutput(TypedDict, total=False):
     """planner 节点 return 的结构"""
     plan: list[PlanStep]
+    plan_id: str
     current_step_index: int
     step_iterations: int
 

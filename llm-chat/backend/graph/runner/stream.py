@@ -76,6 +76,7 @@ async def stream_response(
         "needs_clarification": False,
         # 认知规划初始值
         "plan":               [],
+        "plan_id":            "",
         "current_step_index": 0,
         "step_iterations":    0,
         "reflector_decision": "",

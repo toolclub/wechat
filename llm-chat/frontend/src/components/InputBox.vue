@@ -215,15 +215,14 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
       </div>
     </div>
 
-    <!-- 切换模式提示条（内联，1.8s 后消失） -->
-    <Transition name="mode-tip">
-      <div v-if="tipVisible" class="mode-tip-bar">
-        {{ tipText }}
-      </div>
-    </Transition>
-
-    <div class="hint-row" v-if="!tipVisible">
-      <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+    <!-- 固定高度底部区域：tip 与 hint 叠加，仅过渡 opacity，不改变布局高度 -->
+    <div class="input-footer">
+      <Transition name="mode-tip">
+        <div v-if="tipVisible" class="mode-tip-bar">{{ tipText }}</div>
+      </Transition>
+      <Transition name="mode-hint">
+        <span v-if="!tipVisible" class="hint">Enter 发送 · Shift+Enter 换行</span>
+      </Transition>
     </div>
   </div>
 </template>
@@ -435,40 +434,61 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 }
 .agent-label { line-height: 1; }
 
-/* 切换提示条 */
-.mode-tip-bar {
+/* 固定高度底部容器，内部元素绝对定位叠加，不影响布局 */
+.input-footer {
+  position: relative;
+  height: 28px;
   margin-top: 6px;
-  padding: 5px 12px;
+}
+
+/* 切换提示条：绝对覆盖，仅改 opacity */
+.mode-tip-bar {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
   border-radius: 8px;
   background: rgba(99,102,241,0.08);
   border: 1px solid rgba(99,102,241,0.18);
   color: #a5b4fc;
   font-size: 11.5px;
-  text-align: center;
   letter-spacing: 0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Vue Transition */
+/* Hint 文字：绝对居中 */
+.hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--cf-text-5);
+  pointer-events: none;
+}
+
+/* tip 过渡：纯 opacity，无位移 */
 .mode-tip-enter-active,
 .mode-tip-leave-active {
-  transition: opacity 0.25s, transform 0.25s;
+  transition: opacity 0.2s ease;
 }
 .mode-tip-enter-from,
 .mode-tip-leave-to {
   opacity: 0;
-  transform: translateY(-4px);
 }
 
-/* 提示行 */
-.hint-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 8px;
+/* hint 过渡：纯 opacity */
+.mode-hint-enter-active,
+.mode-hint-leave-active {
+  transition: opacity 0.2s ease;
 }
-.hint {
-  font-size: 11px;
-  color: var(--cf-text-5);
+.mode-hint-enter-from,
+.mode-hint-leave-to {
+  opacity: 0;
 }
 </style>

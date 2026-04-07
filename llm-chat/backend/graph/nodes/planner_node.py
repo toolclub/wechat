@@ -13,6 +13,7 @@ PlannerNode：任务规划节点
 import json
 import logging
 import re
+import uuid
 from datetime import date
 
 from config import SEARCH_MODEL, VISION_MODEL
@@ -258,8 +259,41 @@ class PlannerNode(BaseNode):
         if plan_steps:
             plan_steps[0] = {**plan_steps[0], "status": "running"}
 
+        # ── 持久化计划到 DB（非阻断，失败仅记录日志） ──────────────────────────
+        plan_id = ""
+        if len(plan_steps) > 1:
+            # 单步任务不需要 DB 状态管理
+            plan_id = str(uuid.uuid4())
+            vision_desc = state.get("vision_description", "")
+            goal = (
+                f"{user_msg}\n\n[图片内容]\n{vision_desc}"
+                if vision_desc else user_msg
+            )
+            steps_for_db = [
+                {
+                    "id":          s["id"],
+                    "title":       s["title"],
+                    "description": s["description"],
+                    "status":      "pending",
+                    "result":      "",
+                }
+                for s in plan_steps
+            ]
+            try:
+                from db.plan_store import create_plan
+                await create_plan(
+                    plan_id=plan_id,
+                    conv_id=state.get("conv_id", ""),
+                    goal=goal,
+                    steps=steps_for_db,
+                )
+            except Exception as exc:
+                logger.error("写入 plan_steps DB 失败: %s", exc)
+                plan_id = ""  # 降级：后续节点用 GraphState 内存方案
+
         return {
             "plan":               plan_steps,
+            "plan_id":            plan_id,
             "current_step_index": 0,
             "step_iterations":    0,
         }

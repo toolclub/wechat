@@ -122,6 +122,7 @@ class RetrieveContextNode(BaseNode):
             "forget_mode":       forget_mode,
             # 初始化认知规划字段（每轮重置）
             "plan":               [],
+            "plan_id":            "",
             "current_step_index": 0,
             "step_iterations":    0,
             "reflector_decision": "",

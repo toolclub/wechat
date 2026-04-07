@@ -19,7 +19,7 @@ import asyncio
 import logging
 
 from langchain_core.callbacks.manager import adispatch_custom_event
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_MODEL
 from graph.nodes.base import BaseNode
@@ -99,45 +99,90 @@ class CallModelAfterToolNode(BaseNode):
         current_idx: int,
     ) -> list:
         """
-        向 SystemMessage 末尾追加步骤边界指令。
+        步骤边界处理。
 
-        目的：
-          - 非末步：强制模型只输出当前步骤的摘要/结论，禁止提前生成最终答案/代码
-          - 末步：鼓励模型直接生成完整最终回复，但不再额外调用工具
+        - 非末步：完全重建消息集，隔离原始用户意图，只保留步骤指令 + 工具结果，
+                  防止模型看到最终目标后提前生成完整产品。
+        - 末步：在 SystemMessage 末尾追加历史步骤结果 + 生成指令。
         """
         step       = plan[current_idx]
         total      = len(plan)
         is_last    = current_idx >= total - 1
         tool_count = sum(1 for m in messages if type(m).__name__ == "ToolMessage")
 
-        boundary = (
-            f"\n\n===当前执行步骤 {current_idx + 1}/{total}===\n"
+        if not is_last:
+            return self._build_focused_step_messages(messages, step, tool_count)
+
+        # ── 末步：注入历史步骤结果 + 生成最终回复指令 ──────────────────────
+        prev_results: list[str] = []
+        for i in range(current_idx):
+            result = plan[i].get("result", "")
+            if result:
+                prev_results.append(
+                    f"【步骤{i + 1}：{plan[i]['title']}的执行结果】\n{result[:1500]}"
+                )
+
+        boundary = ""
+        if prev_results:
+            boundary += "\n\n" + "\n\n".join(prev_results)
+
+        boundary += (
+            f"\n\n===当前执行步骤 {current_idx + 1}/{total}（最后一步）===\n"
             f"标题：{step['title']}\n"
             f"任务：{step['description']}\n"
             f"本步已调用工具 {tool_count} 次。\n"
+            "请基于以上所有信息和工具结果，直接给出完整的最终回复。"
         )
+        if tool_count >= 2:
+            boundary += "不要再调用工具。"
 
-        if is_last:
-            # 末步：可以（也应该）生成最终完整回复
-            boundary += (
-                "这是最后一步，请基于以上所有上下文和工具结果，"
-                "直接给出完整的最终回复。"
-            )
-            if tool_count >= 2:
-                boundary += "不要再调用工具。"
-        else:
-            # 非末步：严格限制只输出当前步骤的摘要，禁止提前生成最终答案
-            boundary += (
-                f"【重要限制】你现在只需完成步骤 {current_idx + 1} 的任务。\n"
-                "输出要求：仅给出本步骤收集到的信息摘要或分析结论，"
-                "不要生成最终回答、不要编写完整代码、不要执行后续步骤的内容。"
-                f"后续步骤（步骤 {current_idx + 2} 至 {total}）将由系统在下一轮继续执行。"
-            )
-
-        # 追加到 SystemMessage 末尾（保留原始上下文）
         if messages and type(messages[0]).__name__ == "SystemMessage":
             messages = [SystemMessage(content=messages[0].content + boundary)] + messages[1:]
         return messages
+
+    def _build_focused_step_messages(
+        self,
+        messages: list,
+        step: dict,
+        tool_count: int,
+    ) -> list:
+        """
+        中间步骤：重建聚焦消息集。
+
+        丢弃原始对话历史（含用户最终意图），只保留：
+          1. 聚焦系统提示（只允许输出摘要）
+          2. 步骤指令 HumanMessage
+          3. 工具调用 AIMessage（含 tool_calls）
+          4. 工具返回 ToolMessage(s)
+
+        这样模型完全看不到 "帮我做网页" 之类的最终目标，
+        只能根据工具结果写出当前步骤的信息摘要。
+        """
+        # 提取工具调用 AIMessage（最后一个含 tool_calls 的）
+        ai_tool_msg = None
+        for m in messages:
+            if type(m).__name__ == "AIMessage" and getattr(m, "tool_calls", None):
+                ai_tool_msg = m
+
+        # 提取所有 ToolMessage
+        tool_msgs = [m for m in messages if type(m).__name__ == "ToolMessage"]
+
+        focused_system = SystemMessage(content=(
+            f"你是一个信息采集助手。请根据工具返回的结果，"
+            f"简洁总结步骤‘{step['title']}’的执行情况（约100-300字）。\n"
+            "⚠️ 严格限制：只输出本步骤收集到的关键信息摘要；"
+            "不得生成HTML代码、完整文章、最终产品，也不得执行后续步骤的内容。"
+        ))
+        step_instruction = HumanMessage(content=(
+            f"当前步骤任务：{step['description']}\n"
+            f"本步已调用工具 {tool_count} 次，请分析工具结果并给出本步骤的信息摘要。"
+        ))
+
+        new_messages: list = [focused_system, step_instruction]
+        if ai_tool_msg:
+            new_messages.append(ai_tool_msg)
+        new_messages.extend(tool_msgs)
+        return new_messages
 
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
     _VISION_TIMEOUT = 300.0
@@ -205,7 +250,11 @@ class CallModelAfterToolNode(BaseNode):
             "call_model_after_tool (vision) 流式完成 | conv=%s | tokens=%d | content_len=%d | thinking_len=%d",
             conv_id, token_count, len(full_content), len(full_thinking),
         )
-        result: dict = {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        result: dict = {
+            "messages":     [AIMessage(content=full_content)],
+            "full_response": full_content,
+            "_was_streamed": True,
+        }
         if full_thinking:
             result["full_thinking"] = full_thinking
         return result
@@ -273,7 +322,11 @@ class CallModelAfterToolNode(BaseNode):
             " | content_len=%d | thinking_len=%d",
             conv_id, model, token_count, len(full_content), len(full_thinking),
         )
-        result: dict = {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        result: dict = {
+            "messages":     [AIMessage(content=full_content)],
+            "full_response": full_content,
+            "_was_streamed": True,
+        }
         if full_thinking:
             result["full_thinking"] = full_thinking
         return result

@@ -56,13 +56,44 @@ if %errorlevel% equ 0 (
     echo   docker compose -f docker-compose.prod.yml logs -f backend
 )
 
+
+REM -- Start cloudflared as background process (no window) --
+echo [4/4] Starting Cloudflare Tunnel...
+
+if not exist "%CLOUDFLARED%" (
+    echo [WARN] cloudflared.exe not found, skipping tunnel.
+    goto :done
+)
+
+if not exist "%CLOUDFLARED_CONFIG%" (
+    echo [WARN] cloudflared-config.yml not found, skipping tunnel.
+    goto :done
+)
+
+REM -- Kill any existing cloudflared process first --
+taskkill /f /im cloudflared.exe > nul 2>&1
+
+REM -- Start silently in background, redirect output to log file --
+start /b "" "%CLOUDFLARED%" tunnel --config "%CLOUDFLARED_CONFIG%" run >> "%CLOUDFLARED_LOG%" 2>&1
+
+timeout /t 3 /nobreak > nul
+
+tasklist | findstr /i "cloudflared.exe" > nul 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] Cloudflare Tunnel started ^(log: logs\cloudflared.log^)
+) else (
+    echo [ERROR] Cloudflare Tunnel failed to start. Check logs\cloudflared.log
+)
+
 echo.
 echo ============================================
 echo   Production services started!
 echo ============================================
 echo.
 echo   Frontend:  http://localhost
-echo   API docs:  http://localhost/api/docs
+echo   API docs:  http://localhost:8000/docs
+echo   Qdrant:    http://localhost:6333/dashboard
+echo   Tunnel:    https://chatflow-live.com
 echo.
 echo   Worker count: 8 (GUNICORN_WORKERS in .env.prod.win)
 echo.

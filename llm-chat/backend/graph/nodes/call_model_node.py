@@ -22,7 +22,7 @@ import logging
 import re
 
 from langchain_core.callbacks.manager import adispatch_custom_event
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
 from graph.nodes.base import BaseNode
@@ -156,12 +156,15 @@ class CallModelNode(BaseNode):
             use_tools = False
             tools_schema = None
 
-        # ── 消息列表（本地副本，避免修改 state） ────────────────────────────
-        messages = list(state["messages"])
-
-        # ── 首次执行时注入步骤上下文 ────────────────────────────────────────
-        # plan / step_iters / cur_idx 已在预检阶段读取，此处复用
+        # ── 消息列表（本地副本，步骤 1+ 使用聚焦上下文，不喂完整历史） ────────
         current_idx = cur_idx
+
+        if plan and current_idx > 0:
+            # 步骤 1+：用 GraphState.plan 中已有的步骤结果构建聚焦消息，
+            # 完全不依赖 state["messages"] 的积累历史，实现真正的上下文隔离。
+            messages = self._build_focused_step_messages(state, plan, current_idx)
+        else:
+            messages = list(state["messages"])
 
         logger.info(
             "call_model 开始 | conv=%s | model=%s | use_tools=%s | "
@@ -173,8 +176,8 @@ class CallModelNode(BaseNode):
             len(messages),
         )
 
-        # 仅首次调用（step_iters==0 且 current_idx==0）时注入步骤上下文
-        if plan and current_idx < len(plan) and current_idx == 0 and step_iters == 0:
+        # 步骤 0：首次调用时注入步骤上下文到最后一条 HumanMessage
+        if plan and current_idx == 0 and current_idx < len(plan) and step_iters == 0:
             step     = plan[current_idx]
             total    = len(plan)
             step_ctx = (
@@ -199,10 +202,105 @@ class CallModelNode(BaseNode):
         # 仅在 VisionNode 降级（描述为空）且原始图片仍在 state 时，
         # 才回退 vision_path 让视觉模型直接处理图片。
         vision_desc = state.get("vision_description", "")
-        if state.get("images") and not vision_desc:
+        # 步骤 1+ 聚焦消息已含文字视觉描述，不需要再走视觉路径
+        if state.get("images") and not vision_desc and current_idx == 0:
             return await self._vision_path(state, messages, use_tools, tools_schema, conv_id)
         else:
             return await self._llm_path(state, messages, model, temperature, use_tools, tools_schema, conv_id)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 聚焦步骤消息构建（步骤 1+ 专用）
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _build_focused_step_messages(
+        state: GraphState,
+        plan: list,
+        current_idx: int,
+    ) -> list:
+        """
+        为步骤 1+ 构建聚焦上下文消息，完全替代 state["messages"] 的完整历史。
+
+        设计原则：
+          - 模型只看到：总目标 + 已完成步骤摘要 + 当前步骤指令
+          - 不含原始对话历史、mid_term_summary、long_term_memories
+          - 末步使用对话的系统提示（保持风格/人格一致）
+          - 中间步骤使用聚焦执行者系统提示（防止提前生成最终产品）
+
+        上下文层次：
+          SystemMessage → HumanMessage（总目标）→ AIMessage（步骤N结果）× N
+          → HumanMessage（当前步骤指令）
+        """
+        from config import DEFAULT_SYSTEM_PROMPT
+        from memory import store as memory_store
+
+        total       = len(plan)
+        is_last     = current_idx >= total - 1
+        user_msg    = state.get("user_message", "")
+        vision_desc = state.get("vision_description", "")
+        conv_id     = state.get("conv_id", "")
+
+        # ── 系统提示 ────────────────────────────────────────────────────────
+        if is_last:
+            # 末步：用对话的自定义系统提示，确保最终回复风格符合用户期望
+            conv = memory_store.get(conv_id)
+            system_content = (
+                conv.system_prompt
+                if conv and conv.system_prompt
+                else DEFAULT_SYSTEM_PROMPT
+            )
+        else:
+            # 中间步骤：专注执行者角色，防止提前生成最终产品
+            system_content = (
+                "你是一个专注的任务执行助手，负责完成多步骤任务中的当前步骤。\n"
+                "每次只完成当前步骤的任务，使用工具收集所需信息，"
+                "不要提前生成后续步骤的内容或最终产品。"
+            )
+
+        # ── 任务总目标 ───────────────────────────────────────────────────────
+        goal = user_msg
+        if vision_desc:
+            goal = f"{user_msg}\n\n[图片内容分析]\n{vision_desc}" if user_msg.strip() else vision_desc
+
+        messages: list = [
+            SystemMessage(content=system_content),
+            HumanMessage(content=f"任务总目标：{goal}"),
+        ]
+
+        # ── 已完成步骤的执行结果（来自 GraphState.plan[i].result） ────────────
+        # reflector_node 在每步完成时写入 plan[i].result，这里直接读取。
+        # 不需要 DB 读取，GraphState 是运行时权威数据；DB 只做持久化副本。
+        for i in range(current_idx):
+            result = plan[i].get("result", "")
+            title  = plan[i].get("title", f"步骤{i + 1}")
+            if result:
+                messages.append(
+                    AIMessage(content=f"【步骤{i + 1}：{title}的执行结果】\n{result}")
+                )
+
+        # ── 当前步骤指令 ─────────────────────────────────────────────────────
+        current_step = plan[current_idx]
+        if is_last:
+            step_instruction = (
+                f"请基于以上所有步骤的执行结果，完成最终任务：\n"
+                f"{current_step['description']}"
+            )
+        else:
+            step_instruction = (
+                f"\n\n---\n**[执行步骤 {current_idx + 1}/{total}]: {current_step['title']}**\n"
+                f"具体任务：{current_step['description']}\n"
+                "请使用工具完成此步骤，收集所需信息。"
+            )
+        messages.append(HumanMessage(content=step_instruction))
+
+        logger.info(
+            "_build_focused_step_messages | step=%d/%d | is_last=%s | "
+            "prev_results=%d | msg_count=%d",
+            current_idx + 1, total, is_last,
+            sum(1 for i in range(current_idx) if plan[i].get("result")),
+            len(messages),
+        )
+        return messages
 
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢，给足 5 分钟
     _VISION_TIMEOUT = 300.0
@@ -346,7 +444,12 @@ class CallModelNode(BaseNode):
             "call_model 流式完成 | conv=%s | node=%s | tokens=%d | content_len=%d | thinking_len=%d",
             conv_id, node, token_count, len(full_content), len(full_thinking),
         )
-        result: dict = {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        # _was_streamed=True：告知 EndHandler 本次已逐 token 推送，跳过重复发送
+        result: dict = {
+            "messages":     [AIMessage(content=full_content)],
+            "full_response": full_content,
+            "_was_streamed": True,
+        }
         if full_thinking:
             result["full_thinking"] = full_thinking
         return result

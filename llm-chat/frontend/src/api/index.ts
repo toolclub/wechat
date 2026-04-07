@@ -2,10 +2,22 @@ import type { ClarificationData, PlanStep, ToolHistoryEvent } from '../types'
 
 const API_BASE = ''
 
+function generateUUID(): string {
+  // crypto.randomUUID() requires a secure context (HTTPS/localhost)
+  // Fallback for HTTP environments (e.g. direct LAN access)
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
+
 function getClientId(): string {
   let id = localStorage.getItem('cf_client_id')
   if (!id) {
-    id = crypto.randomUUID()
+    id = generateUUID()
     localStorage.setItem('cf_client_id', id)
   }
   return id

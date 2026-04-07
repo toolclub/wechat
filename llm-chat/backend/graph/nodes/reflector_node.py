@@ -91,6 +91,15 @@ class ReflectorNode(BaseNode):
         # ── 快速路径 1：最后一步且有响应 → done ────────────────────────────
         if is_last and full_response:
             updated_plan = self._mark_step(plan, current_idx, "done")
+            updated_plan[current_idx] = {**updated_plan[current_idx], "result": full_response[:3000]}
+            # DB 持久化（非阻断）
+            plan_id = state.get("plan_id", "")
+            if plan_id:
+                try:
+                    from db.plan_store import save_step_result
+                    await save_step_result(plan_id, current_idx, full_response, current_idx + 1)
+                except Exception as exc:
+                    logger.warning("DB 末步结果写入失败（不影响主流程）: %s", exc)
             return {
                 "reflector_decision": "done",
                 "reflection":         "最后步骤执行完成",
@@ -108,7 +117,20 @@ class ReflectorNode(BaseNode):
                 for m in recent
             )
             if has_tool_result:
-                return self._make_continue_result(plan, current_idx, total)
+                result = self._make_continue_result(
+                    plan, current_idx, total,
+                    full_response=full_response,
+                )
+                # DB 持久化（非阻断）
+                plan_id = state.get("plan_id", "")
+                if plan_id and full_response:
+                    next_idx = result.get("current_step_index", current_idx + 1)
+                    try:
+                        from db.plan_store import save_step_result
+                        await save_step_result(plan_id, current_idx, full_response, next_idx)
+                    except Exception as exc:
+                        logger.warning("DB 步骤结果写入失败（不影响主流程）: %s", exc)
+                return result
 
         # ── 调用 LLM 评估 ────────────────────────────────────────────────────
         model = state.get("answer_model") or state.get("model", "")
@@ -159,16 +181,34 @@ class ReflectorNode(BaseNode):
         if decision not in ("done", "continue", "retry"):
             decision = "done"
 
-        return self._build_result(plan, current_idx, total, decision, reflection_text, step_iters)
+        result = self._build_result(plan, current_idx, total, decision, reflection_text, step_iters, full_response)
+        # DB 持久化：done / continue 时保存当前步骤结果（retry 不保存，等重试后再存）
+        if decision in ("done", "continue") and full_response:
+            plan_id = state.get("plan_id", "")
+            if plan_id:
+                next_idx = result.get("current_step_index", current_idx + 1)
+                try:
+                    from db.plan_store import save_step_result
+                    await save_step_result(plan_id, current_idx, full_response, next_idx)
+                except Exception as exc:
+                    logger.warning("DB 步骤结果写入失败（不影响主流程）: %s", exc)
+        return result
 
     def _make_continue_result(
         self,
         plan: list[PlanStep],
         current_idx: int,
         total: int,
+        full_response: str = "",
     ) -> ReflectorNodeOutput:
         """快速 continue：当前步骤完成，直接推进到下一步，不调 LLM。"""
         updated_plan = self._mark_step(plan, current_idx, "done")
+        # 保存当前步骤结果，供末步上下文注入使用
+        if full_response:
+            updated_plan[current_idx] = {
+                **updated_plan[current_idx],
+                "result": full_response[:3000],
+            }
         next_idx     = current_idx + 1
         updated_plan = self._mark_step(updated_plan, next_idx, "running")
         next_step    = updated_plan[next_idx]
@@ -204,6 +244,7 @@ class ReflectorNode(BaseNode):
         decision: str,
         reflection_text: str,
         step_iters: int,
+        full_response: str = "",
     ) -> ReflectorNodeOutput:
         """根据 LLM 决策构建完整的节点返回值。"""
         updated_plan = list(plan)
@@ -211,10 +252,20 @@ class ReflectorNode(BaseNode):
 
         if decision == "done":
             updated_plan         = self._mark_step(updated_plan, current_idx, "done")
+            if full_response:
+                updated_plan[current_idx] = {
+                    **updated_plan[current_idx],
+                    "result": full_response[:3000],
+                }
             result["reflector_decision"] = "done"
 
         elif decision == "continue":
             updated_plan = self._mark_step(updated_plan, current_idx, "done")
+            if full_response:
+                updated_plan[current_idx] = {
+                    **updated_plan[current_idx],
+                    "result": full_response[:3000],
+                }
             next_idx     = current_idx + 1
             if next_idx < total:
                 updated_plan  = self._mark_step(updated_plan, next_idx, "running")
