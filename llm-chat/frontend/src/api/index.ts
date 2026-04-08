@@ -108,6 +108,103 @@ export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]
   return data.artifacts || []
 }
 
+/** 获取对话的完整状态（含消息详情、计划、产物等，供刷新后恢复） */
+export async function fetchFullState(convId: string) {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/full-state`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  return res.json()
+}
+
+/** 快速检查对话是否有活跃的流式输出 */
+export async function fetchStreamingStatus(convId: string): Promise<{ streaming: boolean; last_event_id: number }> {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/streaming-status`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  return res.json()
+}
+
+/** 恢复流式输出（SSE 重连） */
+export async function resumeStream(
+  convId: string,
+  lastIndex: number,
+  onChunk: (text: string) => void,
+  onToolCall: (name: string, input: Record<string, unknown>) => void,
+  onToolResult: (name: string, data: Record<string, unknown>) => void,
+  onSearchItem: (item: { url: string; title: string; status: string }) => void,
+  onStatus: (status: string, model?: string) => void,
+  onRoute: (model: string, intent: string) => void,
+  onPlanGenerated: (steps: PlanStep[]) => void,
+  onReflection: (content: string, decision: string) => void,
+  onDone: () => void,
+  onStopped: () => void,
+  signal?: AbortSignal,
+  onThinking?: (text: string) => void,
+  onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
+  onFileArtifact?: (artifact: FileArtifact) => void,
+  onToolCallStart?: (name: string) => void,
+  onResumeContext?: (userMessage: string, images: string[]) => void,
+) {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`, {
+    headers: { 'X-Client-ID': getClientId() },
+    signal,
+  })
+
+  const reader = res.body?.getReader()
+  const decoder = new TextDecoder()
+  if (!reader) return
+
+  let buffer = ''
+  let streamDone = false
+
+  function processLine(line: string) {
+    if (!line.startsWith('data: ')) return
+    try {
+      const data = JSON.parse(line.slice(6))
+      if (data.resume_context)  onResumeContext?.(data.resume_context.user_message, data.resume_context.images || [])
+      if (data.thinking)        onThinking?.(data.thinking)
+      if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
+      if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
+      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.content)         onChunk(data.content)
+      if (data.tool_call)       onToolCall(data.tool_call.name, data.tool_call.input)
+      if (data.tool_result)     onToolResult(data.tool_result.name, data.tool_result)
+      if (data.search_item)     onSearchItem(data.search_item)
+      if (data.status)          onStatus(data.status, data.model)
+      if (data.route)           onRoute(data.route.model, data.route.intent)
+      if (data.plan_generated)  onPlanGenerated(data.plan_generated.steps)
+      if (data.reflection)      onReflection(data.reflection.content, data.reflection.decision)
+      if (data.error)           onChunk('\n\n⚠️ ' + data.error)
+      if (data.done)            { streamDone = true; onDone() }
+      if (data.stopped)         { streamDone = true; onStopped() }
+    } catch {}
+  }
+
+  try {
+    while (true) {
+      let done: boolean
+      let value: Uint8Array | undefined
+      try {
+        const result = await reader.read()
+        done = result.done
+        value = result.value
+      } catch {
+        break
+      }
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) processLine(line)
+    }
+    if (buffer.trim()) processLine(buffer.trim())
+  } finally {}
+
+  if (!streamDone) {
+    if (signal?.aborted) onStopped()
+  }
+}
+
 export async function sendMessage(
   conversationId: string,
   message: string,

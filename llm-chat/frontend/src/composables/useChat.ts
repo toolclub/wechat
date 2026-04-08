@@ -3,6 +3,12 @@ import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayl
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
 
+/** 读取用户当前选择的 Agent/Chat 模式（从 localStorage 持久化状态读取） */
+function getCurrentAgentMode(): boolean {
+  const saved = localStorage.getItem('cf_agent_mode')
+  return saved !== 'false'  // 默认 true
+}
+
 interface ConvState {
   messages: Message[]
   loading: boolean
@@ -108,40 +114,223 @@ export function useChat() {
     currentConvId.value = id
     window.location.hash = id
     if (convStates[id]?.loading) return
-    const data = await api.fetchConversation(id)
     const s = getOrCreate(id)
-    s.messages = (data.messages || []).map((m: Message) => ({
-      role: m.role,
-      content: m.role === 'assistant'
-        ? m.content
-            .replace(/\n\n【工具调用记录】[\s\S]*$/, '')
-            .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')
-        : m.content,
-      images: m.images,
-      timestamp: m.timestamp,
-    }))
-    s.cognitive = makeEmptyCognitiveState()
-    s.canContinue = false
-    // 并行加载工具调用历史 + 最新执行计划（供刷新后复现）
+
+    // ── 一次性从 DB 获取完整状态（full-state API 直接查数据库，跨 worker 安全） ──
     try {
-      const [toolEvents, latestPlan, artifacts] = await Promise.all([
-        api.fetchConvTools(id),
-        api.fetchLatestPlan(id),
-        api.fetchConvArtifacts(id),
-      ])
-      s.cognitive.historyEvents = toolEvents
-      s.cognitive.artifacts = artifacts
-      if (latestPlan) {
-        // 刷新加载时对话已结束，所有步骤标记为 done（DB 中最后一步可能还是 running）
-        s.cognitive.plan = latestPlan.steps.map(st => ({
-          id: st.id,
-          title: st.title,
-          description: st.description ?? '',
-          status: 'done' as const,
-          result: st.result ?? '',
+      const fullState = await api.fetchFullState(id)
+      if (fullState.error) {
+        s.messages = []; s.cognitive = makeEmptyCognitiveState(); s.canContinue = false
+        return
+      }
+
+      // ── 从 DB 恢复所有消息（含 thinking、tool_executions、stream 状态） ──
+      s.messages = (fullState.messages || []).map((m: any) => {
+        // 完成的消息用 content，未完成的用 stream_buffer（正在生成中的中间状态）
+        const rawContent = m.role === 'assistant'
+          ? (m.stream_completed !== false ? m.content : (m.content || m.stream_buffer || ''))
+          : m.content
+        const cleanContent = m.role === 'assistant'
+          ? (rawContent || '')
+              .replace(/\n\n【工具调用记录】[\s\S]*$/, '')
+              .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')
+          : rawContent
+
+        const msg: Message = {
+          role: m.role,
+          content: cleanContent,
+          timestamp: m.timestamp,
+        }
+
+        // thinking 直接从 messages 表恢复（不再依赖 message_details）
+        if (m.thinking) msg.thinking = m.thinking
+        if (m.images?.length) msg.images = m.images
+
+        // tool_executions 从新表恢复
+        if (m.tool_executions?.length) {
+          msg.toolCalls = m.tool_executions.map((te: any) => ({
+            name: te.tool_name,
+            input: te.tool_input || {},
+            output: te.tool_output || undefined,
+            searchItems: te.search_items?.length ? te.search_items : undefined,
+            fetchStatus: te.tool_name === 'fetch_webpage'
+              ? (te.status === 'done' ? 'done' : 'loading') : undefined,
+            done: te.status === 'done',
+          }))
+        }
+
+        return msg
+      })
+
+      // ── 恢复认知面板 ──
+      s.cognitive = makeEmptyCognitiveState()
+      s.cognitive.artifacts = fullState.artifacts || []
+      if (fullState.plan) {
+        s.cognitive.plan = fullState.plan.steps.map((st: any) => ({
+          id: st.id, title: st.title, description: st.description ?? '',
+          status: st.status ?? 'done', result: st.result ?? '',
         }))
       }
-    } catch {}
+      s.canContinue = false
+
+      // ── 如果有未完成的流式消息，自动恢复 SSE 连接 ──
+      if (fullState.has_streaming) {
+        await _resumeActiveStream(id, s, fullState.last_event_id || 0)
+      }
+
+    } catch (err) {
+      console.error('[selectConversation] 加载失败:', err)
+      s.messages = []; s.cognitive = makeEmptyCognitiveState(); s.canContinue = false
+    }
+  }
+
+  /**
+   * 恢复活跃的流式输出：自动重连 SSE，从缓冲区 index=0 重放全部事件。
+   *
+   * 注意：流式期间消息尚未保存到 DB（save_response 在最后执行），
+   * 所以 fetchConversation 返回的是不含当前轮的历史。
+   * 我们从 buffer index=0 开始重放，前端会收到完整的当前轮事件。
+   */
+  async function _resumeActiveStream(convId: string, s: ConvState, lastEventId: number) {
+    // DB-first：messages 表已有 user + assistant(stream_completed=false) 两条记录。
+    // 如果最后一条不是 assistant，补一个空的（兼容旧数据）。
+    if (s.messages.length === 0 || s.messages[s.messages.length - 1].role !== 'assistant') {
+      s.messages.push({ role: 'assistant', content: '' })
+    }
+    let assistantIdx = s.messages.length - 1
+    // 清空 content（resume 会从事件重放中重建）
+    s.messages[assistantIdx].content = ''
+    s.messages[assistantIdx].thinking = ''
+    s.messages[assistantIdx].toolCalls = undefined
+    s.messages[assistantIdx].steps = undefined
+
+    s.loading = true
+    s.agentStatus = { state: 'thinking', model: '' }
+    s.abortController = new AbortController()
+    s.activeStepIndex = -1
+    s.cognitive.isActive = true
+
+    const msg = () => s.messages[assistantIdx]
+    const activeStep = (): StepRecord | null => {
+      const steps = msg().steps
+      if (!steps || s.activeStepIndex < 0) return null
+      return steps[s.activeStepIndex] ?? steps[steps.length - 1] ?? null
+    }
+
+    try {
+      await api.resumeStream(
+        convId, 0,  // 从头重放所有事件
+        // onChunk
+        (chunk) => {
+          const step = activeStep()
+          const target = step || msg()
+          target.content = (target.content || '') + chunk
+        },
+        // onToolCall
+        (name, input) => {
+          const tc = name === 'fetch_webpage'
+            ? { name, input, done: false, fetchStatus: 'loading' as const }
+            : { name, input, done: false }
+          const step = activeStep()
+          const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
+          const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
+          if (placeholderIdx >= 0) toolList[placeholderIdx] = tc; else toolList.push(tc)
+          s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
+        },
+        // onToolResult
+        (name, data) => {
+          const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => t.name === name && !t.done)
+          if (tc) {
+            if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
+            else if (data.results) tc.results = data.results as any
+            else if (data.output) tc.output = data.output as string
+            tc.done = true
+          }
+          s.agentStatus = { ...s.agentStatus, state: 'thinking', tool: undefined }
+        },
+        // onSearchItem
+        (item) => {
+          const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => t.name === 'web_search' && !t.done)
+          if (tc) { if (!tc.searchItems) tc.searchItems = []; tc.searchItems.push({ url: item.url, title: item.title, status: item.status as any }) }
+        },
+        // onStatus
+        (status, model) => {
+          if (status === 'routing') s.agentStatus = { state: 'routing', model: s.agentStatus.model }
+          else if (status === 'planning') s.agentStatus = { ...s.agentStatus, state: 'planning' }
+          else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
+          else if (status === 'saving') s.agentStatus = { ...s.agentStatus, state: 'saving' }
+        },
+        // onRoute
+        (model, intent) => { s.agentStatus = { state: 'thinking', model, intent } },
+        // onPlanGenerated
+        (planSteps) => {
+          const m = msg()
+          if (!m.steps) {
+            m.steps = planSteps.map((st, i): StepRecord => ({
+              index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '',
+            }))
+            s.activeStepIndex = 0
+          } else {
+            planSteps.forEach((st, i) => {
+              if (m.steps![i]) { m.steps![i].status = st.status; m.steps![i].title = st.title; if (st.result && st.status === 'done' && !m.steps![i].content) m.steps![i].content = st.result }
+              else m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '' })
+            })
+            const runningIdx = planSteps.findIndex(st => st.status === 'running')
+            if (runningIdx >= 0) s.activeStepIndex = runningIdx
+          }
+          s.cognitive.plan = planSteps; s.cognitive.isActive = true
+          const ri = planSteps.findIndex(st => st.status === 'running')
+          s.cognitive.currentStepIndex = ri >= 0 ? ri : s.activeStepIndex
+        },
+        // onReflection
+        (content, decision) => {
+          s.cognitive.reflection = content; s.cognitive.reflectorDecision = decision
+          s.agentStatus = { ...s.agentStatus, state: 'reflecting' }
+        },
+        // onDone
+        () => {
+          const m = msg()
+          if (m.steps) m.steps = m.steps.map(step => ({ ...step, status: step.status === 'failed' ? 'failed' : 'done' }))
+          if (s.cognitive.plan.length > 0) s.cognitive.plan = s.cognitive.plan.map(step => ({ ...step, status: step.status === 'failed' ? 'failed' : 'done' }))
+          s.agentStatus = { ...s.agentStatus, state: 'done' }
+          s.loading = false; s.canContinue = false; s.abortController = null; s.cognitive.isActive = false
+          setTimeout(() => { if (s.agentStatus.state === 'done') s.agentStatus = { ...s.agentStatus, state: 'idle' } }, 2000)
+          loadConversations()
+        },
+        // onStopped
+        () => {
+          s.loading = false; s.abortController = null
+          s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false
+        },
+        s.abortController.signal,
+        // onThinking
+        (thinking) => { const step = activeStep(); if (step) step.thinking += thinking; else msg().thinking = (msg().thinking ?? '') + thinking },
+        // onSandboxOutput
+        (toolName, stream, text) => {
+          const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell') && !t.done)
+          if (tc) tc.output = (tc.output || '') + text
+        },
+        // onFileArtifact
+        (artifact) => { s.cognitive.artifacts.push(artifact) },
+        // onToolCallStart
+        (name) => {
+          const placeholder = { name, input: { _generating: true }, done: false }
+          const step = activeStep()
+          if (step) step.toolCalls.push(placeholder)
+          else { if (!msg().toolCalls) msg().toolCalls = []; msg().toolCalls!.push(placeholder) }
+          s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
+        },
+        // onResumeContext — 用户消息已在 DB 中，忽略
+        undefined,
+      )
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return
+      s.loading = false; s.abortController = null
+      s.agentStatus = { state: 'idle', model: '' }; s.cognitive.isActive = false
+    }
   }
 
   async function newConversation() {
@@ -503,7 +692,7 @@ export function useChat() {
         ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}${planContext}`
         : (supplement || '继续')
 
-      await send({ text: formatted, images: [], agentMode: true })
+      await send({ text: formatted, images: [], agentMode: getCurrentAgentMode() })
     }
   }
 
@@ -662,7 +851,7 @@ export function useChat() {
     const s = convStates[currentConvId.value]
     if (!s || s.loading) return
     s.canContinue = false
-    await send({ text: '继续', images: [], agentMode: true })
+    await send({ text: '继续', images: [], agentMode: getCurrentAgentMode() })
   }
 
   /**
@@ -681,11 +870,11 @@ export function useChat() {
     const lastUserMsg = s.messages[lastUserIdx]
     // Remove last user + assistant pair from frontend
     s.messages.splice(lastUserIdx)
-    // Re-send with same content
+    // Re-send with same content (respect current mode selection)
     await send({
       text: lastUserMsg.content,
       images: lastUserMsg.images ?? [],
-      agentMode: true,
+      agentMode: getCurrentAgentMode(),
     })
   }
 
@@ -700,11 +889,11 @@ export function useChat() {
     if (!msg || msg.role !== 'user') return
     // Truncate messages from this point
     s.messages.splice(msgIndex)
-    // Re-send with new content
+    // Re-send with new content (respect current mode selection)
     await send({
       text: newContent,
       images: msg.images ?? [],
-      agentMode: true,
+      agentMode: getCurrentAgentMode(),
     })
   }
 

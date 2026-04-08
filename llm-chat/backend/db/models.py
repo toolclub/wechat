@@ -1,111 +1,139 @@
 """
-SQLAlchemy ORM 模型定义
+SQLAlchemy ORM 模型定义（重构版 — DB-first 架构）
+
+核心变更：
+  - messages 表新增 thinking/stream_buffer/stream_completed/message_id/sequence_number
+  - 新增 event_log 表：SSE 事件持久化（替代纯内存 event_buffer）
+  - 新增 tool_executions 表：工具调用独立记录
+  - 保留 message_details 表向后兼容（逐步废弃）
 """
-from sqlalchemy import Column, String, Text, Integer, Float, Index
+from sqlalchemy import Column, String, Text, Integer, Float, Boolean, Index
 from sqlalchemy.dialects.postgresql import JSONB
 
 from db.database import Base
 
 
 class ConversationModel(Base):
-    """对话主表：存储每个对话的元数据和摘要信息"""
+    """对话主表"""
     __tablename__ = "conversations"
 
-    id = Column(
-        String(36), primary_key=True,
-        comment="对话唯一标识（8位短UUID）"
+    id = Column(String(36), primary_key=True)
+    title = Column(Text, nullable=False, default="新对话")
+    system_prompt = Column(Text, nullable=False, default="")
+    mid_term_summary = Column(Text, nullable=False, default="")
+    mid_term_cursor = Column(Integer, nullable=False, default=0)
+    client_id = Column(String(36), nullable=False, default="", index=True)
+    status = Column(
+        String(20), nullable=False, default="active",
+        comment="active / streaming / completed / error",
     )
-    title = Column(
-        Text, nullable=False, default="新对话",
-        comment="对话标题（首条用户消息前30字自动生成）"
+    mode = Column(
+        String(20), nullable=False, default="agent",
+        comment="agent / chat — 用户选择的模式",
     )
-    system_prompt = Column(
-        Text, nullable=False, default="",
-        comment="自定义系统提示词"
+    model_name = Column(
+        String(100), nullable=False, default="",
+        comment="使用的模型名",
     )
-    mid_term_summary = Column(
-        Text, nullable=False, default="",
-        comment="中期摘要：旧消息压缩后的文本摘要"
-    )
-    mid_term_cursor = Column(
-        Integer, nullable=False, default=0,
-        comment="已完成摘要的消息游标（messages表的记录偏移）"
-    )
-    client_id = Column(
-        String(36), nullable=False, default="",
-        comment="浏览器唯一标识（由前端localStorage生成的UUID）",
-        index=True,
-    )
-    created_at = Column(
-        Float, nullable=False,
-        comment="对话创建时间（Unix时间戳，浮点数）"
-    )
-    updated_at = Column(
-        Float, nullable=False,
-        comment="对话最后更新时间（Unix时间戳，浮点数）"
-    )
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
 
 
 class MessageModel(Base):
-    """消息表：存储对话中的每一条消息"""
+    """消息表（重构版 — 每条消息的全部 IO 都在此表）"""
     __tablename__ = "messages"
 
-    id = Column(
-        Integer, primary_key=True, autoincrement=True,
-        comment="自增主键"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conv_id = Column(String(36), nullable=False, index=True)
+    message_id = Column(
+        String(36), nullable=False, default="",
+        comment="业务唯一 ID（UUID），用于前端关联和幂等",
     )
-    conv_id = Column(
-        String(36), nullable=False,
-        comment="所属对话ID，关联conversations.id",
-        index=True,
+    role = Column(String(20), nullable=False, comment="user / assistant / system / tool")
+    content = Column(Text, nullable=False, default="", comment="最终完整内容")
+    thinking = Column(Text, nullable=False, default="", comment="推理过程（模型 thinking）")
+    stream_buffer = Column(
+        Text, nullable=False, default="",
+        comment="流式输出中间缓冲（未完成时暂存，完成后清空并写入 content）",
     )
-    role = Column(
-        String(20), nullable=False,
-        comment="消息角色：user（用户）/ assistant（AI）/ system（系统）"
+    stream_completed = Column(
+        Boolean, nullable=False, default=True,
+        comment="流式输出是否完成（false=正在生成中）",
     )
-    content = Column(
-        Text, nullable=False,
-        comment="消息内容，assistant消息压缩后可能包含[old tools call]占位符"
+    sequence_number = Column(
+        Integer, nullable=False, default=0,
+        comment="消息在对话中的顺序号（严格递增）",
     )
-    created_at = Column(
-        Float, nullable=False,
-        comment="消息发送时间（Unix时间戳，浮点数）"
-    )
+    images = Column(JSONB, nullable=False, default=list, comment="用户上传的图片（base64）")
+    created_at = Column(Float, nullable=False)
 
     __table_args__ = (
         Index("ix_messages_conv_created", "conv_id", "created_at"),
+        Index("ix_messages_conv_seq", "conv_id", "sequence_number"),
+        Index("ix_messages_message_id", "message_id"),
     )
 
+
+class ToolExecutionModel(Base):
+    """工具调用记录表 — 每次工具调用独立记录"""
+    __tablename__ = "tool_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conv_id = Column(String(36), nullable=False)
+    message_id = Column(String(36), nullable=False, comment="关联的 assistant 消息 ID")
+    tool_name = Column(String(100), nullable=False)
+    tool_input = Column(JSONB, nullable=False, default=dict)
+    tool_output = Column(Text, nullable=False, default="")
+    search_items = Column(JSONB, nullable=False, default=list, comment="搜索结果列表")
+    status = Column(
+        String(20), nullable=False, default="running",
+        comment="running / done / error",
+    )
+    sequence_number = Column(Integer, nullable=False, default=0)
+    duration = Column(Float, nullable=False, default=0)
+    created_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_toolexec_conv", "conv_id"),
+        Index("ix_toolexec_msg", "message_id"),
+    )
+
+
+class EventLogModel(Base):
+    """事件流持久化表 — 替代纯内存 event_buffer，跨 worker 持久化"""
+    __tablename__ = "event_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="自增 ID，天然有序")
+    conv_id = Column(String(36), nullable=False)
+    message_id = Column(String(36), nullable=False, default="")
+    event_type = Column(
+        String(50), nullable=False,
+        comment="content_delta / thinking_delta / tool_call_start / tool_call_end / "
+                "search_item / sandbox_output / plan_generated / status / route / "
+                "reflection / file_artifact / done / stopped / error / ping / resume_context",
+    )
+    event_data = Column(JSONB, nullable=False, default=dict, comment="事件 payload")
+    sse_string = Column(Text, nullable=False, default="", comment="原始 SSE 字符串（直接推给前端）")
+    created_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_eventlog_conv", "conv_id"),
+        Index("ix_eventlog_conv_id", "conv_id", "id"),
+    )
+
+
+# ── 以下为保留表（向后兼容） ──────────────────────────────────────────────────
 
 class PlanStepModel(Base):
-    """执行计划表：记录多步骤任务的规划状态和各步骤结果"""
+    """执行计划表"""
     __tablename__ = "plan_steps"
 
-    id = Column(
-        String(36), primary_key=True,
-        comment="计划唯一ID（UUID）"
-    )
-    conv_id = Column(
-        String(36), nullable=False,
-        comment="所属对话ID，关联conversations.id",
-        index=True,
-    )
-    goal = Column(
-        Text, nullable=False, default="",
-        comment="用户原始任务目标（含图片描述）"
-    )
-    steps = Column(
-        JSONB, nullable=False, default=list,
-        comment="步骤列表，每项含 {id,title,description,status,result}"
-    )
-    current_step = Column(
-        Integer, nullable=False, default=0,
-        comment="当前执行步骤索引（0-based）"
-    )
-    total_steps = Column(
-        Integer, nullable=False, default=0,
-        comment="总步骤数"
-    )
+    id = Column(String(36), primary_key=True)
+    conv_id = Column(String(36), nullable=False, index=True)
+    goal = Column(Text, nullable=False, default="")
+    steps = Column(JSONB, nullable=False, default=list)
+    current_step = Column(Integer, nullable=False, default=0)
+    total_steps = Column(Integer, nullable=False, default=0)
     created_at = Column(Float, nullable=False)
     updated_at = Column(Float, nullable=False)
 
@@ -115,38 +143,16 @@ class PlanStepModel(Base):
 
 
 class ArtifactModel(Base):
-    """文件产物表：记录沙箱中生成的用户可见文件"""
+    """文件产物表"""
     __tablename__ = "artifacts"
 
-    id = Column(
-        Integer, primary_key=True, autoincrement=True,
-        comment="自增主键"
-    )
-    conv_id = Column(
-        String(36), nullable=False,
-        comment="所属对话ID",
-        index=True,
-    )
-    name = Column(
-        String(255), nullable=False,
-        comment="文件名 (e.g. 'baidu_tech.html')"
-    )
-    path = Column(
-        String(512), nullable=False,
-        comment="沙箱内相对路径"
-    )
-    language = Column(
-        String(50), nullable=False, default="text",
-        comment="文件语言类型 (html/python/javascript/...)"
-    )
-    content = Column(
-        Text, nullable=False,
-        comment="文件完整内容"
-    )
-    created_at = Column(
-        Float, nullable=False,
-        comment="创建时间（Unix时间戳）"
-    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conv_id = Column(String(36), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    path = Column(String(512), nullable=False)
+    language = Column(String(50), nullable=False, default="text")
+    content = Column(Text, nullable=False)
+    created_at = Column(Float, nullable=False)
 
     __table_args__ = (
         Index("ix_artifacts_conv_created", "conv_id", "created_at"),
@@ -154,31 +160,41 @@ class ArtifactModel(Base):
 
 
 class ToolEventModel(Base):
-    """工具调用事件表：记录每个对话中使用的工具调用历史"""
+    """工具调用事件表（旧版，保留向后兼容）"""
     __tablename__ = "tool_events"
 
-    id = Column(
-        Integer, primary_key=True, autoincrement=True,
-        comment="自增主键"
-    )
-    conv_id = Column(
-        String(36), nullable=False,
-        comment="所属对话ID，关联conversations.id",
-        index=True,
-    )
-    tool_name = Column(
-        String(100), nullable=False,
-        comment="工具名称（web_search / fetch_webpage / calculator / get_current_datetime 等）"
-    )
-    tool_input = Column(
-        JSONB, nullable=False, default=dict,
-        comment="工具调用参数（JSONB格式，如搜索关键词、URL等）"
-    )
-    created_at = Column(
-        Float, nullable=False,
-        comment="工具调用时间（Unix时间戳，浮点数）"
-    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conv_id = Column(String(36), nullable=False, index=True)
+    tool_name = Column(String(100), nullable=False)
+    tool_input = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(Float, nullable=False)
 
     __table_args__ = (
         Index("ix_tool_events_conv_created", "conv_id", "created_at"),
+    )
+
+
+class MessageDetailModel(Base):
+    """消息详情表（旧版，保留向后兼容，逐步由 messages 新字段替代）"""
+    __tablename__ = "message_details"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conv_id = Column(String(36), nullable=False)
+    msg_index = Column(Integer, nullable=False)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False, default="")
+    thinking = Column(Text, nullable=False, default="")
+    tool_calls = Column(JSONB, nullable=False, default=list)
+    steps = Column(JSONB, nullable=False, default=list)
+    search_results = Column(JSONB, nullable=False, default=list)
+    sandbox_output = Column(Text, nullable=False, default="")
+    stream_completed = Column(Boolean, nullable=False, default=True)
+    stream_buffer = Column(Text, nullable=False, default="")
+    images = Column(JSONB, nullable=False, default=list)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_msgdetail_conv", "conv_id"),
+        Index("ix_msgdetail_conv_idx", "conv_id", "msg_index"),
     )

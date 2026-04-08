@@ -24,3 +24,4 @@ class Conversation:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     client_id: str = ""                                     # 浏览器唯一标识（localStorage 生成）
+    status: str = "active"                                  # active / streaming / completed / error

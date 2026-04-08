@@ -66,11 +66,13 @@ async def lifespan(app: FastAPI):
     # 0. 初始化日志系统
     setup_logging(LOG_DIR)
 
-    # 1. 初始化数据库连接并自动建表
+    # 1. 初始化数据库连接并自动建表 + 增量迁移
     init_engine(DATABASE_URL)
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from db.migrate import run_migrations
+        await run_migrations(conn)
     logger.info("数据库初始化完成")
 
     # 2. 从数据库加载对话到内存缓存
@@ -172,14 +174,8 @@ async def get_models():
 @app.get("/api/conversations")
 async def get_conversations(request: Request):
     client_id = request.headers.get("X-Client-ID", "")
-    convs = sorted(
-        [
-            {"id": c.id, "title": c.title, "updated_at": c.updated_at}
-            for c in memory_store.all_conversations(client_id)
-        ],
-        key=lambda x: x["updated_at"],
-        reverse=True,
-    )
+    # 直接从 DB 读取，确保多 worker 一致性
+    convs = await memory_store.db_list_conversations(client_id)
     return {"conversations": convs}
 
 
@@ -198,23 +194,19 @@ async def create_conversation(req: CreateConversationRequest, request: Request):
 
 @app.get("/api/conversations/{conv_id}")
 async def get_conversation(conv_id: str):
-    conv = memory_store.get(conv_id)
-    if not conv:
+    # 直接从 DB 读取，确保多 worker 一致性
+    data = await memory_store.db_get_conversation(conv_id)
+    if not data:
         return {"error": "对话不存在"}
-    return {
-        "id": conv.id,
-        "title": conv.title,
-        "system_prompt": conv.system_prompt,
-        "messages": [
-            {"role": m.role, "content": m.content, "timestamp": m.timestamp}
-            for m in conv.messages
-        ],
-        "mid_term_summary": conv.mid_term_summary,
-    }
+    return data
 
 
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, req: UpdateConversationRequest):
+    # 先从 DB 加载到本 worker 缓存
+    conv_data = await memory_store.db_get_conversation(conv_id)
+    if not conv_data:
+        return {"error": "对话不存在"}
     conv = memory_store.get(conv_id)
     if not conv:
         return {"error": "对话不存在"}
@@ -235,6 +227,91 @@ async def delete_conversation(conv_id: str):
 
 
 # ── 聊天（流式 SSE） ──────────────────────────────────────────────────────────
+
+@app.get("/api/conversations/{conv_id}/full-state")
+async def get_full_state(conv_id: str):
+    """
+    获取对话的完整状态，供前端刷新后恢复 UI。
+
+    返回：消息列表（含 thinking、tool_calls、steps 等结构化数据）、
+    执行计划、文件产物、工具历史、流式状态。
+    """
+    from db.artifact_store import get_artifacts_for_conv
+    from db.plan_store import get_latest_plan_for_conv
+    from db.tool_store import get_tool_executions_for_conv
+    from db.event_store import get_latest_event_id
+
+    # 直接从 DB 读取（跨 worker 一致性）
+    conv_data = await memory_store.db_get_conversation(conv_id)
+    if not conv_data:
+        return {"error": "对话不存在"}
+
+    # 并行加载所有关联数据
+    tool_execs, latest_plan, artifacts, last_event_id = await asyncio.gather(
+        get_tool_executions_for_conv(conv_id),
+        get_latest_plan_for_conv(conv_id),
+        get_artifacts_for_conv(conv_id),
+        get_latest_event_id(conv_id),
+    )
+
+    # 检查是否有未完成的流式消息（DB 字段，跨 worker 安全）
+    has_streaming = any(
+        not m.get("stream_completed", True)
+        for m in conv_data["messages"]
+        if m.get("role") == "assistant"
+    )
+
+    # 按 message 组织 tool_executions
+    tool_by_msg: dict[str, list] = {}
+    for t in tool_execs:
+        tool_by_msg.setdefault(t["message_id"], []).append(t)
+
+    # 组装消息（含 thinking + tool_executions + stream 状态）
+    enriched_messages = []
+    for m in conv_data["messages"]:
+        msg = {**m}
+        msg_id = m.get("message_id", "")
+        if msg_id and msg_id in tool_by_msg:
+            msg["tool_executions"] = tool_by_msg[msg_id]
+        enriched_messages.append(msg)
+
+    return {
+        "id": conv_data["id"],
+        "title": conv_data["title"],
+        "status": conv_data.get("status", "active"),
+        "messages": enriched_messages,
+        "plan": latest_plan,
+        "artifacts": artifacts,
+        "has_streaming": has_streaming,
+        "last_event_id": last_event_id,
+    }
+
+
+@app.get("/api/conversations/{conv_id}/resume")
+async def resume_chat(conv_id: str, request: Request, after_event_id: int = 0):
+    """
+    恢复流式输出（SSE）— DB-first 版。
+
+    从 event_log 表读取 after_event_id 之后的事件，
+    然后切换到实时推送。跨 worker 安全。
+    """
+    from graph.runner.stream import resume_stream
+
+    async def safe_resume():
+        try:
+            async for chunk in resume_stream(conv_id, after_event_id):
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        safe_resume(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
@@ -263,14 +340,23 @@ async def chat(req: ChatRequest, request: Request):
         len(req.images),
         img_bytes / 1024,
     )
+    # 先从 DB 加载到本 worker 缓存（多 worker 时可能在其他 worker 创建的）
     conv = memory_store.get(req.conversation_id)
+    if not conv:
+        await memory_store.db_get_conversation(req.conversation_id)
+        conv = memory_store.get(req.conversation_id)
     if not conv:
         conv = await memory_store.create(req.conversation_id, client_id=client_id)
 
-    # 如果该会话已有正在进行的流，先取消
+    # 如果该会话已有正在进行的流，先停止
     old_event = _stop_events.get(req.conversation_id)
     if old_event:
         old_event.set()
+    # 取消当前 worker 上的活跃 session（如果有）
+    from graph.runner.stream import _active_sessions
+    old_session = _active_sessions.get(req.conversation_id)
+    if old_session and old_session._graph_task and not old_session._graph_task.done():
+        old_session._graph_task.cancel()
 
     stop_event = asyncio.Event()
     _stop_events[req.conversation_id] = stop_event
@@ -286,9 +372,9 @@ async def chat(req: ChatRequest, request: Request):
                 images=req.images,
                 agent_mode=req.agent_mode,
                 force_plan=req.force_plan,
+                stop_event=stop_event,
             ):
-                if await request.is_disconnected() or stop_event.is_set():
-                    yield "data: {\"stopped\": true}\n\n"
+                if await request.is_disconnected():
                     break
                 yield chunk
         finally:
@@ -307,7 +393,32 @@ async def stop_chat(conv_id: str):
     event = _stop_events.get(conv_id)
     if event:
         event.set()
+    # 取消当前 worker 的活跃 session
+    from graph.runner.stream import _active_sessions
+    session = _active_sessions.get(conv_id)
+    if session and session._graph_task and not session._graph_task.done():
+        session._graph_task.cancel()
     return {"ok": True}
+
+
+# ── 流式状态查询 ─────────────────────────────────────────────────────────────
+
+@app.get("/api/conversations/{conv_id}/streaming-status")
+async def get_streaming_status(conv_id: str):
+    """检查对话是否有活跃的流式输出（DB-first，跨 worker 安全）。"""
+    from db.event_store import get_latest_event_id
+    # 从 DB 读取对话状态
+    conv_data = await memory_store.db_get_conversation(conv_id)
+    if not conv_data:
+        return {"streaming": False, "last_event_id": 0}
+
+    is_streaming = conv_data.get("status") == "streaming"
+    last_eid = await get_latest_event_id(conv_id) if is_streaming else 0
+
+    return {
+        "streaming": is_streaming,
+        "last_event_id": last_eid,
+    }
 
 
 # ── 工具接口 ──────────────────────────────────────────────────────────────────

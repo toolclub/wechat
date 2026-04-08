@@ -11,6 +11,9 @@ echo.
 
 set "COMPOSE_DIR=%~dp0llm-chat"
 set "ENV_FILE=%~dp0llm-chat\.env.prod.win"
+set "CLOUDFLARED=%~dp0cloudflared.exe"
+set "CLOUDFLARED_CONFIG=%~dp0cloudflared-config.yml"
+set "CLOUDFLARED_LOG=%~dp0llm-chat\logs\cloudflared.log"
 
 REM -- Check Docker is running --
 docker info > nul 2>&1
@@ -42,10 +45,9 @@ if %errorlevel% neq 0 (
 echo.
 echo [2/3] Waiting for services to become healthy...
 timeout /t 10 /nobreak > nul
-
 docker compose -f docker-compose.prod.yml ps
-echo.
 
+echo.
 echo [3/3] Checking backend health...
 timeout /t 5 /nobreak > nul
 curl -sf http://localhost/api/tools > nul 2>&1
@@ -55,7 +57,6 @@ if %errorlevel% equ 0 (
     echo [WARN] Backend warming up. Run:
     echo   docker compose -f docker-compose.prod.yml logs -f backend
 )
-
 
 REM -- Start cloudflared as background process (no window) --
 echo [4/4] Starting Cloudflare Tunnel...
@@ -85,6 +86,7 @@ if %errorlevel% equ 0 (
     echo [ERROR] Cloudflare Tunnel failed to start. Check logs\cloudflared.log
 )
 
+:done
 echo.
 echo ============================================
 echo   Production services started!

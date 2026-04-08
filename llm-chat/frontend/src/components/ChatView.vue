@@ -95,7 +95,8 @@ const suggestions = [
 ]
 
 function sendSuggestion(prompt: string) {
-  emit('send', { text: prompt, images: [] })
+  const agentMode = localStorage.getItem('cf_agent_mode') !== 'false'
+  emit('send', { text: prompt, images: [], agentMode })
 }
 
 const showProgress = computed(() => progress.value > 0 && progress.value < 100)
@@ -243,11 +244,6 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           <el-icon class="sug-icon"><component :is="s.icon" /></el-icon>
           <span class="sug-label">{{ s.label }}</span>
         </button>
-      </div>
-
-      <div class="empty-info">
-        <el-icon><Lightning /></el-icon>
-        <span>支持多轮对话 · 图片识别 · 代码高亮 · 长期记忆</span>
       </div>
     </div>
 
@@ -541,20 +537,17 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   50% { transform: translateY(-6px); }
 }
 .hero-title {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 800;
-  letter-spacing: -0.5px;
-  line-height: 1.2;
-  background: linear-gradient(135deg, #18191C 0%, #00AEEC 50%, #FB7299 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  letter-spacing: -0.3px;
+  line-height: 1.3;
+  color: #18191C;
 }
 .hero-sub {
-  font-size: 13.5px;
-  color: var(--cf-text-3);
-  font-weight: 400;
-  letter-spacing: 0.1px;
+  font-size: 14px;
+  color: #61666D;
+  font-weight: 500;
+  letter-spacing: 0.2px;
 }
 
 /* ── 快捷操作 — Bilibili 圆角胶囊 ── */
@@ -568,37 +561,28 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 .sug-card {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 9px 18px;
-  background: var(--cf-card);
-  border: 1.5px solid var(--cf-border);
-  border-radius: 24px;
-  font-size: 13px;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #fff;
+  border: 1.5px solid #E3E5E7;
+  border-radius: 20px;
+  font-size: 13.5px;
   font-weight: 500;
-  color: var(--cf-text-2);
+  color: #18191C;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: var(--cf-shadow-xs);
 }
 .sug-card:hover {
-  background: rgba(0,174,236,0.05);
   border-color: #00AEEC;
   color: #00AEEC;
-  transform: translateY(-3px) scale(1.03);
-  box-shadow: 0 6px 20px rgba(0,174,236,0.15);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(0,174,236,0.12);
 }
-.sug-card:nth-child(2):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 6px 20px rgba(251,114,153,0.15); }
-.sug-card:nth-child(4):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 6px 20px rgba(251,114,153,0.15); }
-.sug-icon { font-size: 14px; }
+.sug-card:nth-child(2):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 4px 14px rgba(251,114,153,0.12); }
+.sug-card:nth-child(4):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 4px 14px rgba(251,114,153,0.12); }
+.sug-icon { font-size: 15px; }
 .sug-label { font-weight: 500; }
-.empty-info {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--cf-text-4);
-}
 
 /* ── 对话区 ── */
 .chat-body {
@@ -616,7 +600,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 .messages-inner {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 0 32px;
+  padding: 0 40px 0 48px;  /* 左侧多留空间给头像 + 呼吸动画 */
   display: flex;
   flex-direction: column;
   gap: 2px;

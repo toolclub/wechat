@@ -1083,7 +1083,6 @@ function cancelEdit() { isEditing.value = false }
 .msg.assistant:hover .ai-avatar {
   border-color: #00AEEC;
   box-shadow: 0 3px 12px rgba(0,174,236,0.15);
-  transform: scale(1.06) rotate(-3deg);
 }
 /* 呼吸动画 — 纯 opacity + border 变化，不改变尺寸避免遮挡 */
 .ai-avatar--breathing {
