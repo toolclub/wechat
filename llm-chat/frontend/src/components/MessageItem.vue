@@ -405,7 +405,7 @@ function isCollapsed(si: number, ti: number) { return collapsed.value[`${si}-${t
 // 工具执行完成后不自动折叠（保持展开，方便用户查看结果）
 
 // ─── 沙箱工具分组：连续沙箱操作合并为一个终端块 ───────────────────────────────
-const SANDBOX_TOOLS = new Set(['execute_code', 'run_shell', 'sandbox_write', 'sandbox_read'])
+const SANDBOX_TOOLS = new Set(['execute_code', 'run_shell', 'sandbox_write', 'sandbox_read', 'create_ppt'])
 
 interface SandboxGroupItem { tc: ToolCallRecord; ti: number }
 type ToolGroup =
@@ -456,12 +456,40 @@ const vAutoScroll: Directive<HTMLElement> = {
 const fileArtifacts = computed<FileArtifact[]>(() => {
   if (props.message.role !== 'assistant') return []
 
-  // 来源1：cognitive.artifacts（后端 SSE file_artifact 事件推送，仅最后一条加载中的消息有）
-  if (props.cognitive?.artifacts?.length) {
+  // 构建当前消息的产物名称集合（从 toolCalls 提取）
+  const myFiles = new Set<string>()
+  const extractNames = (toolCalls: ToolCallRecord[]) => {
+    for (const tc of toolCalls) {
+      if (tc.name === 'sandbox_write' && tc.done) {
+        const path = String((tc.input as any).path || '')
+        if (path) myFiles.add(path.split('/').pop() || path)
+      }
+      if (tc.name === 'create_ppt' && tc.done && tc.output) {
+        const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
+        if (match) myFiles.add(match[1].trim())
+      }
+    }
+  }
+  if (props.message.steps?.length) {
+    for (const step of props.message.steps) extractNames(step.toolCalls)
+  }
+  if (props.message.toolCalls?.length) extractNames(props.message.toolCalls)
+
+  // 如果当前消息没有产物相关的工具调用，返回空
+  if (myFiles.size === 0 && !props.isLastLoading) return []
+
+  // 正在生成中（loading）→ 直接用 cognitive.artifacts（SSE 实时推送）
+  if (props.isLastLoading && props.cognitive?.artifacts?.length) {
     return props.cognitive.artifacts
   }
 
-  // 来源2：从 sandbox_write 工具调用的 input 中提取（历史消息回退方案）
+  // 已完成 → 从 cognitive.artifacts 中过滤出属于本消息的产物
+  if (props.cognitive?.artifacts?.length && myFiles.size > 0) {
+    const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
+    if (matched.length > 0) return matched
+  }
+
+  // 回退：从 toolCalls 提取基础信息（没有 slides_html 等增强数据）
   const files: FileArtifact[] = []
   const seen = new Set<string>()
   const extractFrom = (toolCalls: ToolCallRecord[]) => {
@@ -473,6 +501,13 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
           seen.add(path)
           const name = path.split('/').pop() || path
           files.push({ name, path, content, language: detectLanguage(path) })
+        }
+      }
+      if (tc.name === 'create_ppt' && tc.done && tc.output) {
+        const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
+        if (match && !seen.has(match[1].trim())) {
+          seen.add(match[1].trim())
+          files.push({ name: match[1].trim(), path: match[1].trim(), content: '', language: 'pptx' })
         }
       }
     }

@@ -164,7 +164,14 @@ export function useChat() {
 
       // ── 恢复认知面板 ──
       s.cognitive = makeEmptyCognitiveState()
-      s.cognitive.artifacts = fullState.artifacts || []
+      // 去重 artifacts（DB 可能因 upsert 时序产生重复）
+      const seen = new Set<string>()
+      s.cognitive.artifacts = (fullState.artifacts || []).filter((a: any) => {
+        const key = a.path || a.name
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
       if (fullState.plan) {
         s.cognitive.plan = fullState.plan.steps.map((st: any) => ({
           id: st.id, title: st.title, description: st.description ?? '',
@@ -175,7 +182,12 @@ export function useChat() {
 
       // ── 如果有未完成的流式消息，自动恢复 SSE 连接 ──
       if (fullState.has_streaming) {
-        await _resumeActiveStream(id, s, fullState.last_event_id || 0)
+        // 找到正在流式生成的 assistant 消息的 message_id，避免 resume 混入旧轮事件
+        const streamingMsg = (fullState.messages || []).findLast(
+          (m: any) => m.role === 'assistant' && m.stream_completed === false
+        )
+        const streamingMsgId = streamingMsg?.message_id || ''
+        await _resumeActiveStream(id, s, fullState.last_event_id || 0, streamingMsgId)
       }
 
     } catch (err) {
@@ -191,7 +203,7 @@ export function useChat() {
    * 所以 fetchConversation 返回的是不含当前轮的历史。
    * 我们从 buffer index=0 开始重放，前端会收到完整的当前轮事件。
    */
-  async function _resumeActiveStream(convId: string, s: ConvState, lastEventId: number) {
+  async function _resumeActiveStream(convId: string, s: ConvState, lastEventId: number, messageId: string = '') {
     // DB-first：messages 表已有 user + assistant(stream_completed=false) 两条记录。
     // 如果最后一条不是 assistant，补一个空的（兼容旧数据）。
     if (s.messages.length === 0 || s.messages[s.messages.length - 1].role !== 'assistant') {
@@ -219,7 +231,7 @@ export function useChat() {
 
     try {
       await api.resumeStream(
-        convId, 0,  // 从头重放所有事件
+        convId, 0,  // 从头重放当前轮事件（通过 messageId 过滤）
         // onChunk
         (chunk) => {
           const step = activeStep()
@@ -310,11 +322,16 @@ export function useChat() {
         // onSandboxOutput
         (toolName, stream, text) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell') && !t.done)
+          const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done)
           if (tc) tc.output = (tc.output || '') + text
         },
-        // onFileArtifact
-        (artifact) => { s.cognitive.artifacts.push(artifact) },
+        // onFileArtifact（去重：DB 已加载的 + SSE 重放的可能重复）
+        (artifact) => {
+          const key = artifact.path || artifact.name
+          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
+            s.cognitive.artifacts.push(artifact)
+          }
+        },
         // onToolCallStart
         (name) => {
           const placeholder = { name, input: { _generating: true }, done: false }
@@ -325,6 +342,8 @@ export function useChat() {
         },
         // onResumeContext — 用户消息已在 DB 中，忽略
         undefined,
+        // messageId — 限定只回放当前轮的事件
+        messageId,
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
@@ -600,7 +619,7 @@ export function useChat() {
             const step = activeStep()
             const toolList = step ? step.toolCalls : msg().toolCalls
             const tc = toolList?.findLast(t =>
-              (t.name === 'execute_code' || t.name === 'run_shell') && !t.done
+              (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done
             )
             if (!tc) return
             bufMap.set(tc, (bufMap.get(tc) || '') + text)
@@ -610,10 +629,13 @@ export function useChat() {
             }
           }
         })(),
-        // onFileArtifact：沙箱文件产物（sandbox_write 成功后推送）
+        // onFileArtifact：沙箱文件产物（sandbox_write 成功后推送，去重）
         (artifact) => {
-          s.cognitive.artifacts.push(artifact)
-          addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
+          const key = artifact.path || artifact.name
+          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
+            s.cognitive.artifacts.push(artifact)
+            addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
+          }
         },
         // onToolCallStart：工具参数开始生成（LLM 刚开始输出 tool_call arguments）
         // 立即创建一个 placeholder tool call，让前端终端 loading 状态提前展示
@@ -817,12 +839,18 @@ export function useChat() {
           function flush() { bufMap.forEach((buf, tc) => { tc.output = (tc.output || '') + buf }); bufMap.clear(); rafScheduled = false }
           return (toolName: string, stream: string, text: string) => {
             const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-            const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell') && !t.done)
+            const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done)
             if (!tc) return; bufMap.set(tc, (bufMap.get(tc) || '') + text)
             if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(flush) }
           }
         })(),
-        (artifact) => { s.cognitive.artifacts.push(artifact); addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` }) },
+        (artifact) => {
+          const key = artifact.path || artifact.name
+          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
+            s.cognitive.artifacts.push(artifact)
+            addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
+          }
+        },
         (name) => {
           const placeholder = { name, input: { _generating: true }, done: false }
           const step = activeStep()

@@ -215,8 +215,13 @@ async def delete(conv_id: str) -> None:
         await session.commit()
 
 
-async def add_message(conv_id: str, role: str, content: str) -> None:
-    """追加一条消息：写入 DB + 更新缓存，自动更新对话标题（首条用户消息）。"""
+async def add_message(conv_id: str, role: str, content: str, update_db_id: int = 0) -> None:
+    """
+    追加一条消息：写入 DB + 更新缓存。
+
+    update_db_id > 0 时：UPDATE 已有行（StreamSession 预写的消息），不 INSERT 新行。
+    update_db_id = 0 时：INSERT 新行（传统行为）。
+    """
     conv = _store.get(conv_id)
     if not conv:
         return
@@ -226,11 +231,22 @@ async def add_message(conv_id: str, role: str, content: str) -> None:
     if conv.title == "新对话" and role == "user":
         new_title = content[:30] + ("..." if len(content) > 30 else "")
 
+    msg_db_id = update_db_id
+
     async with AsyncSessionLocal() as session:
-        msg_row = MessageModel(conv_id=conv_id, role=role, content=content, created_at=now)
-        session.add(msg_row)
-        await session.flush()        # 获取自增 ID
-        msg_db_id = msg_row.id
+        if update_db_id > 0:
+            # UPDATE 已有行（StreamSession 在流开始时预写了 DB 行）
+            await session.execute(
+                sa_update(MessageModel)
+                .where(MessageModel.id == update_db_id)
+                .values(content=content, stream_completed=True, stream_buffer="")
+            )
+        else:
+            # INSERT 新行
+            msg_row = MessageModel(conv_id=conv_id, role=role, content=content, created_at=now)
+            session.add(msg_row)
+            await session.flush()
+            msg_db_id = msg_row.id
 
         await session.execute(
             sa_update(ConversationModel)
@@ -239,7 +255,7 @@ async def add_message(conv_id: str, role: str, content: str) -> None:
         )
         await session.commit()
 
-    # 更新内存缓存
+    # 追加到内存缓存
     msg = Message(role=role, content=content, timestamp=now, id=msg_db_id)
     conv.messages.append(msg)
     conv.updated_at = now
@@ -264,14 +280,18 @@ async def create_message_immediate(
     conv_id: str, role: str, content: str, message_id: str = "",
     thinking: str = "", images: list | None = None, stream_completed: bool = True,
 ) -> int:
-    """立即写入消息到 DB + 缓存（流式开始时用）。返回 DB 自增 ID。"""
+    """
+    立即写入消息到 DB（仅 DB，不写内存缓存）。返回 DB 自增 ID。
+
+    重要：不更新 conv.messages 内存缓存！
+    因为图执行期间会读取 conv.messages 构建 LLM 上下文，
+    如果提前把当前轮的 user/assistant 加进去，会破坏
+    tool_call → tool_result 的消息配对顺序，导致 MiniMax 等 API 报错。
+    内存缓存由 save_response_node 在图执行完成后统一更新。
+    """
     conv = _store.get(conv_id)
     now = time.time()
-    seq = 0
-
-    # 计算 sequence_number
-    if conv:
-        seq = len(conv.messages)
+    seq = len(conv.messages) if conv else 0
 
     new_title = None
     if conv and conv.title == "新对话" and role == "user":
@@ -300,32 +320,33 @@ async def create_message_immediate(
         )
         await session.commit()
 
-    # 更新内存缓存
-    if conv:
-        msg = Message(role=role, content=content, timestamp=now, id=db_id)
-        conv.messages.append(msg)
-        conv.updated_at = now
-        if new_title:
-            conv.title = new_title
+    # 只更新标题到缓存（不追加消息）
+    if conv and new_title:
+        conv.title = new_title
 
     return db_id
 
 
 async def update_message_streaming(
     msg_db_id: int,
-    content: str = "",
-    thinking: str = "",
-    stream_buffer: str = "",
-    stream_completed: bool = False,
+    thinking: str | None = None,
+    stream_buffer: str | None = None,
+    stream_completed: bool | None = None,
 ) -> None:
-    """更新正在流式生成的消息（定期刷新 thinking/buffer）。"""
-    values: dict = {"stream_completed": stream_completed}
-    if content:
-        values["content"] = content
-    if thinking:
+    """
+    更新正在流式生成的消息（定期刷新 thinking/buffer）。
+
+    参数语义：None = 不更新该字段；"" = 显式清空。
+    """
+    values: dict = {}
+    if stream_completed is not None:
+        values["stream_completed"] = stream_completed
+    if thinking is not None:
         values["thinking"] = thinking
-    if stream_buffer:
+    if stream_buffer is not None:
         values["stream_buffer"] = stream_buffer
+    if not values:
+        return
     async with AsyncSessionLocal() as session:
         await session.execute(
             sa_update(MessageModel)

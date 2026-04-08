@@ -113,10 +113,11 @@ async def lifespan(app: FastAPI):
                 # SSH 连接成功，动态注册沙箱工具
                 from tools import register_tool
                 from tools.builtin.sandbox_tools import execute_code, run_shell, sandbox_write, sandbox_read
-                for t in [execute_code, run_shell, sandbox_write, sandbox_read]:
+                from tools.builtin.ppt_tool import create_ppt
+                for t in [execute_code, run_shell, sandbox_write, sandbox_read, create_ppt]:
                     register_tool(t)
                 sandbox_ok = True
-                logger.info("沙箱工具已注册（4 个）")
+                logger.info("沙箱工具已注册（5 个，含 PPT）")
             else:
                 logger.warning("沙箱 Worker 全部连接失败，沙箱工具未注册（模型不可见）")
         except Exception as exc:
@@ -288,18 +289,20 @@ async def get_full_state(conv_id: str):
 
 
 @app.get("/api/conversations/{conv_id}/resume")
-async def resume_chat(conv_id: str, request: Request, after_event_id: int = 0):
+async def resume_chat(conv_id: str, request: Request, after_event_id: int = 0, message_id: str = ""):
     """
     恢复流式输出（SSE）— DB-first 版。
 
     从 event_log 表读取 after_event_id 之后的事件，
     然后切换到实时推送。跨 worker 安全。
+
+    message_id: 可选，限定只回放指定 assistant message 的事件（多轮对话时避免混入旧轮）。
     """
     from graph.runner.stream import resume_stream
 
     async def safe_resume():
         try:
-            async for chunk in resume_stream(conv_id, after_event_id):
+            async for chunk in resume_stream(conv_id, after_event_id, message_id):
                 if await request.is_disconnected():
                     break
                 yield chunk
@@ -378,7 +381,9 @@ async def chat(req: ChatRequest, request: Request):
                     break
                 yield chunk
         finally:
-            _stop_events.pop(req.conversation_id, None)
+            # 只清理属于自己的 stop_event（避免把下一轮的 stop_event 误删）
+            if _stop_events.get(req.conversation_id) is stop_event:
+                _stop_events.pop(req.conversation_id, None)
 
     return StreamingResponse(
         safe_stream(),

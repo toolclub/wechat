@@ -144,8 +144,11 @@ export async function resumeStream(
   onFileArtifact?: (artifact: FileArtifact) => void,
   onToolCallStart?: (name: string) => void,
   onResumeContext?: (userMessage: string, images: string[]) => void,
+  messageId?: string,
 ) {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`, {
+  let url = `${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`
+  if (messageId) url += `&message_id=${encodeURIComponent(messageId)}`
+  const res = await fetch(url, {
     headers: { 'X-Client-ID': getClientId() },
     signal,
   })
@@ -161,8 +164,8 @@ export async function resumeStream(
     if (!line.startsWith('data: ')) return
     try {
       const data = JSON.parse(line.slice(6))
-      if (data.resume_context)  onResumeContext?.(data.resume_context.user_message, data.resume_context.images || [])
       if (data.thinking)        onThinking?.(data.thinking)
+      if (data.clarification)   onClarification?.(data.clarification)
       if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
       if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
@@ -174,9 +177,10 @@ export async function resumeStream(
       if (data.route)           onRoute(data.route.model, data.route.intent)
       if (data.plan_generated)  onPlanGenerated(data.plan_generated.steps)
       if (data.reflection)      onReflection(data.reflection.content, data.reflection.decision)
-      if (data.error)           onChunk('\n\n⚠️ ' + data.error)
-      if (data.done)            { streamDone = true; onDone() }
-      if (data.stopped)         { streamDone = true; onStopped() }
+      if (data.error)           { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
+      if (data.ping)            lastDataTime = Date.now()
+      if (data.done)            { streamDone = true; try { onDone() } catch(e) { console.error('[SSE] onDone error', e) } }
+      if (data.stopped)         { streamDone = true; try { onStopped() } catch(e) { console.error('[SSE] onStopped error', e) } }
     } catch {}
   }
 

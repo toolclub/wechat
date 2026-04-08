@@ -122,8 +122,13 @@ export interface CognitiveState {
 export interface FileArtifact {
   name: string        // 文件名 e.g. "baidu_tech.html"
   path: string        // 完整路径 e.g. "/sandbox/baidu_tech.html"
-  content: string     // 文件内容
-  language: string    // 语言标记 e.g. "html", "python"
+  content: string     // 文件内容（PPTX 为 base64 编码）
+  language: string    // 语言标记 e.g. "html", "python", "pptx"
+  binary?: boolean    // 是否为二进制文件（PPTX 等）
+  size?: number       // 文件大小（字节）
+  slide_count?: number // PPT 页数
+  theme?: string      // PPT 主题名
+  slides_html?: string[] // PPT 每页的 HTML 预览
 }
 
 /** 从文件路径推断语言 */
@@ -139,6 +144,7 @@ export function detectLanguage(path: string): string {
     json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
     xml: 'xml', md: 'markdown', sql: 'sql', vue: 'vue',
     txt: 'text', csv: 'text', log: 'text',
+    pptx: 'pptx', ppt: 'pptx', pdf: 'pdf',
   }
   return map[ext] || 'text'
 }
@@ -146,6 +152,11 @@ export function detectLanguage(path: string): string {
 /** 该语言是否可在 iframe 中预览 */
 export function isPreviewable(lang: string): boolean {
   return ['html', 'svg'].includes(lang)
+}
+
+/** 该文件是否可下载（二进制文件） */
+export function isDownloadable(lang: string): boolean {
+  return ['pptx', 'pdf'].includes(lang)
 }
 
 export function makeEmptyCognitiveState(): CognitiveState {

@@ -30,6 +30,7 @@ _EXT_MAP = {
     "json": "json", "yaml": "yaml", "yml": "yaml", "toml": "toml",
     "xml": "xml", "md": "markdown", "sql": "sql", "vue": "vue",
     "txt": "text", "csv": "text", "log": "text",
+    "pptx": "pptx", "ppt": "pptx", "pdf": "pdf",
 }
 
 
@@ -85,7 +86,8 @@ async def save_artifact(
 
 
 async def get_artifacts_for_conv(conv_id: str) -> list[dict]:
-    """获取对话的所有文件产物（按创建时间排序）。"""
+    """获取对话的所有文件产物（按创建时间排序）。PPT 自动解包 JSON。"""
+    import json as _json
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -94,16 +96,28 @@ async def get_artifacts_for_conv(conv_id: str) -> list[dict]:
                 .order_by(ArtifactModel.created_at)
             )
             rows = result.scalars().all()
-            return [
-                {
+            artifacts = []
+            for r in rows:
+                item: dict = {
                     "name": r.name,
                     "path": r.path,
                     "language": r.language,
                     "content": r.content,
                     "created_at": r.created_at,
                 }
-                for r in rows
-            ]
+                # PPT artifact: content 是 JSON，需要解包
+                if r.language == "pptx" and r.content.startswith("{"):
+                    try:
+                        packed = _json.loads(r.content)
+                        item["content"] = packed.get("binary_b64", "")
+                        item["slides_html"] = packed.get("slides_html", [])
+                        item["slide_count"] = packed.get("slide_count", 0)
+                        item["theme"] = packed.get("theme", "")
+                        item["binary"] = True
+                    except _json.JSONDecodeError:
+                        pass
+                artifacts.append(item)
+            return artifacts
     except Exception:
         logger.exception("get_artifacts_for_conv failed | conv=%s", conv_id)
         return []

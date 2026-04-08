@@ -64,15 +64,68 @@ const currentConvTitle = computed(() => {
 // ── 文件预览状态 ──────────────────────────────────────────────────────────────
 const selectedFile = ref<FileArtifact | null>(null)
 
-function onSelectFile(file: FileArtifact) {
-  selectedFile.value = file
-  panelOpen.value = true  // 自动展开面板
+async function onSelectFile(file: FileArtifact) {
+  let resolved = file
+
+  // PPT 文件：如果没有 slides_html，从多个来源查找完整版
+  if (file.language === 'pptx' && !file.slides_html?.length) {
+    // 来源1：cognitive.artifacts（SSE 实时推送的，有 slides_html）
+    const fromCog = chat.cognitive.value.artifacts.find(
+      (a: FileArtifact) => a.name === file.name && a.language === 'pptx' && a.slides_html?.length
+    )
+    if (fromCog) {
+      resolved = fromCog
+    } else if (chat.currentConvId.value) {
+      // 来源2：从 DB 获取（刷新后 cognitive 被清空的情况）
+      try {
+        const artifacts = await import('./api').then(m => m.fetchConvArtifacts(chat.currentConvId.value!))
+        const fromDb = artifacts.find(
+          (a: FileArtifact) => a.name === file.name && a.language === 'pptx' && a.slides_html?.length
+        )
+        if (fromDb) resolved = fromDb
+      } catch {}
+    }
+  }
+
+  selectedFile.value = resolved
+  panelOpen.value = true
+  if (resolved.language === 'pptx') {
+    panelWidth.value = Math.max(panelWidth.value, 520)
+  }
 }
 
-// 切换对话时清除文件选择
 watch(() => chat.currentConvId.value, () => {
   selectedFile.value = null
 })
+
+// ── 面板拖拽缩放 ──────────────────────────────────────────────────────────────
+const panelWidth = ref(400)
+const isDragging = ref(false)
+
+function onDragStart(e: MouseEvent) {
+  e.preventDefault()
+  isDragging.value = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+
+  const startX = e.clientX
+  const startW = panelWidth.value
+  const maxW = window.innerWidth - 240 - 400 // sidebar - 最小 chat 宽度
+
+  function onMove(ev: MouseEvent) {
+    const delta = startX - ev.clientX
+    panelWidth.value = Math.min(Math.max(startW + delta, 300), maxW)
+  }
+  function onUp() {
+    isDragging.value = false
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 </script>
 
 <template>
@@ -110,20 +163,29 @@ watch(() => chat.currentConvId.value, () => {
         @select-file="onSelectFile($event)"
       />
 
-      <!-- 右侧：认知面板 -->
-      <transition name="panel-slide">
+      <!-- 右侧：认知面板（内含拖拽手柄） -->
+      <div
+        v-if="showCognitivePanel"
+        class="panel-wrapper"
+        :style="{ width: panelWidth + 'px' }"
+      >
+        <!-- 拖拽手柄 — absolute 在左边缘 -->
+        <div
+          class="panel-drag-handle"
+          :class="{ 'panel-drag-handle--active': isDragging }"
+          @mousedown.prevent="onDragStart"
+        ></div>
         <CognitivePanel
-          v-if="showCognitivePanel"
           :cognitive="chat.cognitive.value"
           :loading="chat.loading.value"
           :user-message="currentGoal"
           :selected-file="selectedFile"
-          class="cognitive-panel-slot"
+          style="width:100%;height:100%;"
           @collapse="panelOpen = false"
           @modify-plan="chat.applyModifiedPlan($event)"
           @close-file="selectedFile = null"
         />
-      </transition>
+      </div>
     </div>
   </div>
 </template>
@@ -325,7 +387,7 @@ body.dark .term-code-inline { background: #222325; border-color: #323335; color:
 </style>
 
 <style scoped>
-/* 整体布局 — Bilibili 卡片风格 */
+/* 整体布局 */
 .app {
   display: flex;
   height: 100vh;
@@ -338,32 +400,49 @@ body.dark .term-code-inline { background: #222325; border-color: #323335; color:
   flex: 1;
   display: flex;
   min-width: 0;
-  gap: 12px;
+  gap: 0;  /* gap 由手柄自身的 padding 提供 */
   overflow: hidden;
 }
 
-/* 对话视图宽度 */
-.chat-with-panel { flex: 0 0 60%; min-width: 0; }
-.chat-full       { flex: 1;       min-width: 0; }
+/* 对话视图 */
+.chat-with-panel { flex: 1; min-width: 380px; overflow: hidden; }
+.chat-full       { flex: 1; min-width: 0; }
 
-/* 认知面板 */
-.cognitive-panel-slot {
-  flex: 0 0 40%;
-  min-width: 280px;
-  max-width: 480px;
-}
-
-/* 面板滑入/滑出 */
-.panel-slide-enter-active,
-.panel-slide-leave-active {
-  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+/* 面板容器 — flex: none，宽度由 JS 内联 style 控制 */
+.panel-wrapper {
+  flex: none;
+  position: relative;
+  min-width: 300px;
+  max-height: 100%;
   overflow: hidden;
+  margin-left: 4px;
 }
-.panel-slide-enter-from,
-.panel-slide-leave-to {
-  flex-basis: 0 !important;
-  min-width: 0 !important;
-  max-width: 0 !important;
-  opacity: 0;
+
+/* 拖拽手柄 — absolute 覆盖在面板左边缘 */
+.panel-drag-handle {
+  position: absolute;
+  left: -6px;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  cursor: col-resize;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.panel-drag-handle::before {
+  content: '';
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: #D0D1D3;
+  transition: all 0.15s;
+}
+.panel-drag-handle:hover::before,
+.panel-drag-handle--active::before {
+  background: #00AEEC;
+  height: 50px;
+  box-shadow: 0 0 8px rgba(0,174,236,0.3);
 }
 </style>

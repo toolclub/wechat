@@ -53,6 +53,9 @@ dependencies = [
 
     # ── 沙箱代码执行（SSH 连接） ──
     "asyncssh>=2.14.0",
+
+    # ── PPT 生成 ──
+    "python-pptx>=1.0.0",
 ]
 
 [project.scripts]

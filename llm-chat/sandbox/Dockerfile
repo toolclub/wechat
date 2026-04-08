@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tree \
     && rm -rf /var/lib/apt/lists/*
 
+# Python 库（PPT 生成等）
+RUN pip install --no-cache-dir python-pptx playwright \
+    && python -m playwright install chromium --with-deps
+
 # 创建沙箱工作根目录
 RUN mkdir -p /sandbox && chmod 777 /sandbox
 

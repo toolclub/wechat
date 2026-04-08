@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # ── MCP 服务器（可选，默认空） ────────────────────────────────────────────
     mcp_servers: dict[str, Any] = {}
 
+    # ── 文生图（PPT 配图用，可选） ────────────────────────────────────────────
+    image_gen_enabled: bool = False
+    image_gen_base_url: str = ""     # OpenAI 兼容 images/generations 接口
+    image_gen_api_key: str = ""
+    image_gen_model: str = ""        # e.g. "dall-e-3", "stable-diffusion-xl"
+
     # ── 沙箱代码执行（可选） ──────────────────────────────────────────────────
     sandbox_enabled: bool = False
     # JSON 数组：[{"id":"w1","host":"192.168.1.100","port":22,"user":"sandbox","key_file":"~/.ssh/id_rsa"}]
@@ -185,6 +191,11 @@ SEMANTIC_CACHE_NAMESPACE_MODE    = settings.semantic_cache_namespace_mode
 SEMANTIC_CACHE_SEARCH_TTL_HOURS  = settings.semantic_cache_search_ttl_hours
 
 MCP_SERVERS               = settings.mcp_servers
+
+IMAGE_GEN_ENABLED         = settings.image_gen_enabled
+IMAGE_GEN_BASE_URL        = settings.image_gen_base_url or settings.llm_base_url
+IMAGE_GEN_API_KEY         = settings.image_gen_api_key or settings.api_key
+IMAGE_GEN_MODEL           = settings.image_gen_model
 
 SANDBOX_ENABLED           = settings.sandbox_enabled
 SANDBOX_WORKERS           = settings.sandbox_workers

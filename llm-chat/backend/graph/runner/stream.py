@@ -269,15 +269,28 @@ class StreamSession:
                     break
 
         except asyncio.CancelledError:
-            pass
+            logger.info("消费者取消 | conv=%s", self.conv_id)
         except Exception as exc:
             logger.error("消费者异常 | conv=%s | %s", self.conv_id, exc, exc_info=True)
+            # 消费者崩溃时也要通知前端，避免 SSE 流永远挂起
+            try:
+                self._emit_sse(sse({"error": f"内部错误: {exc}", "can_continue": bool(self.best_partial)}), "error")
+                self._emit_sse(sse({"done": True, "compressed": False}), "done")
+            except Exception:
+                pass
         finally:
+            # 确保 _sse_done 被设置（即使异常路径也能让 _feed_client 退出）
+            if not self._sse_done:
+                self._sse_done = True
+                for w in self._sse_waiters:
+                    w.set()
             if self._hb_task:
                 self._hb_task.cancel()
             if self._flush_task:
                 self._flush_task.cancel()
-            _active_sessions.pop(self.conv_id, None)
+            # 只有当 _active_sessions 中还是自己时才移除（避免新 session 被老 session 误删）
+            if _active_sessions.get(self.conv_id) is self:
+                _active_sessions.pop(self.conv_id, None)
 
     # ══════════════════════════════════════════════════════════════════════════
     # SSE 推送 + DB 写入
@@ -356,8 +369,8 @@ class StreamSession:
                 from memory import store as memory_store
                 await memory_store.update_message_streaming(
                     self.assistant_db_id,
-                    thinking=self._thinking_buf,
-                    stream_buffer=self._content_buf,
+                    thinking=self._thinking_buf if self._thinking_buf else None,
+                    stream_buffer=self._content_buf if self._content_buf else None,
                 )
             except Exception as exc:
                 logger.warning("消息流式更新失败: %s", exc)
@@ -367,13 +380,13 @@ class StreamSession:
         if not self.assistant_db_id:
             return
         # save_response_node 已经通过 add_message 保存了最终内容到 messages 表
-        # 这里只需要确保 stream_completed=True 和 thinking 字段
+        # 这里只需要确保 stream_completed=True、thinking 字段、清空 stream_buffer
         try:
             from memory import store as memory_store
             await memory_store.update_message_streaming(
                 self.assistant_db_id,
-                thinking=self._thinking_buf,
-                stream_buffer="",
+                thinking=self._thinking_buf or None,
+                stream_buffer="",  # 显式清空
                 stream_completed=True,
             )
         except Exception:
@@ -404,7 +417,7 @@ class StreamSession:
         try:
             from memory import store as memory_store
             await memory_store.update_message_streaming(
-                self.assistant_db_id, stream_completed=True,
+                self.assistant_db_id, stream_buffer="", stream_completed=True,
             )
         except Exception:
             pass
@@ -475,6 +488,8 @@ class StreamSession:
             "tool_model": self.model, "answer_model": self.model,
             "cache_hit": False, "cache_similarity": 0.0,
             "vision_description": "", "needs_clarification": False,
+            "pre_user_db_id": self.user_db_id,
+            "pre_assistant_db_id": self.assistant_db_id,
             "force_plan": self.force_plan, "plan": [], "plan_id": "",
             "plan_goal": "", "current_step_index": 0,
             "step_iterations": 0, "reflector_decision": "",
@@ -501,18 +516,20 @@ async def stream_response(
         yield chunk
 
 
-async def resume_stream(conv_id: str, after_event_id: int = 0) -> AsyncGenerator[str, None]:
+async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str = "") -> AsyncGenerator[str, None]:
     """
     恢复流式输出（DB-first 版）：从 event_log 读取历史事件 + 实时事件。
 
     1. 从 event_log WHERE id > after_event_id 读取遗漏事件
     2. 如果当前 worker 正在处理该对话，切换到实时推送
     3. 如果不是当前 worker，只能返回 DB 中已有的事件
+
+    message_id: 限定只回放指定 assistant message 的事件（多轮对话时避免混入旧轮）。
     """
     from db.event_store import get_events_since
 
-    # 从 DB 读取遗漏的事件
-    events = await get_events_since(conv_id, after_event_id)
+    # 从 DB 读取遗漏的事件（按 message_id 过滤，避免多轮事件混淆）
+    events = await get_events_since(conv_id, after_event_id, message_id=message_id)
     for evt in events:
         if evt["sse_string"]:
             yield evt["sse_string"]

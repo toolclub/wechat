@@ -91,20 +91,30 @@ class SaveResponseNode(BaseNode):
                 if clar_data:
                     break
 
+        # 获取 StreamSession 预写的 DB 行 ID
+        pre_user_id = state.get("pre_user_db_id", 0)
+        pre_asst_id = state.get("pre_assistant_db_id", 0)
+
         if clar_data:
             await adispatch_custom_event("clarification_needed", clar_data)
             logger.info(
                 "澄清问询 | conv=%s | items=%d | question=%.80s",
                 conv_id, len(clar_data.get("items", [])), clar_data.get("question", ""),
             )
-            # StreamSession 已在流开始时写入 user 消息，这里更新内容（含图片描述）
-            await self._update_last_user_message(conv_id, user_msg_to_save)
+            # UPDATE 预写的 user 行 + 追加到内存缓存
+            await memory_store.add_message(
+                conv_id, "user", self._sanitize_for_db(user_msg_to_save),
+                update_db_id=pre_user_id,
+            )
             return {"needs_clarification": True}
 
-        # ── 更新用户消息内容（StreamSession 已写入基础版，这里更新为含图片描述的版本） ──
-        await self._update_last_user_message(conv_id, user_msg_to_save)
+        # ── 写入用户消息（UPDATE 预写行，追加到内存缓存） ──
+        await memory_store.add_message(
+            conv_id, "user", self._sanitize_for_db(user_msg_to_save),
+            update_db_id=pre_user_id,
+        )
 
-        # ── 更新 AI 回复（StreamSession 已写入空 assistant 行，这里写入最终内容） ──
+        # ── 写入 AI 回复（UPDATE 预写行，追加到内存缓存） ──
         if full_response:
             tool_summary    = self._build_tool_summary(state)
             step_context    = self._build_step_context(state)
@@ -114,7 +124,10 @@ class SaveResponseNode(BaseNode):
             if tool_summary:
                 parts.append(tool_summary)
             content_to_save = "\n\n".join(parts)
-            await self._update_last_assistant_message(conv_id, content_to_save)
+            await memory_store.add_message(
+                conv_id, "assistant", self._sanitize_for_db(content_to_save),
+                update_db_id=pre_asst_id,
+            )
 
         # ── 保存工具调用事件 ─────────────────────────────────────────────────
         if tool_events_list:
@@ -340,36 +353,6 @@ class SaveResponseNode(BaseNode):
         if summaries:
             return "【工具调用记录】\n" + "\n".join(summaries[:20])  # 最多 20 条
         return ""
-
-    @staticmethod
-    async def _update_last_user_message(conv_id: str, content: str) -> None:
-        """更新最后一条 user 消息的内容（StreamSession 已在流开始时创建了基础版）。"""
-        conv = memory_store.get(conv_id)
-        if not conv or not conv.messages:
-            return
-        # 找到最后一条 user 消息
-        for msg in reversed(conv.messages):
-            if msg.role == "user":
-                sanitized = content.replace("\x00", "").replace("\u0000", "")
-                if msg.content != sanitized:
-                    msg.content = sanitized
-                    if msg.id > 0:
-                        await memory_store.update_message_content(msg.id, sanitized)
-                return
-
-    @staticmethod
-    async def _update_last_assistant_message(conv_id: str, content: str) -> None:
-        """更新最后一条 assistant 消息的最终内容。"""
-        conv = memory_store.get(conv_id)
-        if not conv or not conv.messages:
-            return
-        for msg in reversed(conv.messages):
-            if msg.role == "assistant":
-                sanitized = content.replace("\x00", "").replace("\u0000", "")
-                msg.content = sanitized
-                if msg.id > 0:
-                    await memory_store.update_message_content(msg.id, sanitized)
-                return
 
     # ── 澄清检测与提取 ───────────────────────────────────────────────────────
 

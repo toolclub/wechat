@@ -61,15 +61,22 @@ async def append_events_batch(events: list[dict]) -> None:
         await session.commit()
 
 
-async def get_events_since(conv_id: str, after_id: int = 0) -> list[dict]:
-    """获取 event_id > after_id 的事件（SSE 重连用）。"""
+async def get_events_since(conv_id: str, after_id: int = 0, message_id: str = "") -> list[dict]:
+    """
+    获取 event_id > after_id 的事件（SSE 重连用）。
+
+    message_id: 可选过滤条件，只返回指定 message 的事件（多轮对话恢复时避免混入旧轮事件）。
+    """
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        query = (
             select(EventLogModel)
             .where(EventLogModel.conv_id == conv_id)
             .where(EventLogModel.id > after_id)
-            .order_by(EventLogModel.id.asc())
         )
+        if message_id:
+            query = query.where(EventLogModel.message_id == message_id)
+        query = query.order_by(EventLogModel.id.asc())
+        result = await session.execute(query)
         rows = result.scalars().all()
     return [
         {

@@ -217,22 +217,69 @@ const previewSrcdoc = computed(() => {
   return buildIframeSrcdoc(props.selectedFile.content, props.selectedFile.language)
 })
 
-const canPreview = computed(() => props.selectedFile ? isPreviewable(props.selectedFile.language) : false)
+const canPreview = computed(() => {
+  if (!props.selectedFile) return false
+  if (props.selectedFile.language === 'pptx') return true  // PPT 始终可预览
+  return isPreviewable(props.selectedFile.language)
+})
+
+const isPptFile = computed(() => props.selectedFile?.language === 'pptx')
+
+// PPT 幻灯片翻页
+const pptSlideIndex = ref(0)
+const pptSlides = computed(() => props.selectedFile?.slides_html || [])
+const pptSlideCount = computed(() => pptSlides.value.length)
+const pptCurrentSlideHtml = computed(() => pptSlides.value[pptSlideIndex.value] || '')
+
+watch(() => props.selectedFile, (f) => {
+  pptSlideIndex.value = 0
+  // PPT 文件始终默认预览模式（不该显示 base64 代码）
+  if (f && f.language === 'pptx') {
+    fileViewMode.value = 'preview'
+  } else if (f && isPreviewable(f.language)) {
+    fileViewMode.value = 'preview'
+  } else {
+    fileViewMode.value = 'code'
+  }
+})
+
+function pptPrev() { if (pptSlideIndex.value > 0) pptSlideIndex.value-- }
+function pptNext() { if (pptSlideIndex.value < pptSlideCount.value - 1) pptSlideIndex.value++ }
 
 const fileSizeKb = computed(() => {
   if (!props.selectedFile) return '0'
+  if (props.selectedFile.size) return (props.selectedFile.size / 1024).toFixed(1)
   return (props.selectedFile.content.length / 1024).toFixed(1)
 })
 
 function downloadFile() {
   if (!props.selectedFile) return
-  const blob = new window.Blob([props.selectedFile.content], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = props.selectedFile.name
-  a.click()
-  URL.revokeObjectURL(url)
+  const isBinary = props.selectedFile.binary || ['pptx', 'pdf'].includes(props.selectedFile.language)
+  if (isBinary) {
+    // base64 → 二进制 → Blob → 下载
+    try {
+      const byteChars = atob(props.selectedFile.content)
+      const bytes = new Uint8Array(byteChars.length)
+      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i)
+      const mimeMap: Record<string, string> = {
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        pdf: 'application/pdf',
+      }
+      const blob = new Blob([bytes], { type: mimeMap[props.selectedFile.language] || 'application/octet-stream' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = props.selectedFile.name; a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      console.error('下载失败:', e)
+    }
+  } else {
+    const blob = new Blob([props.selectedFile.content], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = props.selectedFile.name; a.click()
+    URL.revokeObjectURL(url)
+  }
 }
 
 const fileCopied = ref(false)
@@ -387,15 +434,23 @@ function copyFileContent() {
     <!-- ══ Tab: 文件预览 ══ -->
     <div v-show="activeTab === 'file'" class="tab-content file-tab">
       <template v-if="selectedFile">
-      <!-- 文件信息栏 -->
+      <!-- 文件信息栏（含下载按钮在右侧） -->
       <div class="file-info-bar">
         <span class="file-name-badge">{{ selectedFile.name }}</span>
-        <span class="file-lang-tag">{{ selectedFile.language }}</span>
+        <span class="file-lang-tag">{{ isPptFile ? 'PowerPoint' : selectedFile.language }}</span>
         <span class="file-size">{{ fileSizeKb }} KB</span>
+        <span v-if="selectedFile.slide_count" class="file-size">· {{ selectedFile.slide_count }} 页</span>
+        <div style="flex:1"></div>
+        <!-- 下载按钮（右上角） -->
+        <button class="file-action-btn file-action-sm" title="下载文件" @click="downloadFile">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
       </div>
 
-      <!-- 操作按钮栏 -->
-      <div class="file-actions-bar">
+      <!-- 操作按钮栏（PPT 时只显示预览，非 PPT 显示代码/预览/复制） -->
+      <div v-if="!isPptFile" class="file-actions-bar">
         <button class="file-action-btn" :class="{ active: fileViewMode === 'code' }" @click="fileViewMode = 'code'">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
@@ -418,25 +473,54 @@ function copyFileContent() {
             <polyline points="3 8 6 11 13 5"/>
           </svg>
         </button>
-        <button class="file-action-btn file-action-sm" title="下载文件" @click="downloadFile">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-        </button>
       </div>
 
-      <!-- 代码视图 -->
-      <div v-if="fileViewMode === 'code'" class="file-code-view">
+      <!-- 代码视图（PPT 不显示代码，base64 没有意义） -->
+      <div v-if="fileViewMode === 'code' && !isPptFile" class="file-code-view">
         <pre class="file-code-pre"><code class="hljs" v-html="highlightedCode"></code></pre>
       </div>
 
-      <!-- 预览视图 -->
-      <div v-if="fileViewMode === 'preview' && canPreview" class="file-preview-view">
+      <!-- 预览视图：普通文件（HTML/SVG） -->
+      <div v-if="fileViewMode === 'preview' && canPreview && !isPptFile" class="file-preview-view">
         <iframe
           :srcdoc="previewSrcdoc"
           class="file-preview-frame"
           sandbox="allow-scripts allow-forms allow-modals allow-popups"
         />
+      </div>
+
+      <!-- PPT 视图（不依赖 fileViewMode，PPT 始终进入此分支） -->
+      <!-- 无幻灯片数据：显示下载提示 -->
+      <div v-if="isPptFile && pptSlideCount === 0" class="ppt-empty-view">
+        <div class="ppt-empty-icon">📊</div>
+        <div class="ppt-empty-text">PPT 已生成</div>
+        <div class="ppt-empty-sub">{{ selectedFile?.name }} · {{ fileSizeKb }} KB</div>
+        <button class="ppt-empty-download" @click="downloadFile">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          下载 PPT 文件
+        </button>
+      </div>
+
+      <!-- 有幻灯片数据：幻灯片浏览器 -->
+      <div v-if="isPptFile && pptSlideCount > 0" class="ppt-viewer">
+        <div class="ppt-slide-container">
+          <iframe
+            :srcdoc="pptCurrentSlideHtml"
+            class="ppt-slide-frame"
+            sandbox="allow-scripts"
+          />
+        </div>
+        <div class="ppt-nav">
+          <button class="ppt-nav-btn" :disabled="pptSlideIndex === 0" @click="pptPrev">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <span class="ppt-nav-info">{{ pptSlideIndex + 1 }} / {{ pptSlideCount }}</span>
+          <button class="ppt-nav-btn" :disabled="pptSlideIndex >= pptSlideCount - 1" @click="pptNext">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
       </div>
       </template>
       <div v-else class="file-tab-empty">
@@ -880,5 +964,83 @@ function copyFileContent() {
   height: 100%;
   border: none;
   display: block;
+}
+
+/* ══ PPT 无预览数据时的下载视图 ══ */
+.ppt-empty-view {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  background: #F8F9FA; padding: 40px;
+}
+.ppt-empty-icon { font-size: 48px; }
+.ppt-empty-text { font-size: 16px; font-weight: 600; color: #18191C; }
+.ppt-empty-sub { font-size: 13px; color: #9499A0; }
+.ppt-empty-download {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 10px; padding: 10px 24px; border-radius: 10px;
+  background: #FF9800; color: #fff; border: none; cursor: pointer;
+  font-size: 14px; font-weight: 600; transition: all 0.15s;
+}
+.ppt-empty-download:hover { background: #F57C00; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(255,152,0,0.3); }
+
+/* ══ PPT 幻灯片浏览器 ══ */
+.ppt-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #F1F2F3;
+}
+.ppt-slide-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  overflow: hidden;
+}
+.ppt-slide-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+  background: #fff;
+}
+.ppt-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 10px 0 14px;
+  background: #F1F2F3;
+}
+.ppt-nav-btn {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  border: 1.5px solid #E3E5E7;
+  background: #fff;
+  color: #18191C;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.ppt-nav-btn:hover:not(:disabled) {
+  border-color: #00AEEC;
+  color: #00AEEC;
+  box-shadow: 0 2px 8px rgba(0,174,236,0.15);
+}
+.ppt-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.ppt-nav-info {
+  font-size: 13px;
+  font-weight: 600;
+  color: #61666D;
+  min-width: 60px;
+  text-align: center;
 }
 </style>

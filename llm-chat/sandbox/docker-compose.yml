@@ -2,10 +2,11 @@
 #
 # ═══════════════════════════════════════════════════════════════
 #  单机启动：
-#    docker compose up -d
+#    docker compose --profile standalone up -d
 #
 #  3 节点集群启动：
-#    docker compose --profile cluster up -d
+#    docker compose --profile cluster build
+#   git
 #
 #  .env 对应配置：
 #    单机：  SANDBOX_WORKERS=[{"id":"w1","host":"host.docker.internal","port":2222,"user":"root","password":"sandbox123"}]
@@ -13,7 +14,7 @@
 # ═══════════════════════════════════════════════════════════════
 
 services:
-  # ── 默认单节点 ──────────────────────────────────────
+  # ── 默认单节点（docker compose --profile standalone up -d） ──
   sandbox-worker:
     build:
       context: .
@@ -29,6 +30,7 @@ services:
           cpus: "2"
           memory: 2G
     restart: unless-stopped
+    profiles: ["standalone"]
 
   # ── 集群节点（docker compose --profile cluster up -d）──
   w1:
