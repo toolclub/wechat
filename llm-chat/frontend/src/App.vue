@@ -67,22 +67,20 @@ const selectedFile = ref<FileArtifact | null>(null)
 async function onSelectFile(file: FileArtifact) {
   let resolved = file
 
-  // PPT 文件：如果没有 slides_html，从多个来源查找完整版
-  if (file.language === 'pptx' && !file.slides_html?.length) {
-    // 来源1：cognitive.artifacts（SSE 实时推送的，有 slides_html）
+  // 如果是元数据模式（无 content），按需从后端加载完整内容
+  const needsLoad = !file.content || (file.language === 'pptx' && !file.slides_html?.length)
+  if (needsLoad) {
+    // 来源1：cognitive.artifacts（SSE 实时推送的，有完整内容）
     const fromCog = chat.cognitive.value.artifacts.find(
-      (a: FileArtifact) => a.name === file.name && a.language === 'pptx' && a.slides_html?.length
+      (a: FileArtifact) => a.name === file.name && a.content
     )
     if (fromCog) {
       resolved = fromCog
-    } else if (chat.currentConvId.value) {
-      // 来源2：从 DB 获取（刷新后 cognitive 被清空的情况）
+    } else if (file.id) {
+      // 来源2：按 ID 从后端加载完整内容（按需，不卡会话加载）
       try {
-        const artifacts = await import('./api').then(m => m.fetchConvArtifacts(chat.currentConvId.value!))
-        const fromDb = artifacts.find(
-          (a: FileArtifact) => a.name === file.name && a.language === 'pptx' && a.slides_html?.length
-        )
-        if (fromDb) resolved = fromDb
+        const full = await import('./api').then(m => m.fetchArtifactContent(file.id!))
+        if (full) resolved = full as FileArtifact
       } catch {}
     }
   }

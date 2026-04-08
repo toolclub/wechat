@@ -96,6 +96,11 @@ class StreamSession:
         self._last_flush = time.time()
         self._tool_seq = 0
 
+        # 工具调用 DB 持久化（刷新后恢复 sandbox 终端等）
+        self._pending_tool_exec_id: int = 0
+        self._pending_tool_name: str = ""
+        self._sandbox_output_buf: str = ""  # 累积当前工具的 sandbox 终端输出
+
         # 任务引用
         self._graph_task: asyncio.Task | None = None
         self._consumer_task: asyncio.Task | None = None
@@ -156,8 +161,9 @@ class StreamSession:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _run_graph(self) -> None:
-        from sandbox.context import current_conv_id
+        from sandbox.context import current_conv_id, current_message_id
         current_conv_id.set(self.conv_id)
+        current_message_id.set(self.assistant_message_id)
 
         graph = get_graph(self.model) if self.agent_mode else get_simple_graph(self.model)
         state = self._build_initial_state()
@@ -230,7 +236,7 @@ class StreamSession:
                 if kind == "event":
                     async for chunk in dispatcher.dispatch(payload, self.ctx):
                         self._emit_sse(chunk)
-                        self._track_sse_for_db(chunk)
+                        await self._track_sse_for_db(chunk)
 
                 elif kind == "ping":
                     self._emit_sse(sse({"ping": True}), "ping")
@@ -311,8 +317,15 @@ class StreamSession:
                 "sse_string": sse_str,
             })
 
-    def _track_sse_for_db(self, sse_str: str) -> None:
-        """从 SSE 字符串提取 thinking/content 用于定期刷新到 messages 表。"""
+    async def _track_sse_for_db(self, sse_str: str) -> None:
+        """
+        从 SSE 字符串提取 thinking/content/tool 用于定期刷新到 DB。
+
+        工具调用持久化流程（确保刷新后能恢复 sandbox 终端）：
+          tool_call   → 立即 INSERT tool_executions (status=running)
+          sandbox_output → 累积到 _sandbox_output_buf（终端过程输出）
+          tool_result → UPDATE tool_executions (status=done, output=累积的终端输出)
+        """
         if not sse_str.startswith("data: "):
             return
         try:
@@ -324,6 +337,67 @@ class StreamSession:
             self._thinking_buf += data["thinking"]
         if data.get("content"):
             self._content_buf += data["content"]
+
+        # ── 工具调用开始 → 创建 tool_execution 记录 ──
+        if data.get("tool_call"):
+            tc = data["tool_call"]
+            self._tool_seq += 1
+            self._pending_tool_name = tc.get("name", "")
+            self._sandbox_output_buf = ""  # 重置终端输出缓冲
+            try:
+                from db.tool_store import create_tool_execution
+                self._pending_tool_exec_id = await create_tool_execution(
+                    conv_id=self.conv_id,
+                    message_id=self.assistant_message_id,
+                    tool_name=tc.get("name", ""),
+                    tool_input=tc.get("input", {}),
+                    sequence_number=self._tool_seq,
+                )
+            except Exception as exc:
+                logger.warning("tool_execution 创建失败: %s", exc)
+                self._pending_tool_exec_id = 0
+
+        # ── sandbox 终端输出 → 累积（刷新后恢复用） ──
+        if data.get("sandbox_output"):
+            so = data["sandbox_output"]
+            self._sandbox_output_buf += so.get("text", "")
+
+        # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
+        if data.get("file_artifact"):
+            fa = data["file_artifact"]
+            try:
+                from db.artifact_store import save_artifact
+                # file_artifact 事件中只存元数据（binary 内容由工具内的 save_artifact 保存）
+                # 这里是兜底：如果工具内没保存，至少保存一次
+                if not fa.get("binary"):
+                    await save_artifact(
+                        self.conv_id,
+                        fa.get("name", ""),
+                        fa.get("path", ""),
+                        fa.get("content", ""),
+                        fa.get("language"),
+                    )
+            except Exception as exc:
+                logger.warning("artifact 兜底保存失败: %s", exc)
+
+        # ── 工具调用结束 → 标记完成，写入累积的终端输出 ──
+        if data.get("tool_result"):
+            tr = data["tool_result"]
+            if self._pending_tool_exec_id:
+                # 优先用累积的 sandbox 终端输出（和推理过程一致），
+                # 没有的话 fallback 到 tool_result 的 output 字段
+                output = self._sandbox_output_buf or tr.get("output", "")
+                try:
+                    from db.tool_store import complete_tool_execution
+                    await complete_tool_execution(
+                        self._pending_tool_exec_id,
+                        output=output[:20000],  # 终端输出可能较长
+                        status="done",
+                    )
+                except Exception as exc:
+                    logger.warning("tool_execution 完成失败: %s", exc)
+                self._pending_tool_exec_id = 0
+                self._sandbox_output_buf = ""
 
     @staticmethod
     def _detect_event_type(sse_str: str) -> str:

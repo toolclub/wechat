@@ -21,6 +21,7 @@ REGISTRY: dict[str, ToolResultFormatter] = {
     "run_shell":     _sandbox_fmt,
     "sandbox_write": _sandbox_fmt,
     "sandbox_read":  _sandbox_fmt,
+    "create_ppt":    _sandbox_fmt,
 }
 
 DEFAULT_FORMATTER: ToolResultFormatter = GenericToolFormatter()

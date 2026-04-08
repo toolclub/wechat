@@ -22,6 +22,11 @@ def _get_conv_id() -> str:
     return current_conv_id.get() or "default"
 
 
+def _get_message_id() -> str:
+    from sandbox.context import current_message_id
+    return current_message_id.get() or ""
+
+
 @tool
 async def create_ppt(ppt_json: str) -> str:
     """
@@ -110,11 +115,21 @@ async def create_ppt(ppt_json: str) -> str:
 
     logger.info("create_ppt | conv=%s | title=%s | slides=%d", conv_id, ppt_title, len(slides))
 
-    await adispatch_custom_event("sandbox_output", {
-        "stream": "stdout",
-        "text": f"📊 正在生成 PPT: {ppt_title} ({len(slides)} 页)\n",
-        "tool_name": "create_ppt",
-    })
+    async def _notify(text: str) -> None:
+        """安全地发送 sandbox_output 事件（失败不阻断主流程）。"""
+        try:
+            await adispatch_custom_event("sandbox_output", {
+                "stream": "stdout",
+                "text": text,
+                "tool_name": "create_ppt",
+            })
+        except Exception as e:
+            logger.warning("sandbox_output 事件发送失败: %s", e)
+
+    # ── 诊断日志：确认 _notify 是否被调用、是否成功 ──
+    logger.warning("[PPT诊断] create_ppt 进入执行，准备 _notify | conv=%s slides=%d", conv_id, len(slides))
+    await _notify(f"📊 正在生成 PPT: {ppt_title} ({len(slides)} 页)\n")
+    logger.warning("[PPT诊断] _notify 完成（无异常）")
 
     # ── 文生图：为有 image_prompt 的幻灯片生成配图 ──
     from config import IMAGE_GEN_ENABLED
@@ -122,53 +137,41 @@ async def create_ppt(ppt_json: str) -> str:
         img_prompt = slide.get("image_prompt")
         if not img_prompt or not IMAGE_GEN_ENABLED:
             continue
-        await adispatch_custom_event("sandbox_output", {
-            "stream": "stdout",
-            "text": f"🎨 第 {i+1} 页：正在调用文生图 API...\n",
-            "tool_name": "create_ppt",
-        })
+        await _notify(f"🎨 第 {i+1} 页：正在调用文生图 API...\n")
         try:
             from ppt.image_gen import generate_image
             img_bytes = await generate_image(img_prompt)
             if img_bytes:
                 img_filename = f"slide_{i+1}_img.jpg"
                 await _upload_binary_to_sandbox(sandbox_manager, conv_id, img_filename, img_bytes)
-                # 将图片嵌入对应 slide 的 HTML（替换占位符或追加）
                 b64_img = base64.b64encode(img_bytes).decode("ascii")
                 slides_html[i] = slides_html[i].replace(
                     f"[IMG_PLACEHOLDER_{i+1}]",
                     f"data:image/jpeg;base64,{b64_img}"
                 )
-                await adispatch_custom_event("sandbox_output", {
-                    "stream": "stdout",
-                    "text": f"  ✅ 配图已生成 ({len(img_bytes)//1024}KB)\n",
-                    "tool_name": "create_ppt",
-                })
+                await _notify(f"  ✅ 配图已生成 ({len(img_bytes)//1024}KB)\n")
         except Exception as exc:
             logger.warning("配图失败: %s", exc)
-            await adispatch_custom_event("sandbox_output", {
-                "stream": "stdout",
-                "text": f"  ⚠️ 配图失败: {exc}\n",
-                "tool_name": "create_ppt",
-            })
+            await _notify(f"  ⚠️ 配图失败: {exc}\n")
 
     # ── 生成渲染脚本 ──
-    await adispatch_custom_event("sandbox_output", {
-        "stream": "stdout",
-        "text": "📝 正在渲染幻灯片（HTML → 截图 → PPT）...\n",
-        "tool_name": "create_ppt",
-    })
+    await _notify("📝 正在渲染幻灯片（HTML → 截图 → PPT）...\n")
 
     from ppt.script_gen import generate_html_render_script
     script = generate_html_render_script(slides_html, filename)
 
-    # ── 在沙箱中执行 ──
+    # ── 在沙箱中执行（on_output 回调也做安全包装） ──
+    async def _safe_output(stream: str, text: str):
+        try:
+            await adispatch_custom_event("sandbox_output", {
+                "stream": stream, "text": text, "tool_name": "create_ppt",
+            })
+        except Exception:
+            pass  # 沙箱输出事件失败不影响 PPT 生成
+
     result = await sandbox_manager.execute_code_streaming(
         conv_id, "python", script,
-        on_output=lambda stream, text: adispatch_custom_event(
-            "sandbox_output",
-            {"stream": stream, "text": text, "tool_name": "create_ppt"},
-        ),
+        on_output=_safe_output,
     )
 
     if result.exit_code != 0:
@@ -178,14 +181,14 @@ async def create_ppt(ppt_json: str) -> str:
     try:
         worker, session_dir = sandbox_manager._get_worker_for_session(conv_id)
         read_result = await worker.exec_command(
-            f"base64 -w0 {session_dir}/{filename}", timeout=15,
+            f"base64 -w0 {session_dir}/{filename}", timeout=30,
         )
         if read_result.exit_code == 0 and read_result.stdout.strip():
             content_b64 = read_result.stdout.strip()
             file_bytes = base64.b64decode(content_b64)
             size_kb = len(file_bytes) / 1024
 
-            # 存 DB 时把 slides_html 和 binary 打包成 JSON
+            # ── 存 DB：binary + slides_html + 元数据（刷新恢复用）──
             import json as _json
             artifact_content = _json.dumps({
                 "binary_b64": content_b64,
@@ -193,8 +196,18 @@ async def create_ppt(ppt_json: str) -> str:
                 "slide_count": len(slides),
                 "theme": "html",
             }, ensure_ascii=False)
-            await save_artifact(conv_id, filename, filename, artifact_content)
 
+            msg_id = _get_message_id()
+            save_ok = await save_artifact(
+                conv_id, filename, filename, artifact_content,
+                message_id=msg_id, size=len(file_bytes), slide_count=len(slides),
+            )
+            logger.info(
+                "artifact 保存 | conv=%s | msg=%s | file=%s | size=%dKB",
+                conv_id, msg_id, filename, size_kb,
+            )
+
+            # ── SSE 推送：包含 slides_html 供前端实时预览 ──
             await adispatch_custom_event("file_artifact", {
                 "name": filename,
                 "path": filename,
@@ -207,11 +220,7 @@ async def create_ppt(ppt_json: str) -> str:
                 "slides_html": slides_html,
             })
 
-            await adispatch_custom_event("sandbox_output", {
-                "stream": "stdout",
-                "text": f"\n✅ PPT 已生成: {filename} ({size_kb:.1f}KB, {len(slides)} 页)\n",
-                "tool_name": "create_ppt",
-            })
+            await _notify(f"\n✅ PPT 已生成: {filename} ({size_kb:.1f}KB, {len(slides)} 页)\n")
 
             return (
                 f"PPT 已成功创建！\n"
@@ -221,8 +230,10 @@ async def create_ppt(ppt_json: str) -> str:
                 f"用户可点击文件卡片下载。"
             )
         else:
+            logger.error("PPT 文件读取失败 | conv=%s | stderr=%s", conv_id, read_result.stderr)
             return f"文件读取失败: {read_result.stderr}"
     except Exception as exc:
+        logger.exception("artifact 保存异常 | conv=%s", conv_id)
         return f"artifact 保存失败: {exc}"
 
 

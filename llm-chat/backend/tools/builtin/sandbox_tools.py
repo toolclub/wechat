@@ -20,26 +20,75 @@ logger = logging.getLogger("tools.sandbox")
 
 # ── 服务类命令检测模式 ──────────────────────────────────────────────────────
 _SERVICE_PATTERNS = [
-    # Python HTTP servers
+    # ── Python ──
     r"python[23]?\s+(-m\s+)?http\.server",
     r"python[23]?\s+(-m\s+)?flask\s+run",
     r"python[23]?\s+(-m\s+)?uvicorn",
     r"python[23]?\s+(-m\s+)?gunicorn",
     r"python[23]?\s+(-m\s+)?streamlit\s+run",
     r"python[23]?\s+(-m\s+)?gradio",
-    r"python[23]?\s+.*app\.run\(",
-    # Node.js servers
-    r"node\s+.*server",
-    r"npm\s+(start|run\s+(dev|start|serve))",
-    r"npx\s+serve",
+    r"python[23]?\s+(-m\s+)?tornado",
+    r"python[23]?\s+(-m\s+)?django\s+runserver",
+    r"python[23]?\s+.*\.run\(",                    # app.run() / server.run()
+    r"uvicorn\s+",                                  # 直接调 uvicorn（无 python 前缀）
+    r"gunicorn\s+",
+    r"celery\s+worker",
+    r"daphne\s+",
+    # ── Node.js / Deno / Bun ──
+    r"node\s+\S+\.\w+",                              # node app.js / node index.js（排除 node -v 等）
+    r"npm\s+(start|run\s+\w+)",                     # npm start / npm run dev|serve|build|watch
+    r"npx\s+(serve|next|nuxt|vite|ts-node|tsx)",
     r"yarn\s+(start|dev|serve)",
-    # General server commands
+    r"pnpm\s+(start|dev|serve)",
+    r"deno\s+run",
+    r"bun\s+run",
+    r"ts-node\s+",
+    r"tsx\s+",
+    r"next\s+(dev|start)",
+    r"nuxt\s+(dev|start)",
+    r"vite\s+(dev|preview)",
+    # ── Java / JVM ──
+    r"java\s+.*-jar",
+    r"java\s+.*\.(Main|Application|Server|Boot)",
+    r"mvn\s+spring-boot:run",
+    r"gradle\s+bootRun",
+    r"gradlew\s+bootRun",
+    r"\./gradlew\s+bootRun",
+    r"mvnw\s+spring-boot:run",
+    r"\./mvnw\s+spring-boot:run",
+    r"java\s+.*-cp\s+",                             # java -cp xxx MainClass
+    r"kotlin\s+.*server",
+    # ── Go ──
+    r"go\s+run\s+",
+    r"\./\w+.*server",                               # ./myserver
+    # ── Rust ──
+    r"cargo\s+run",
+    # ── Ruby ──
+    r"ruby\s+.*server",
+    r"rails\s+server",
+    r"rails\s+s\b",
+    r"rackup",
+    r"puma\s+",
+    r"thin\s+start",
+    # ── PHP ──
+    r"php\s+-S",
+    r"php\s+artisan\s+serve",
+    r"php\s+.*-S\s+",
+    # ── .NET ──
+    r"dotnet\s+run",
+    r"dotnet\s+watch",
+    # ── 通用服务 / 中间件 ──
     r"nginx",
     r"httpd",
-    r"php\s+-S",
-    r"ruby\s+.*server",
-    r"java\s+.*-jar",
-    # Already backgrounded
+    r"apache2",
+    r"redis-server",
+    r"mongod",
+    r"mysqld",
+    r"postgres",
+    r"docker\s+run\s+.*-p\s+",                      # docker run -p 映射端口
+    r"docker-compose\s+up",
+    r"docker\s+compose\s+up",
+    # ── 已经后台化的（不重复处理） ──
     r"nohup\s+",
 ]
 _SERVICE_RE = re.compile("|".join(f"({p})" for p in _SERVICE_PATTERNS), re.IGNORECASE)
@@ -52,6 +101,12 @@ _PORT_PATTERNS = [
     r"0\.0\.0\.0:(\d{2,5})",
     r"127\.0\.0\.1:(\d{2,5})",
     r"port\s*[=:]\s*(\d{2,5})",
+    r"server\.port\s*[=:]\s*(\d{2,5})",            # Spring Boot application.properties
+    r"PORT\s*[=:]\s*(\d{2,5})",                     # env PORT=3000
+    r"-Dserver\.port=(\d{2,5})",                     # Java -D 参数
+    r"--listen\s+\S*:(\d{2,5})",                     # 通用 --listen
+    r"EXPOSE\s+(\d{2,5})",                           # Dockerfile
+    r"runserver\s+(?:\S+:)?(\d{2,5})",              # django runserver 8000 / 0.0.0.0:8000
 ]
 _PORT_RE = re.compile("|".join(_PORT_PATTERNS), re.IGNORECASE)
 
@@ -85,6 +140,27 @@ async def execute_code(language: str, code: str) -> str:
     每个对话有独立的工作目录，可以读写文件、安装包。
     执行过程中输出会实时显示在终端中。
 
+    ⚠️ 沙箱有 30 秒执行超时限制，必须遵守以下规则：
+
+    【禁止前台启动任何服务或长时间进程】
+    包括但不限于：uvicorn/flask/gunicorn/django、node/npm start/next dev、
+    java -jar/mvn spring-boot:run/gradle bootRun、go run、cargo run、
+    rails server、php artisan serve、dotnet run 等。
+
+    正确模式（适用于所有语言）：
+    1. 后台启动 + 日志重定向：
+       nohup <启动命令> > /tmp/server.log 2>&1 &
+       sleep 2
+    2. 验证：
+       ss -tlnp | grep <端口>
+       curl -s http://localhost:<端口>/
+    3. 查日志：tail -20 /tmp/server.log
+    4. 验证完清理：pkill -f <进程关键词>
+
+    同理，任何可能超过 10 秒的命令都应后台化：
+       <command> > /tmp/output.log 2>&1 &
+       然后 tail / head 读取日志。
+
     Args:
         language: 编程语言，可选值: python, javascript, java, shell
         code: 要执行的代码内容
@@ -97,6 +173,11 @@ async def execute_code(language: str, code: str) -> str:
 
     conv_id = _get_conv_id()
     logger.info("execute_code | conv=%s | lang=%s | code_len=%d", conv_id, language, len(code))
+
+    # shell 脚本中包含服务命令时，转给 run_shell 的服务模式处理（防止超时阻塞）
+    if language.lower().strip() in ("shell", "bash", "sh") and _is_service_command(code):
+        logger.info("execute_code → 检测到服务命令，转入后台模式 | conv=%s", conv_id)
+        return await _run_service_command(conv_id, code, sandbox_manager, adispatch_custom_event)
 
     result = await sandbox_manager.execute_code_streaming(
         conv_id, language, code,
@@ -114,7 +195,12 @@ async def run_shell(command: str) -> str:
     在沙箱环境中执行 shell 命令。工作目录为当前对话的专属 session 目录。
     执行过程中输出会实时显示在终端中。
 
-    对于启动服务的命令（如 python -m http.server），会自动后台运行并验证服务状态。
+    系统会自动检测服务类命令（uvicorn、flask、http.server 等），
+    自动后台运行并验证服务状态。
+
+    ⚠️ 沙箱有 30 秒超时限制。对于可能长时间运行的命令，请：
+    - 后台化：command > /tmp/output.log 2>&1 &
+    - 然后用 tail -n 20 /tmp/output.log 查看结果
 
     Args:
         command: 要执行的 shell 命令
@@ -297,16 +383,18 @@ async def sandbox_write(path: str, content: str) -> str:
     from db.artifact_store import save_artifact, detect_language
 
     conv_id = _get_conv_id()
+    from sandbox.context import current_message_id
+    msg_id = current_message_id.get() or ""
     logger.info("sandbox_write | conv=%s | path=%s | len=%d", conv_id, path, len(content))
     result = await sandbox_manager.write_file(conv_id, path, content)
 
     # 写入完成后，保存为文件产物并通知前端
     try:
         name = path.rsplit("/", 1)[-1] if "/" in path else path
-        await save_artifact(conv_id, name, path, content)
+        await save_artifact(conv_id, name, path, content, message_id=msg_id, size=len(content))
         await adispatch_custom_event(
             "file_artifact",
-            {"name": name, "path": path, "content": content, "language": detect_language(path)},
+            {"name": name, "path": path, "content": content, "language": detect_language(path), "message_id": msg_id},
         )
     except Exception:
         logger.warning("file_artifact 事件发送失败 | conv=%s path=%s", conv_id, path, exc_info=True)

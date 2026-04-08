@@ -143,19 +143,23 @@ class PlanStepModel(Base):
 
 
 class ArtifactModel(Base):
-    """文件产物表"""
+    """文件产物表 — 关联到 message，内容按需加载"""
     __tablename__ = "artifacts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     conv_id = Column(String(36), nullable=False, index=True)
+    message_id = Column(String(36), nullable=False, default="", comment="关联的 assistant 消息 ID")
     name = Column(String(255), nullable=False)
     path = Column(String(512), nullable=False)
     language = Column(String(50), nullable=False, default="text")
     content = Column(Text, nullable=False)
+    size = Column(Integer, nullable=False, default=0, comment="原始文件大小(bytes)")
+    slide_count = Column(Integer, nullable=False, default=0, comment="PPT 页数")
     created_at = Column(Float, nullable=False)
 
     __table_args__ = (
         Index("ix_artifacts_conv_created", "conv_id", "created_at"),
+        Index("ix_artifacts_message", "message_id"),
     )
 
 

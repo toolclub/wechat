@@ -159,19 +159,34 @@ export function useChat() {
           }))
         }
 
+        // artifacts 元数据从 message 关联恢复（DB 外键，不再依赖正则）
+        if (m.artifacts?.length) {
+          msg.artifacts = m.artifacts
+        }
+
         return msg
       })
 
       // ── 恢复认知面板 ──
       s.cognitive = makeEmptyCognitiveState()
-      // 去重 artifacts（DB 可能因 upsert 时序产生重复）
+      // 合并所有 artifacts：message 关联的 + 顶层 orphan 的，去重
       const seen = new Set<string>()
-      s.cognitive.artifacts = (fullState.artifacts || []).filter((a: any) => {
+      const allArtifacts: any[] = []
+      // 来源1：每条 message 上关联的 artifacts（新数据，有 message_id）
+      for (const m of s.messages) {
+        if (m.artifacts?.length) {
+          for (const a of m.artifacts) {
+            const key = a.path || a.name
+            if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
+          }
+        }
+      }
+      // 来源2：顶层 orphan artifacts（旧数据，无 message_id）
+      for (const a of (fullState.artifacts || [])) {
         const key = a.path || a.name
-        if (seen.has(key)) return false
-        seen.add(key)
-        return true
-      })
+        if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
+      }
+      s.cognitive.artifacts = allArtifacts
       if (fullState.plan) {
         s.cognitive.plan = fullState.plan.steps.map((st: any) => ({
           id: st.id, title: st.title, description: st.description ?? '',
@@ -471,7 +486,12 @@ export function useChat() {
           if (tc) {
             if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
             else if (data.results) tc.results = data.results as any
-            else if (data.output) tc.output = data.output as string
+            else if (data.output) {
+              // sandbox 工具已有流式终端输出时，不用 tool_result 覆盖（保留进度日志）
+              if (!tc.output || !(data as any).is_sandbox) {
+                tc.output = data.output as string
+              }
+            }
             tc.done = true
           }
           s.agentStatus = { ...s.agentStatus, state: 'thinking', tool: undefined }
@@ -604,31 +624,17 @@ export function useChat() {
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }
           s.cognitive.isActive = false
         },
-        // onSandboxOutput：沙箱实时终端输出（execute_code/run_shell 执行过程中）
-        // ⚠️ 顺序必须与 api/index.ts 的 sendMessage 签名一致：onSandboxOutput → onFileArtifact → onToolCallStart
-        // 使用 requestAnimationFrame 批量刷新，减少 Vue 响应式更新频率
-        (() => {
-          const bufMap = new Map<any, string>()
-          let rafScheduled = false
-          function flush() {
-            bufMap.forEach((buf, tc) => { tc.output = (tc.output || '') + buf })
-            bufMap.clear()
-            rafScheduled = false
-          }
-          return (toolName: string, stream: string, text: string) => {
-            const step = activeStep()
-            const toolList = step ? step.toolCalls : msg().toolCalls
-            const tc = toolList?.findLast(t =>
-              (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done
-            )
-            if (!tc) return
-            bufMap.set(tc, (bufMap.get(tc) || '') + text)
-            if (!rafScheduled) {
-              rafScheduled = true
-              requestAnimationFrame(flush)
-            }
-          }
-        })(),
+        // onSandboxOutput：沙箱实时终端输出（execute_code/run_shell/create_ppt 执行过程中）
+        (toolName: string, stream: string, text: string) => {
+          const step = activeStep()
+          const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t =>
+            (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done
+          )
+          if (!tc) return
+          // 直接赋值确保 Vue 响应式触发（不用 requestAnimationFrame 缓冲，避免 Proxy 引用问题）
+          tc.output = (tc.output || '') + text
+        },
         // onFileArtifact：沙箱文件产物（sandbox_write 成功后推送，去重）
         (artifact) => {
           const key = artifact.path || artifact.name

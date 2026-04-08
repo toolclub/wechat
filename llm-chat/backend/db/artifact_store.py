@@ -1,13 +1,17 @@
 """
 artifact_store：文件产物的 DB 持久化层
 
-职责：
-  - save_artifact:         sandbox_write 成功后保存文件产物
-  - get_artifacts_for_conv: 前端刷新后恢复文件产物列表
+架构：
+  - save_artifact:            工具执行时保存完整内容（含二进制）
+  - get_artifact_meta_list:   full-state 加载时只返回元数据（不含 content）→ 加载快
+  - get_artifact_content:     前端点击时按需加载完整内容（含二进制）→ 按需取
+  - get_artifacts_for_conv:   兼容旧接口（完整返回，含内容）
 
 设计原则：
-  - 所有操作均 try/except，失败仅记录日志，不阻断主流程
-  - 同一路径重复写入时更新内容（upsert 语义）
+  - artifacts 通过 message_id 关联到具体消息（外键语义）
+  - 同一对话同一路径只保留最新版（upsert）
+  - PPT 等二进制文件以 JSON 打包存储（binary_b64 + slides_html）
+  - 所有操作 try/except，失败仅记录日志
 """
 import logging
 import time
@@ -45,20 +49,20 @@ async def save_artifact(
     path: str,
     content: str,
     language: str | None = None,
+    message_id: str = "",
+    size: int = 0,
+    slide_count: int = 0,
 ) -> dict:
-    """保存文件产物，返回产物数据 dict（供 SSE 发送）。"""
+    """保存文件产物（upsert），返回产物元数据 dict。"""
     lang = language or detect_language(path)
     now = time.time()
     artifact_data = {
-        "name": name,
-        "path": path,
-        "language": lang,
-        "content": content,
-        "created_at": now,
+        "name": name, "path": path, "language": lang,
+        "message_id": message_id, "size": size,
+        "slide_count": slide_count, "created_at": now,
     }
     try:
         async with AsyncSessionLocal() as session:
-            # Upsert: 同一对话同一路径只保留最新版
             existing = await session.execute(
                 select(ArtifactModel).where(
                     ArtifactModel.conv_id == conv_id,
@@ -69,24 +73,105 @@ async def save_artifact(
             if row:
                 row.content = content
                 row.language = lang
+                row.message_id = message_id or row.message_id
+                row.size = size or row.size
+                row.slide_count = slide_count or row.slide_count
                 row.created_at = now
             else:
                 session.add(ArtifactModel(
-                    conv_id=conv_id,
-                    name=name,
-                    path=path,
-                    language=lang,
-                    content=content,
+                    conv_id=conv_id, message_id=message_id,
+                    name=name, path=path, language=lang,
+                    content=content, size=size, slide_count=slide_count,
                     created_at=now,
                 ))
             await session.commit()
+        artifact_data["id"] = row.id if row else 0  # best effort
     except Exception:
         logger.exception("save_artifact failed | conv=%s path=%s", conv_id, path)
     return artifact_data
 
 
+async def get_artifact_meta_list(conv_id: str) -> list[dict]:
+    """
+    获取对话的产物元数据列表（不含 content）。
+
+    用于 full-state API，加载快。前端点击时再按需取内容。
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(
+                    ArtifactModel.id, ArtifactModel.conv_id,
+                    ArtifactModel.message_id, ArtifactModel.name,
+                    ArtifactModel.path, ArtifactModel.language,
+                    ArtifactModel.size, ArtifactModel.slide_count,
+                    ArtifactModel.created_at,
+                )
+                .where(ArtifactModel.conv_id == conv_id)
+                .order_by(ArtifactModel.created_at)
+            )
+            rows = result.all()
+        return [
+            {
+                "id": r.id,
+                "message_id": r.message_id,
+                "name": r.name,
+                "path": r.path,
+                "language": r.language,
+                "size": r.size,
+                "slide_count": r.slide_count,
+                "binary": r.language in ("pptx", "pdf"),
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("get_artifact_meta_list failed | conv=%s", conv_id)
+        return []
+
+
+async def get_artifact_content(artifact_id: int) -> dict | None:
+    """
+    按 ID 获取单个产物的完整内容（含二进制）。
+
+    用于前端点击下载/预览时按需加载。
+    PPT 自动解包 JSON（binary_b64 + slides_html）。
+    """
+    import json as _json
+    try:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(ArtifactModel, artifact_id)
+            if not row:
+                return None
+        item: dict = {
+            "id": row.id,
+            "name": row.name,
+            "path": row.path,
+            "language": row.language,
+            "content": row.content,
+            "size": row.size,
+            "slide_count": row.slide_count,
+            "created_at": row.created_at,
+        }
+        # PPT: 解包 JSON
+        if row.language == "pptx" and row.content.startswith("{"):
+            try:
+                packed = _json.loads(row.content)
+                item["content"] = packed.get("binary_b64", "")
+                item["slides_html"] = packed.get("slides_html", [])
+                item["slide_count"] = packed.get("slide_count", row.slide_count)
+                item["theme"] = packed.get("theme", "")
+                item["binary"] = True
+            except _json.JSONDecodeError:
+                pass
+        return item
+    except Exception:
+        logger.exception("get_artifact_content failed | id=%s", artifact_id)
+        return None
+
+
 async def get_artifacts_for_conv(conv_id: str) -> list[dict]:
-    """获取对话的所有文件产物（按创建时间排序）。PPT 自动解包 JSON。"""
+    """兼容旧接口：返回完整内容（含解包）。新代码应用 get_artifact_meta_list + get_artifact_content。"""
     import json as _json
     try:
         async with AsyncSessionLocal() as session:
@@ -99,13 +184,12 @@ async def get_artifacts_for_conv(conv_id: str) -> list[dict]:
             artifacts = []
             for r in rows:
                 item: dict = {
-                    "name": r.name,
-                    "path": r.path,
-                    "language": r.language,
-                    "content": r.content,
+                    "id": r.id, "message_id": getattr(r, "message_id", ""),
+                    "name": r.name, "path": r.path, "language": r.language,
+                    "content": r.content, "size": getattr(r, "size", 0),
+                    "slide_count": getattr(r, "slide_count", 0),
                     "created_at": r.created_at,
                 }
-                # PPT artifact: content 是 JSON，需要解包
                 if r.language == "pptx" and r.content.startswith("{"):
                     try:
                         packed = _json.loads(r.content)

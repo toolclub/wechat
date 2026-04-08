@@ -60,6 +60,7 @@ export interface Message {
   images?: string[]
   timestamp?: number
   toolCalls?: ToolCallRecord[]
+  artifacts?: FileArtifact[]           // 关联的产物元数据（DB 外键，刷新恢复用）
   workflowPlan?: PlanStep[]
   workflowGoal?: string
   clarification?: ClarificationData   // 模型需要澄清时附带的交互卡片数据
@@ -120,10 +121,12 @@ export interface CognitiveState {
 
 // ── 文件产物（沙箱生成的文件） ─────────────────────────────────────────────────
 export interface FileArtifact {
+  id?: number         // DB 主键（按需加载内容时用）
   name: string        // 文件名 e.g. "baidu_tech.html"
   path: string        // 完整路径 e.g. "/sandbox/baidu_tech.html"
-  content: string     // 文件内容（PPTX 为 base64 编码）
+  content: string     // 文件内容（PPTX 为 base64 编码）— 可为空（元数据模式）
   language: string    // 语言标记 e.g. "html", "python", "pptx"
+  message_id?: string // 关联的 assistant 消息 ID
   binary?: boolean    // 是否为二进制文件（PPTX 等）
   size?: number       // 文件大小（字节）
   slide_count?: number // PPT 页数

@@ -8,5 +8,7 @@
 """
 from contextvars import ContextVar
 
-# 当前执行的对话 ID（在 stream.py 的 _graph_producer 入口设置）
+# 当前执行的对话 ID（在 stream.py 的 _run_graph 入口设置）
 current_conv_id: ContextVar[str] = ContextVar("sandbox_conv_id", default="")
+# 当前 assistant 消息 ID（用于 artifact 关联）
+current_message_id: ContextVar[str] = ContextVar("sandbox_message_id", default="")

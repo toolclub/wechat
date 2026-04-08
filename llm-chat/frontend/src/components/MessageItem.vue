@@ -452,11 +452,25 @@ const vAutoScroll: Directive<HTMLElement> = {
   },
 }
 
-// ─── 文件产物：优先从 cognitive.artifacts（SSE实时推送），兜底从 tool calls 提取 ──
+// ─── 文件产物：优先 message.artifacts（DB 外键），其次 cognitive.artifacts（SSE 实时） ──
 const fileArtifacts = computed<FileArtifact[]>(() => {
   if (props.message.role !== 'assistant') return []
 
-  // 构建当前消息的产物名称集合（从 toolCalls 提取）
+  // 正在生成中（loading）→ 直接用 cognitive.artifacts（SSE 实时推送）
+  if (props.isLastLoading && props.cognitive?.artifacts?.length) {
+    return props.cognitive.artifacts
+  }
+
+  // ── 已完成：从 message.artifacts 恢复（DB message_id 外键，不依赖正则） ──
+  if (props.message.artifacts?.length) {
+    return props.message.artifacts.map(meta => {
+      // 优先从 cognitive.artifacts 找完整版（含 content/slides_html）
+      const full = props.cognitive?.artifacts?.find(a => a.name === meta.name && a.content)
+      return full || meta
+    })
+  }
+
+  // ── 兜底：从 cognitive.artifacts 按工具调用匹配 ──
   const myFiles = new Set<string>()
   const extractNames = (toolCalls: ToolCallRecord[]) => {
     for (const tc of toolCalls) {
@@ -466,6 +480,7 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
       }
       if (tc.name === 'create_ppt' && tc.done && tc.output) {
         const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
+          || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
         if (match) myFiles.add(match[1].trim())
       }
     }
@@ -474,49 +489,13 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
     for (const step of props.message.steps) extractNames(step.toolCalls)
   }
   if (props.message.toolCalls?.length) extractNames(props.message.toolCalls)
+  if (myFiles.size === 0) return []
 
-  // 如果当前消息没有产物相关的工具调用，返回空
-  if (myFiles.size === 0 && !props.isLastLoading) return []
-
-  // 正在生成中（loading）→ 直接用 cognitive.artifacts（SSE 实时推送）
-  if (props.isLastLoading && props.cognitive?.artifacts?.length) {
-    return props.cognitive.artifacts
-  }
-
-  // 已完成 → 从 cognitive.artifacts 中过滤出属于本消息的产物
-  if (props.cognitive?.artifacts?.length && myFiles.size > 0) {
+  if (props.cognitive?.artifacts?.length) {
     const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
     if (matched.length > 0) return matched
   }
-
-  // 回退：从 toolCalls 提取基础信息（没有 slides_html 等增强数据）
-  const files: FileArtifact[] = []
-  const seen = new Set<string>()
-  const extractFrom = (toolCalls: ToolCallRecord[]) => {
-    for (const tc of toolCalls) {
-      if (tc.name === 'sandbox_write' && tc.done) {
-        const path = String((tc.input as any).path || '')
-        const content = String((tc.input as any).content || '')
-        if (path && content && !seen.has(path)) {
-          seen.add(path)
-          const name = path.split('/').pop() || path
-          files.push({ name, path, content, language: detectLanguage(path) })
-        }
-      }
-      if (tc.name === 'create_ppt' && tc.done && tc.output) {
-        const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
-        if (match && !seen.has(match[1].trim())) {
-          seen.add(match[1].trim())
-          files.push({ name: match[1].trim(), path: match[1].trim(), content: '', language: 'pptx' })
-        }
-      }
-    }
-  }
-  if (props.message.steps?.length) {
-    for (const step of props.message.steps) extractFrom(step.toolCalls)
-  }
-  if (props.message.toolCalls?.length) extractFrom(props.message.toolCalls)
-  return files
+  return []
 })
 
 // ─── 整条消息是否有可复制内容 ───────────────────────────────────────────────
@@ -864,6 +843,30 @@ function cancelEdit() { isEditing.value = false }
                               <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
                             </template>
                           </template>
+                        </template>
+
+                        <!-- create_ppt -->
+                        <template v-else-if="item.tc.name === 'create_ppt'">
+                          <div class="term-line">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-cmd-text">create_ppt "{{ (item.tc.input as any).ppt_json ? JSON.parse((item.tc.input as any).ppt_json)?.title || 'PPT' : 'PPT' }}"</span>
+                          </div>
+                          <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          <template v-if="item.tc.done && item.tc.output">
+                            <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
+                              <div v-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
+                              <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
+                            </template>
+                          </template>
+                        </template>
+
+                        <!-- 兜底：未知的 sandbox 工具 -->
+                        <template v-else>
+                          <div class="term-line">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-cmd-text">{{ item.tc.name }} {{ Object.keys(item.tc.input || {}).filter(k => k !== '_generating').join(' ') }}</span>
+                          </div>
+                          <pre v-if="item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
                         </template>
                       </template>
 

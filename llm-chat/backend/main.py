@@ -237,7 +237,7 @@ async def get_full_state(conv_id: str):
     返回：消息列表（含 thinking、tool_calls、steps 等结构化数据）、
     执行计划、文件产物、工具历史、流式状态。
     """
-    from db.artifact_store import get_artifacts_for_conv
+    from db.artifact_store import get_artifact_meta_list
     from db.plan_store import get_latest_plan_for_conv
     from db.tool_store import get_tool_executions_for_conv
     from db.event_store import get_latest_event_id
@@ -251,7 +251,7 @@ async def get_full_state(conv_id: str):
     tool_execs, latest_plan, artifacts, last_event_id = await asyncio.gather(
         get_tool_executions_for_conv(conv_id),
         get_latest_plan_for_conv(conv_id),
-        get_artifacts_for_conv(conv_id),
+        get_artifact_meta_list(conv_id),  # 只返回元数据，不含 content（加载快）
         get_latest_event_id(conv_id),
     )
 
@@ -262,19 +262,29 @@ async def get_full_state(conv_id: str):
         if m.get("role") == "assistant"
     )
 
-    # 按 message 组织 tool_executions
+    # 按 message 组织 tool_executions 和 artifacts
     tool_by_msg: dict[str, list] = {}
     for t in tool_execs:
         tool_by_msg.setdefault(t["message_id"], []).append(t)
 
-    # 组装消息（含 thinking + tool_executions + stream 状态）
+    artifact_by_msg: dict[str, list] = {}
+    for a in artifacts:
+        if a.get("message_id"):
+            artifact_by_msg.setdefault(a["message_id"], []).append(a)
+
+    # 组装消息（含 thinking + tool_executions + artifacts 元数据 + stream 状态）
     enriched_messages = []
     for m in conv_data["messages"]:
         msg = {**m}
         msg_id = m.get("message_id", "")
         if msg_id and msg_id in tool_by_msg:
             msg["tool_executions"] = tool_by_msg[msg_id]
+        if msg_id and msg_id in artifact_by_msg:
+            msg["artifacts"] = artifact_by_msg[msg_id]
         enriched_messages.append(msg)
+
+    # 未关联到 message 的旧 artifact（兼容迁移前数据），只返回元数据
+    orphan_artifacts = [a for a in artifacts if not a.get("message_id")]
 
     return {
         "id": conv_data["id"],
@@ -282,7 +292,7 @@ async def get_full_state(conv_id: str):
         "status": conv_data.get("status", "active"),
         "messages": enriched_messages,
         "plan": latest_plan,
-        "artifacts": artifacts,
+        "artifacts": orphan_artifacts,  # 只保留未关联的旧数据（元数据，无 content）
         "has_streaming": has_streaming,
         "last_event_id": last_event_id,
     }
@@ -447,10 +457,20 @@ async def get_conversation_tools(conv_id: str):
 
 @app.get("/api/conversations/{conv_id}/artifacts")
 async def get_conversation_artifacts(conv_id: str):
-    """获取对话的文件产物列表（供前端刷新后恢复文件卡片）。"""
-    from db.artifact_store import get_artifacts_for_conv
-    artifacts = await get_artifacts_for_conv(conv_id)
+    """获取对话的文件产物元数据列表（不含 content，加载快）。"""
+    from db.artifact_store import get_artifact_meta_list
+    artifacts = await get_artifact_meta_list(conv_id)
     return {"artifacts": artifacts}
+
+
+@app.get("/api/artifacts/{artifact_id}")
+async def get_artifact_detail(artifact_id: int):
+    """按需加载单个产物的完整内容（含二进制、slides_html 等）。前端点击时调用。"""
+    from db.artifact_store import get_artifact_content
+    data = await get_artifact_content(artifact_id)
+    if not data:
+        return {"error": "产物不存在"}
+    return data
 
 
 # ── 执行计划接口 ───────────────────────────────────────────────────────────────

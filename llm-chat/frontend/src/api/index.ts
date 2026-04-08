@@ -108,6 +108,15 @@ export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]
   return data.artifacts || []
 }
 
+/** 按需加载单个产物的完整内容（含二进制、slides_html） */
+export async function fetchArtifactContent(artifactId: number): Promise<FileArtifact | null> {
+  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  const data = await res.json()
+  return data.error ? null : data
+}
+
 /** 获取对话的完整状态（含消息详情、计划、产物等，供刷新后恢复） */
 export async function fetchFullState(convId: string) {
   const res = await fetch(`${API_BASE}/api/conversations/${convId}/full-state`, {
@@ -276,6 +285,9 @@ export async function sendMessage(
     if (!line.startsWith('data: ')) return
     try {
       const data = JSON.parse(line.slice(6))
+      // ── 诊断：追踪 tool_call 和 sandbox_output 的处理 ──
+      if (data.tool_call) console.log('[SSE诊断] tool_call 到达', data.tool_call.name)
+      if (data.sandbox_output) console.log('[SSE诊断] sandbox_output 到达', data.sandbox_output.tool_name, data.sandbox_output.text?.slice(0, 50))
       if (data.thinking)        onThinking?.(data.thinking)
       if (data.clarification)  onClarification?.(data.clarification)
       if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)

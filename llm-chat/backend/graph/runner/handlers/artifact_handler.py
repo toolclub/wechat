@@ -22,11 +22,15 @@ class FileArtifactHandler(EventHandler):
         data = event.get("data", {})
         if not isinstance(data, dict):
             return
-        yield sse({
-            "file_artifact": {
-                "name": data.get("name", ""),
-                "path": data.get("path", ""),
-                "content": data.get("content", ""),
-                "language": data.get("language", "text"),
-            }
-        })
+        # 透传所有字段（PPT 需要 slides_html/binary/size/slide_count 等）
+        artifact: dict = {
+            "name": data.get("name", ""),
+            "path": data.get("path", ""),
+            "content": data.get("content", ""),
+            "language": data.get("language", "text"),
+        }
+        # 可选字段：有则透传
+        for key in ("binary", "size", "slide_count", "theme", "slides_html", "message_id"):
+            if key in data:
+                artifact[key] = data[key]
+        yield sse({"file_artifact": artifact})

@@ -59,6 +59,12 @@ _MIGRATIONS = [
     )""",
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv ON event_log(conv_id)",
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv_id ON event_log(conv_id, id)",
+
+    # ── artifacts 补字段（message_id 关联 + size 元数据） ──
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS size INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS slide_count INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS ix_artifacts_message ON artifacts(message_id)",
 ]
 
 
