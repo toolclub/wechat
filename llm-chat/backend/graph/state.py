@@ -62,6 +62,7 @@ class GraphState(TypedDict):
 
     # ── 澄清问询（模型无法直接回答时，向用户确认意图） ───────────────────────
     needs_clarification: bool   # True 表示本轮需要用户澄清，跳过 DB 保存
+    clarification_data: dict    # 澄清数据（question + items），由 call_model_node 写入
 
     # ── DB 预写行 ID（StreamSession 在流开始时写入 DB，save_response UPDATE 而非 INSERT）──
     pre_user_db_id: int          # 预写的 user 消息 DB ID

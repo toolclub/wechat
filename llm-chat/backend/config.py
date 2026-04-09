@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     sandbox_enabled: bool = False
     # JSON 数组：[{"id":"w1","host":"192.168.1.100","port":22,"user":"sandbox","key_file":"~/.ssh/id_rsa"}]
     sandbox_workers: list[dict[str, Any]] = []
-    sandbox_timeout: int = 30        # 单次执行超时（秒）
+    sandbox_timeout: int = 120       # 单次执行超时（秒），mvn/gradle 构建需要 60~120s
     sandbox_cleanup_hours: int = 12  # session 目录过期清理（小时）
 
     # ── 服务端口 ──────────────────────────────────────────────────────────────

@@ -65,6 +65,18 @@ class MessageModel(Base):
         comment="消息在对话中的顺序号（严格递增）",
     )
     images = Column(JSONB, nullable=False, default=list, comment="用户上传的图片（base64）")
+    tool_summary = Column(
+        Text, nullable=False, default="",
+        comment="工具调用记录摘要（独立字段，不混入 content）",
+    )
+    step_summary = Column(
+        Text, nullable=False, default="",
+        comment="多步执行过程摘要（独立字段，不混入 content）",
+    )
+    clarification_data = Column(
+        JSONB, nullable=False, default=dict,
+        comment="澄清问询数据（question + items），非空表示本轮需要用户澄清",
+    )
     created_at = Column(Float, nullable=False)
 
     __table_args__ = (

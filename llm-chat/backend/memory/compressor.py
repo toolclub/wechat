@@ -27,6 +27,9 @@ _TOOL_SUMMARY_MARKER = "\n\n【工具调用记录】"
 
 
 def _strip_tool_summary(content: str) -> str:
+    # COMPAT: 兼容旧数据 — 旧消息的工具调用记录可能仍嵌入在 content 中。
+    # 新消息已将 tool_summary 存入独立字段，此函数仅处理迁移前的历史数据。
+    # 当所有旧消息完成压缩后可移除此函数。
     """将工具调用记录段落替换为 [old tools call] 占位符。"""
     idx = content.find(_TOOL_SUMMARY_MARKER)
     if idx >= 0:
@@ -54,9 +57,17 @@ async def maybe_compress(conv_id: str) -> bool:
         from rag.ingestor import batch_store_pairs
         await batch_store_pairs(conv_id, to_summarise, conv.mid_term_cursor)
 
-    # 构建摘要提示（工具调用记录用占位符，避免摘要模型处理大量噪音）
+    # 构建摘要提示（工具调用记录不混入，避免摘要模型处理大量噪音）
+    def _content_for_summary(m: "Message") -> str:
+        """获取用于摘要的消息内容：新数据直接用 content，旧数据兼容 _strip_tool_summary。"""
+        if m.tool_summary:
+            # 新数据：tool_summary 已在独立字段，content 是纯文本
+            return m.content
+        # COMPAT: 旧数据可能在 content 中嵌入了工具调用记录
+        return _strip_tool_summary(m.content)
+
     history_text = "\n".join(
-        f"{'用户' if m.role == 'user' else 'AI'}: {_strip_tool_summary(m.content)}"
+        f"{'用户' if m.role == 'user' else 'AI'}: {_content_for_summary(m)}"
         for m in to_summarise
     )
     existing = conv.mid_term_summary
@@ -79,12 +90,20 @@ async def maybe_compress(conv_id: str) -> bool:
     conv.mid_term_cursor = new_cursor
     await memory_store.save(conv)
 
-    # 将已压缩消息中的工具调用段落更新为占位符（减少后续上下文窗口噪音）
+    # 将已压缩消息中的工具调用记录清除（减少后续上下文窗口噪音）
     for msg in to_summarise:
-        if msg.role == "assistant" and _TOOL_SUMMARY_MARKER in msg.content:
-            new_content = _strip_tool_summary(msg.content)
-            msg.content = new_content
-            await memory_store.update_message_content(msg.id, new_content)
+        if msg.role == "assistant":
+            # 新数据：清空独立字段
+            had_summaries = bool(msg.tool_summary or msg.step_summary)
+            if had_summaries:
+                msg.tool_summary = ""
+                msg.step_summary = ""
+                await memory_store.clear_message_summaries(msg.id)
+            # COMPAT: 旧数据可能在 content 中嵌入了工具调用记录
+            if _TOOL_SUMMARY_MARKER in msg.content:
+                new_content = _strip_tool_summary(msg.content)
+                msg.content = new_content
+                await memory_store.update_message_content(msg.id, new_content)
 
     logger.info(
         "压缩完成 conv=%s 摘要了%d条消息，窗口=%d，摘要长度=%d",

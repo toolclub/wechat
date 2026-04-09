@@ -28,7 +28,9 @@ from memory import store as memory_store
 
 logger = logging.getLogger("graph.nodes.save_response")
 
-# 工具调用残留文本标识符（MiniMax 等模型特有）
+# COMPAT: 工具调用残留文本标识符（MiniMax 等模型在流式模式下可能输出）。
+# 流式层（llm_handlers.py）已在 token 级别拦截，此处作为存储前的最终兜底清理。
+# 当 MiniMax 等模型修复此行为后可移除。
 _TOOL_CALL_ARTIFACTS = ("[TOOL_CALL]", "minimax:tool_call", "<tool_call>", "[/TOOL_CALL]")
 
 
@@ -83,13 +85,17 @@ class SaveResponseNode(BaseNode):
         # 提前到澄清检测之前，确保澄清时也能保存图片上下文到历史
         user_msg_to_save = await self._build_user_msg_for_storage(state)
 
-        # ── 澄清检测 ──────────────
-        clar_data = None
-        for candidate in (full_response, raw_response):
-            if candidate and self._is_clarification_request(candidate):
-                clar_data = self._extract_clarification_data(candidate)
-                if clar_data:
-                    break
+        # ── 澄清检测 ──────────────────────────────────────────────────────────
+        # 优先：DB-first 路径 — call_model_node 预检直接设置 state 字段
+        clar_data = state.get("clarification_data") or None
+        # COMPAT: 模型通过 system prompt 主动输出 [NEED_CLARIFICATION] 标记时，
+        # 需要从文本中解析。待 system prompt 改为工具调用方式后可移除。
+        if not clar_data:
+            for candidate in (full_response, raw_response):
+                if candidate and self._is_clarification_response(candidate):
+                    clar_data = self._extract_clarification_from_text(candidate)
+                    if clar_data:
+                        break
 
         # 获取 StreamSession 预写的 DB 行 ID
         pre_user_id = state.get("pre_user_db_id", 0)
@@ -115,18 +121,15 @@ class SaveResponseNode(BaseNode):
         )
 
         # ── 写入 AI 回复（UPDATE 预写行，追加到内存缓存） ──
+        # DB-first：tool_summary 和 step_summary 存入独立字段，不混入 content
         if full_response:
-            tool_summary    = self._build_tool_summary(state)
-            step_context    = self._build_step_context(state)
-            parts           = [full_response]
-            if step_context:
-                parts.append(step_context)
-            if tool_summary:
-                parts.append(tool_summary)
-            content_to_save = "\n\n".join(parts)
+            tool_summary = self._build_tool_summary(state)
+            step_summary = self._build_step_context(state)
             await memory_store.add_message(
-                conv_id, "assistant", self._sanitize_for_db(content_to_save),
+                conv_id, "assistant", self._sanitize_for_db(full_response),
                 update_db_id=pre_asst_id,
+                tool_summary=self._sanitize_for_db(tool_summary),
+                step_summary=self._sanitize_for_db(step_summary),
             )
 
         # ── 保存工具调用事件 ─────────────────────────────────────────────────
@@ -284,6 +287,9 @@ class SaveResponseNode(BaseNode):
 
     @staticmethod
     def _strip_think_blocks(text: str) -> str:
+        # COMPAT: legacy think block parsing — 用正则移除 <think> 标签。
+        # 待模型 API 支持 enable_thinking 后，改用结构化 reasoning_content 字段，
+        # 届时可移除此方法。
         """移除 <think>...</think> 推理块（qwen3 等模型的思考内容不应存入上下文）。"""
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
 
@@ -354,118 +360,48 @@ class SaveResponseNode(BaseNode):
             return "【工具调用记录】\n" + "\n".join(summaries[:20])  # 最多 20 条
         return ""
 
-    # ── 澄清检测与提取 ───────────────────────────────────────────────────────
+    # ── COMPAT: 模型输出的澄清标记解析（待 system prompt 改用工具调用后移除）────
 
     _CLAR_START = "[NEED_CLARIFICATION]"
     _CLAR_END   = "[/NEED_CLARIFICATION]"
 
     @classmethod
-    def _is_clarification_request(cls, text: str) -> bool:
-        """检测模型回复中是否含有澄清开始标记（不强求闭合标签）。"""
+    def _is_clarification_response(cls, text: str) -> bool:
+        # COMPAT: 检测模型输出中的澄清标记
         return cls._CLAR_START in text
 
     @classmethod
-    def _extract_clarification_data(cls, text: str) -> dict | None:
+    def _extract_clarification_from_text(cls, text: str) -> dict | None:
         """
-        从标记中提取并解析 JSON，容错处理以下情况：
-          1. 有完整标记：[NEED_CLARIFICATION]{...}[/NEED_CLARIFICATION]
-          2. 只有开始标记：[NEED_CLARIFICATION]{...}
-          3. JSON 内嵌在 think 块中，已由调用方传入原始文本
-          4. 模型输出了多余文本，JSON 混在其中
-          5. 模型将 items 写成多个独立 JSON 对象（items 数组提前闭合）
-
-        返回解析后的 dict（含 question + items），否则返回 None。
+        COMPAT: 从模型输出的 [NEED_CLARIFICATION]...[/NEED_CLARIFICATION] 标记中提取 JSON。
+        容错：支持无闭合标签、markdown 包裹、JSON 内嵌等情况。
         """
         start = text.find(cls._CLAR_START)
         if start == -1:
             return None
 
         after_start = text[start + len(cls._CLAR_START):]
-
-        # 优先：有闭合标签，取中间内容
         end_in_after = after_start.find(cls._CLAR_END)
-        raw_candidate = after_start[:end_in_after].strip() if end_in_after != -1 else after_start.strip()
+        raw = after_start[:end_in_after].strip() if end_in_after != -1 else after_start.strip()
 
         # 尝试直接解析
-        data = cls._try_parse_json(raw_candidate)
+        data = cls._try_parse_clar_json(raw)
         if data:
             return data
 
-        # 容错 1：从候选文本中用正则提取贪婪匹配的完整 JSON 对象
-        json_match = re.search(r'\{[\s\S]*\}', raw_candidate)
+        # 容错：用正则提取完整 JSON 对象
+        json_match = re.search(r'\{[\s\S]*\}', raw)
         if json_match:
-            data = cls._try_parse_json(json_match.group())
+            data = cls._try_parse_clar_json(json_match.group())
             if data:
                 return data
 
-        # 容错 2：模型把 items 写成多个独立顶层对象
-        # 例：{"question":"...", "items":[{item1}]},{item2},{item3}
-        data = cls._try_reassemble_fragmented_items(raw_candidate)
-        if data:
-            return data
-
-        logger.warning(
-            "澄清 JSON 解析失败，降级为普通回复 | raw=%.200s", raw_candidate
-        )
+        logger.warning("COMPAT 澄清 JSON 解析失败 | raw=%.200s", raw)
         return None
 
     @staticmethod
-    def _try_reassemble_fragmented_items(raw: str) -> dict | None:
-        """
-        处理模型把 items 数组元素写成独立顶层对象的情况：
-          {"question":"...", "items":[{item1}]},{item2},{item3}
-        → {"question":"...", "items":[{item1},{item2},{item3}]}
-
-        策略：顺序扫描 raw 中所有合法 JSON 对象；
-              第一个含 question 的对象为主体，其余含 id 的对象追加进 items。
-        """
-        objects: list[dict] = []
-        i = 0
-        while i < len(raw):
-            if raw[i] != '{':
-                i += 1
-                continue
-            depth, j = 0, i
-            while j < len(raw):
-                if raw[j] == '{':
-                    depth += 1
-                elif raw[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            obj = json.loads(raw[i:j + 1])
-                            if isinstance(obj, dict):
-                                objects.append(obj)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                        i = j + 1
-                        break
-                j += 1
-            else:
-                break
-
-        if not objects:
-            return None
-
-        main = objects[0]
-        if not isinstance(main, dict) or "question" not in main:
-            return None
-
-        if not isinstance(main.get("items"), list):
-            main["items"] = []
-
-        # 额外的 item 对象追加进 items 数组
-        for extra in objects[1:]:
-            if isinstance(extra, dict) and "id" in extra:
-                main["items"].append(extra)
-
-        if main.get("question") and isinstance(main.get("items"), list) and main["items"]:
-            return main
-        return None
-
-    @staticmethod
-    def _try_parse_json(raw: str) -> dict | None:
-        """尝试解析 JSON，校验必须含 question + items 列表。"""
+    def _try_parse_clar_json(raw: str) -> dict | None:
+        """尝试解析澄清 JSON，需含 question + items。"""
         try:
             data = json.loads(raw)
             if isinstance(data, dict) and "question" in data and isinstance(data.get("items"), list):

@@ -375,10 +375,17 @@ class PlannerNode(BaseNode):
 
         _THINK_PREFIX = "\x00THINK\x00"
         content = ""
+
+        # 尝试 JSON mode（模型直接返回纯 JSON，无需文本解析）
+        # 部分模型不支持 response_format，降级到普通流式调用
+        json_mode_extra = {"response_format": {"type": "json_object"}}
+
         for attempt in range(3):
             content_parts: list[str] = []
+            use_json_mode = attempt == 0  # 首次尝试 JSON mode，失败后降级
             try:
-                async for delta in llm.astream(messages, temperature=0.1):
+                extra = json_mode_extra if use_json_mode else None
+                async for delta in llm.astream(messages, temperature=0.1, extra_body=extra):
                     if delta.startswith(_THINK_PREFIX):
                         thinking_text = delta[len(_THINK_PREFIX):]
                         await adispatch_custom_event(
@@ -391,14 +398,19 @@ class PlannerNode(BaseNode):
                         )
             except Exception as exc:
                 logger.warning(
-                    "Planner 流式调用异常 [第%d/3次] | error=%s", attempt + 1, exc,
+                    "Planner 流式调用异常 [第%d/3次]%s | error=%s",
+                    attempt + 1,
+                    "（JSON mode）" if use_json_mode else "",
+                    exc,
                 )
                 continue
             raw = "".join(content_parts)
             content = raw.strip()
             logger.info(
-                "Planner 原始响应 [第%d次] | model=%s | len=%d | raw='%.200s'",
-                attempt + 1, model, len(raw), raw,
+                "Planner 原始响应 [第%d次]%s | model=%s | len=%d | raw='%.200s'",
+                attempt + 1,
+                "（JSON mode）" if use_json_mode else "",
+                model, len(raw), raw,
             )
             if content:
                 break
@@ -412,6 +424,10 @@ class PlannerNode(BaseNode):
         try:
             if not content:
                 raise ValueError("三次重试后仍返回空内容")
+
+            # COMPAT: 不支持 JSON mode 的模型可能返回 markdown 包裹的 JSON 或带说明文字。
+            # JSON mode 返回纯 JSON 时这些操作是空操作。
+            # 当所有模型统一支持 response_format: json_object 后可移除。
 
             # 去除 markdown code block
             if "```" in content:

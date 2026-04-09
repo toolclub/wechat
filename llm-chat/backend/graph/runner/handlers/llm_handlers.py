@@ -24,8 +24,10 @@ _LLM_NODES = frozenset({"call_model", "call_model_after_tool"})
 # 需要转发流式 thinking/token 事件的节点集合（所有会发出 llm_token/llm_thinking 的节点）
 _STREAMING_NODES = frozenset({"call_model", "call_model_after_tool", "planner", "reflector", "route_model"})
 
-# MiniMax 等模型在流式模式下可能输出的工具调用文本残留（需过滤）
-_TOOL_CALL_ARTIFACTS = ("<minimax:tool_call>", "[TOOL_CALL]")
+# COMPAT: MiniMax 等模型在流式模式下可能在 content 中输出工具调用文本残留。
+# 在流式层直接丢弃这些 token，避免污染前端显示和 DB 存储。
+# 当 MiniMax 等模型修复此行为后可移除。
+_TOOL_CALL_ARTIFACTS = ("<minimax:tool_call>", "[TOOL_CALL]", "<tool_call>", "[/TOOL_CALL]", "minimax:tool_call")
 
 
 class LLMStartHandler(EventHandler):
@@ -84,7 +86,11 @@ class LLMStreamHandler(EventHandler):
         if not content:
             return
 
-        # ── 分离 <think>...</think> 推理块（可能跨 chunk） ───────────────────
+        # COMPAT: legacy think block parsing — 用状态机分离 <think> 标签。
+        # 支持 <think> 的模型（qwen3 等）在文本中输出推理块，需要跨 chunk 维持状态。
+        # 待模型 API 统一支持 enable_thinking / reasoning_content 结构化字段后，
+        # 可移除此状态机，直接使用 llm_thinking 事件通道。
+        # 不支持 <think> 的模型此逻辑空转，无副作用。
         think_parts:  list[str] = []
         output_parts: list[str] = []
         pos = 0
@@ -172,7 +178,7 @@ class CallModelEndHandler(EventHandler):
         if not full_response:
             return
 
-        # 分离 think 块后推送
+        # COMPAT: legacy think block parsing — 非流式补发时分离 <think> 标签
         think_match = re.search(r"<think>([\s\S]*?)</think>", full_response)
         if think_match:
             yield sse({"thinking": think_match.group(1).strip()})
@@ -209,7 +215,7 @@ class CallModelAfterToolEndHandler(EventHandler):
         if not full_response:
             return
 
-        # 分离 think 块后推送
+        # COMPAT: legacy think block parsing — 非流式补发时分离 <think> 标签
         think_match = re.search(r"<think>([\s\S]*?)</think>", full_response)
         if think_match:
             yield sse({"thinking": think_match.group(1).strip()})

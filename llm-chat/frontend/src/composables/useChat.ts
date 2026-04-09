@@ -127,13 +127,15 @@ export function useChat() {
       // ── 从 DB 恢复所有消息（含 thinking、tool_executions、stream 状态） ──
       s.messages = (fullState.messages || []).map((m: any) => {
         // 完成的消息用 content，未完成的用 stream_buffer（正在生成中的中间状态）
+        // DB-first：tool_summary 和 step_summary 已存入独立字段，content 是纯文本。
+        // COMPAT：旧消息 content 中可能嵌有标记，清理后显示。
         const rawContent = m.role === 'assistant'
           ? (m.stream_completed !== false ? m.content : (m.content || m.stream_buffer || ''))
           : m.content
         const cleanContent = m.role === 'assistant'
           ? (rawContent || '')
-              .replace(/\n\n【工具调用记录】[\s\S]*$/, '')
-              .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')
+              .replace(/\n\n【工具调用记录】[\s\S]*$/, '')  // COMPAT: 旧数据兼容
+              .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')  // COMPAT: 旧数据兼容
           : rawContent
 
         const msg: Message = {
@@ -440,13 +442,14 @@ export function useChat() {
       await api.sendMessage(
         convId, text, '', images, agentMode,
         activeForcePlan as any,
-        // onChunk — 检测到 [NEED_CLARIFICATION 前的文字自动转为 thinking
+        // onChunk — 预检澄清通过 onClarification SSE 事件处理。
+        // COMPAT: 模型主动输出 [NEED_CLARIFICATION] 时，标记前的文本转入 thinking。
         (chunk) => {
           const step = activeStep()
           const target = step || msg()
           target.content = (target.content || '') + chunk
 
-          // 如果内容中出现 [NEED_CLARIFICATION，把之前的推理文字转入 thinking
+          // COMPAT: 模型主动澄清 — 标记前的推理文字转入 thinking
           const tag = '[NEED_CLARIFICATION]'
           const idx = target.content.indexOf(tag)
           if (idx >= 0) {
@@ -455,7 +458,6 @@ export function useChat() {
               if (step) step.thinking = (step.thinking || '') + reasoning
               else msg().thinking = (msg().thinking || '') + reasoning
             }
-            // 保留 tag 之后的内容（会被 onClarification 最终清空）
             target.content = target.content.slice(idx)
           }
         },
@@ -599,15 +601,15 @@ export function useChat() {
           if (step) step.thinking += thinking
           else msg().thinking = (msg().thinking ?? '') + thinking
         },
-        // onClarification
+        // onClarification — 预检澄清从 SSE 事件直接获取。
+        // COMPAT: 模型主动澄清时 content 可能含 [NEED_CLARIFICATION] 残留，一并清理。
         (data: ClarificationData) => {
-          // 将澄清前的推理文字转入 thinking（折叠展示），清空 content 显示卡片
           const prev = s.messages[assistantIdx]
-          const reasoningText = (prev.content || '').replace(/\[NEED_CLARIFICATION\][\s\S]*/i, '').trim()
+          const residual = (prev.content || '').replace(/\[NEED_CLARIFICATION\][\s\S]*/i, '').trim()
           s.messages[assistantIdx] = {
             ...prev,
             content: '',
-            thinking: (prev.thinking || '') + (reasoningText ? reasoningText : ''),
+            thinking: (prev.thinking || '') + (residual || ''),
             clarification: data,
           }
           // 等待用户交互，结束 loading 状态

@@ -75,6 +75,10 @@ def build_messages(
             elif msg.role == "assistant":
                 # 截断过长的 AI 历史回复（多步执行结果可能很长）
                 content = _truncate_assistant_history(msg.content)
+                # DB-first：tool_summary 在独立字段，按需附加到 LLM 上下文
+                # 压缩后 tool_summary 已清空，不会重复注入
+                if msg.tool_summary:
+                    content += "\n\n[工具调用摘要] " + msg.tool_summary[:300]
                 messages.append(AIMessage(content=content))
 
     return messages
@@ -96,15 +100,17 @@ def _select_history_window(messages: list[Message], forget_mode: bool) -> list[M
 
 def _truncate_assistant_history(content: str, max_len: int = 800) -> str:
     """
-    截断历史 AI 回复中过长的多步执行摘要部分。
+    截断历史 AI 回复中过长的内容。
 
-    多步任务保存时会附带"执行过程摘要"，这在历史上下文中会占大量 token。
-    保留开头（核心答案）和标记后的部分，中间过长时截断。
+    新数据：step_summary 已在独立字段，content 是纯文本，直接截断。
+    旧数据（COMPAT）：可能在 content 中嵌入了"执行过程摘要"标记，截断时优先去除。
     """
     if len(content) <= max_len:
         return content
 
-    # 若含执行过程摘要，只保留核心答案部分
+    # COMPAT: 旧数据可能在 content 中嵌入了执行过程摘要标记
+    # 新数据不会包含此标记（已分离到 step_summary 独立字段）。
+    # 当所有旧消息完成压缩后可移除此兼容逻辑。
     summary_marker = "【执行过程摘要】"
     if summary_marker in content:
         idx = content.index(summary_marker)

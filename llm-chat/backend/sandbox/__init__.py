@@ -12,6 +12,6 @@
 配置：
   SANDBOX_ENABLED=true
   SANDBOX_WORKERS=[{"id":"w1","host":"192.168.1.100","port":22,"user":"sandbox","key_file":"~/.ssh/id_rsa"}]
-  SANDBOX_TIMEOUT=30
+  SANDBOX_TIMEOUT=120
   SANDBOX_CLEANUP_HOURS=12
 """

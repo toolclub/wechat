@@ -47,7 +47,7 @@ def should_continue(state: GraphState) -> str:
     return "save_response"
 
 
-_MAX_TOOL_CALLS_PER_STEP = 3   # 计划模式下每步最多调用工具次数（含 call_model 的首次调用）
+_MAX_TOOL_CALLS_PER_STEP = 6   # 计划模式下每步最多调用工具次数（构建+检查+启动+验证+清理 需 5~6 次）
 
 
 def should_continue_after_tool(state: GraphState) -> str:

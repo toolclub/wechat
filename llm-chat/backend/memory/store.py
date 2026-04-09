@@ -55,7 +55,11 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
 
         # 同时刷新本 worker 的内存缓存
         messages = [
-            Message(role=mr.role, content=mr.content, timestamp=mr.created_at, id=mr.id)
+            Message(
+                role=mr.role, content=mr.content, timestamp=mr.created_at, id=mr.id,
+                tool_summary=getattr(mr, "tool_summary", "") or "",
+                step_summary=getattr(mr, "step_summary", "") or "",
+            )
             for mr in msg_rows
         ]
         conv = Conversation(
@@ -80,6 +84,9 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
                     "stream_completed": getattr(mr, "stream_completed", True),
                     "stream_buffer": getattr(mr, "stream_buffer", "") or "",
                     "images": getattr(mr, "images", []) or [],
+                    "tool_summary": getattr(mr, "tool_summary", "") or "",
+                    "step_summary": getattr(mr, "step_summary", "") or "",
+                    "clarification_data": getattr(mr, "clarification_data", {}) or {},
                     "timestamp": mr.created_at,
                 }
                 for mr in msg_rows
@@ -128,6 +135,8 @@ async def init() -> None:
                     content=mr.content,
                     timestamp=mr.created_at,
                     id=mr.id,
+                    tool_summary=getattr(mr, "tool_summary", "") or "",
+                    step_summary=getattr(mr, "step_summary", "") or "",
                 )
                 for mr in msg_rows
             ]
@@ -215,12 +224,18 @@ async def delete(conv_id: str) -> None:
         await session.commit()
 
 
-async def add_message(conv_id: str, role: str, content: str, update_db_id: int = 0) -> None:
+async def add_message(
+    conv_id: str, role: str, content: str, update_db_id: int = 0,
+    tool_summary: str = "", step_summary: str = "",
+) -> None:
     """
     追加一条消息：写入 DB + 更新缓存。
 
     update_db_id > 0 时：UPDATE 已有行（StreamSession 预写的消息），不 INSERT 新行。
     update_db_id = 0 时：INSERT 新行（传统行为）。
+
+    tool_summary / step_summary：工具调用记录和多步执行摘要，
+    存入独立 DB 字段，不混入 content。
     """
     conv = _store.get(conv_id)
     if not conv:
@@ -236,14 +251,27 @@ async def add_message(conv_id: str, role: str, content: str, update_db_id: int =
     async with AsyncSessionLocal() as session:
         if update_db_id > 0:
             # UPDATE 已有行（StreamSession 在流开始时预写了 DB 行）
+            values: dict = {
+                "content": content,
+                "stream_completed": True,
+                "stream_buffer": "",
+            }
+            if tool_summary:
+                values["tool_summary"] = tool_summary
+            if step_summary:
+                values["step_summary"] = step_summary
             await session.execute(
                 sa_update(MessageModel)
                 .where(MessageModel.id == update_db_id)
-                .values(content=content, stream_completed=True, stream_buffer="")
+                .values(**values)
             )
         else:
             # INSERT 新行
-            msg_row = MessageModel(conv_id=conv_id, role=role, content=content, created_at=now)
+            msg_row = MessageModel(
+                conv_id=conv_id, role=role, content=content,
+                tool_summary=tool_summary, step_summary=step_summary,
+                created_at=now,
+            )
             session.add(msg_row)
             await session.flush()
             msg_db_id = msg_row.id
@@ -256,22 +284,33 @@ async def add_message(conv_id: str, role: str, content: str, update_db_id: int =
         await session.commit()
 
     # 追加到内存缓存
-    msg = Message(role=role, content=content, timestamp=now, id=msg_db_id)
+    msg = Message(
+        role=role, content=content, timestamp=now, id=msg_db_id,
+        tool_summary=tool_summary, step_summary=step_summary,
+    )
     conv.messages.append(msg)
     conv.updated_at = now
     conv.title = new_title
 
 
 async def update_status(conv_id: str, status: str) -> None:
-    """更新对话状态（active / streaming / completed / error）。"""
+    """
+    更新对话状态，经过状态机校验。
+
+    非法转换只记录警告，不阻断主流程（避免因状态不一致导致对话卡死）。
+    """
+    from db.state_machine import ConversationStatus, validate_conv_transition
+
+    target = ConversationStatus(status)
     conv = _store.get(conv_id)
     if conv:
-        conv.status = status
+        validate_conv_transition(conv.status, target)
+        conv.status = target.value
     async with AsyncSessionLocal() as session:
         await session.execute(
             sa_update(ConversationModel)
             .where(ConversationModel.id == conv_id)
-            .values(status=status, updated_at=time.time())
+            .values(status=target.value, updated_at=time.time())
         )
         await session.commit()
 
@@ -380,6 +419,19 @@ async def finalize_message(
             if msg.id == msg_db_id:
                 msg.content = content
                 return
+
+
+async def clear_message_summaries(msg_id: int) -> None:
+    """清空消息的 tool_summary 和 step_summary（压缩后不再需要）。"""
+    if msg_id <= 0:
+        return
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            sa_update(MessageModel)
+            .where(MessageModel.id == msg_id)
+            .values(tool_summary="", step_summary="")
+        )
+        await session.commit()
 
 
 async def update_message_content(msg_id: int, new_content: str) -> None:

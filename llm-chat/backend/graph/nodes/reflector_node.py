@@ -77,8 +77,21 @@ class ReflectorNode(BaseNode):
 
         is_last = current_idx >= total - 1
 
-        # ── 快速路径 3：最后一步 + 有响应 → done ─────────────────────────────────
+        # ── 快速路径 3：最后一步 + 有响应 ──────────────────────────────────────────
+        # 检查最近工具执行是否失败：失败时 retry 而非 done，让模型有机会修复
         if is_last and full_response:
+            if step_iters < _MAX_STEP_ITERATIONS - 1 and await self._last_tool_failed(state):
+                logger.info(
+                    "reflector retry (last-step tool failed) | conv=%s | step=%d | iters=%d",
+                    state.get("conv_id", ""), current_idx + 1, step_iters,
+                )
+                updated_plan = self._mark_step(plan, current_idx, "running")
+                return {
+                    "reflector_decision": "retry",
+                    "reflection":         "最后一步工具执行失败，重试以修复",
+                    "plan":               updated_plan,
+                    "step_iterations":    step_iters + 1,
+                }
             return await self._make_done_result(state, plan, current_idx, full_response)
 
         # ── 快速路径 4：非最后步骤 + 有响应 + 首次执行 → continue（最常见路径）──
@@ -266,6 +279,21 @@ class ReflectorNode(BaseNode):
     # ══════════════════════════════════════════════════════════════════════════
     # 工具方法
     # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _last_tool_failed(state: GraphState) -> bool:
+        """从 tool_executions DB 查询最近一次工具调用是否失败。"""
+        conv_id = state.get("conv_id", "")
+        if not conv_id:
+            return False
+        try:
+            from db.tool_store import get_tool_executions_for_conv
+            tool_execs = await get_tool_executions_for_conv(conv_id)
+            if tool_execs:
+                return tool_execs[-1].get("status") == "error"
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _accumulate_step_results(state: GraphState, full_response: str) -> list[str]:

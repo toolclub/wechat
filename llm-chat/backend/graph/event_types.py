@@ -61,8 +61,10 @@ class PlannerNodeOutput(TypedDict, total=False):
     """planner 节点 return 的结构"""
     plan: list[PlanStep]
     plan_id: str
+    plan_goal: str
     current_step_index: int
     step_iterations: int
+    step_results: list[str]
 
 
 class ReflectorNodeOutput(TypedDict, total=False):

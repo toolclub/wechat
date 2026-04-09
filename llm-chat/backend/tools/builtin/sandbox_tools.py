@@ -140,7 +140,7 @@ async def execute_code(language: str, code: str) -> str:
     每个对话有独立的工作目录，可以读写文件、安装包。
     执行过程中输出会实时显示在终端中。
 
-    ⚠️ 沙箱有 30 秒执行超时限制，必须遵守以下规则：
+    ⚠️ 沙箱有 120 秒执行超时限制，必须遵守以下规则：
 
     【禁止前台启动任何服务或长时间进程】
     包括但不限于：uvicorn/flask/gunicorn/django、node/npm start/next dev、
@@ -198,7 +198,7 @@ async def run_shell(command: str) -> str:
     系统会自动检测服务类命令（uvicorn、flask、http.server 等），
     自动后台运行并验证服务状态。
 
-    ⚠️ 沙箱有 30 秒超时限制。对于可能长时间运行的命令，请：
+    ⚠️ 沙箱有 120 秒超时限制。对于可能长时间运行的命令，请：
     - 后台化：command > /tmp/output.log 2>&1 &
     - 然后用 tail -n 20 /tmp/output.log 查看结果
 

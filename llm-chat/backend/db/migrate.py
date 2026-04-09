@@ -60,6 +60,11 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv ON event_log(conv_id)",
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv_id ON event_log(conv_id, id)",
 
+    # ── messages 补字段（工具/步骤摘要分离 + 澄清数据） ──
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_summary TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS step_summary TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS clarification_data JSONB NOT NULL DEFAULT '{}'",
+
     # ── artifacts 补字段（message_id 关联 + size 元数据） ──
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS size INTEGER NOT NULL DEFAULT 0",

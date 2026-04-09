@@ -17,7 +17,6 @@ CallModelNode：主 LLM 推理节点
   - 返回最终回复  → reflector（有计划） or save_response（无计划）
 """
 import asyncio
-import json
 import logging
 import re
 
@@ -102,11 +101,12 @@ class CallModelNode(BaseNode):
                 "call_model 网页澄清预检命中，跳过 LLM | conv=%s | user_msg=%.60s",
                 conv_id, user_msg,
             )
-            clar_json = json.dumps(_WEBPAGE_CLARIFICATION, ensure_ascii=False)
-            fake_response = f"[NEED_CLARIFICATION]{clar_json}[/NEED_CLARIFICATION]"
+            # DB-first：直接设置 state 字段，不构造假 AIMessage 和魔法标记
             return {
-                "messages":     [AIMessage(content=fake_response)],
-                "full_response": fake_response,
+                "messages":            [],
+                "full_response":       "",
+                "needs_clarification": True,
+                "clarification_data":  _WEBPAGE_CLARIFICATION,
             }
 
         route       = state.get("route", "")

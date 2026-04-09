@@ -100,6 +100,11 @@ class StreamSession:
         self._pending_tool_exec_id: int = 0
         self._pending_tool_name: str = ""
         self._sandbox_output_buf: str = ""  # 累积当前工具的 sandbox 终端输出
+        self._pending_search_items: list[dict] = []  # 累积当前工具的搜索结果
+
+        # 消息终态化锁（防止 _periodic_flush 和 _finalize_message 竞态）
+        self._finalize_lock = asyncio.Lock()
+        self._finalized = False  # 终态标记，防止重复 finalize
 
         # 任务引用
         self._graph_task: asyncio.Task | None = None
@@ -309,7 +314,8 @@ class StreamSession:
             w.set()
 
         # 加入 DB 写入批次（ping 不写 DB）
-        if event_type != "ping" and sse_str:
+        from db.state_machine import SSEEventType
+        if event_type != SSEEventType.PING.value and sse_str:
             self._event_batch.append({
                 "conv_id": self.conv_id,
                 "message_id": self.assistant_message_id,
@@ -344,6 +350,7 @@ class StreamSession:
             self._tool_seq += 1
             self._pending_tool_name = tc.get("name", "")
             self._sandbox_output_buf = ""  # 重置终端输出缓冲
+            self._pending_search_items = []  # 重置搜索结果缓冲
             try:
                 from db.tool_store import create_tool_execution
                 self._pending_tool_exec_id = await create_tool_execution(
@@ -361,6 +368,15 @@ class StreamSession:
         if data.get("sandbox_output"):
             so = data["sandbox_output"]
             self._sandbox_output_buf += so.get("text", "")
+
+        # ── 搜索结果 → 累积到缓冲，tool_result 时写入 DB ──
+        if data.get("search_item"):
+            si = data["search_item"]
+            self._pending_search_items.append({
+                "url": si.get("url", ""),
+                "title": si.get("title", ""),
+                "status": si.get("status", "done"),
+            })
 
         # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
         if data.get("file_artifact"):
@@ -380,41 +396,46 @@ class StreamSession:
             except Exception as exc:
                 logger.warning("artifact 兜底保存失败: %s", exc)
 
-        # ── 工具调用结束 → 标记完成，写入累积的终端输出 ──
+        # ── 工具调用结束 → 标记完成，写入累积的终端输出和搜索结果 ──
         if data.get("tool_result"):
             tr = data["tool_result"]
             if self._pending_tool_exec_id:
                 # 优先用累积的 sandbox 终端输出（和推理过程一致），
                 # 没有的话 fallback 到 tool_result 的 output 字段
                 output = self._sandbox_output_buf or tr.get("output", "")
+                # DB-first：从 tool_result 事件读取结构化 status 字段
+                # SandboxFormatter 根据 exit_code 设置 status="error"/"done"
+                status = tr.get("status", "done")
                 try:
                     from db.tool_store import complete_tool_execution
                     await complete_tool_execution(
                         self._pending_tool_exec_id,
                         output=output[:20000],  # 终端输出可能较长
-                        status="done",
+                        status=status,
+                        search_items=self._pending_search_items or None,
                     )
                 except Exception as exc:
                     logger.warning("tool_execution 完成失败: %s", exc)
                 self._pending_tool_exec_id = 0
                 self._sandbox_output_buf = ""
+                self._pending_search_items = []
 
     @staticmethod
     def _detect_event_type(sse_str: str) -> str:
-        """从 SSE 字符串推断事件类型。"""
+        """
+        从 SSE 字符串推断事件类型。
+
+        使用 SSEEventType 注册表（单一真相源），按优先级匹配，
+        控制事件 > 工具事件 > 内容事件，避免多 key 共存时误判。
+        """
         if not sse_str.startswith("data: "):
             return "unknown"
         try:
             data = json.loads(sse_str[6:].strip())
         except Exception:
             return "unknown"
-        for key in ("content", "thinking", "tool_call", "tool_call_start", "tool_result",
-                     "search_item", "sandbox_output", "file_artifact", "plan_generated",
-                     "status", "route", "reflection", "clarification",
-                     "done", "stopped", "error", "resume_context"):
-            if key in data:
-                return key
-        return "unknown"
+        from db.state_machine import detect_sse_event_type
+        return detect_sse_event_type(data).value
 
     async def _periodic_flush(self) -> None:
         """每 500ms 刷新累积数据到 DB。"""
@@ -427,7 +448,7 @@ class StreamSession:
 
     async def _flush_to_db(self) -> None:
         """将累积的事件批量写入 event_log，并更新 messages 的 thinking/buffer。"""
-        # 批量写入 event_log
+        # event_log 始终写入（包括终态化后的 done/stopped 事件），不受 _finalized 限制
         if self._event_batch:
             batch = self._event_batch[:]
             self._event_batch.clear()
@@ -437,38 +458,49 @@ class StreamSession:
             except Exception as exc:
                 logger.warning("event_log 批量写入失败: %s", exc)
 
-        # 更新 messages 的 thinking 和 stream_buffer
-        if (self._thinking_buf or self._content_buf) and self.assistant_db_id:
+        # messages 表更新：终态化后跳过（防止覆盖最终内容）
+        async with self._finalize_lock:
+            if self._finalized:
+                return
+
+            if (self._thinking_buf or self._content_buf) and self.assistant_db_id:
+                try:
+                    from memory import store as memory_store
+                    await memory_store.update_message_streaming(
+                        self.assistant_db_id,
+                        thinking=self._thinking_buf if self._thinking_buf else None,
+                        stream_buffer=self._content_buf if self._content_buf else None,
+                    )
+                except Exception as exc:
+                    logger.warning("消息流式更新失败: %s", exc)
+
+    async def _finalize_message(self) -> None:
+        """消息生成完成：写入最终内容，标记终态，防止后续 flush 覆盖。"""
+        if not self.assistant_db_id:
+            return
+        async with self._finalize_lock:
+            if self._finalized:
+                return  # 幂等：已终态化则跳过
+            self._finalized = True
+
+            # save_response_node 已经通过 add_message 保存了最终内容到 messages 表
+            # 这里确保 stream_completed=True、thinking 字段、清空 stream_buffer
             try:
                 from memory import store as memory_store
                 await memory_store.update_message_streaming(
                     self.assistant_db_id,
-                    thinking=self._thinking_buf if self._thinking_buf else None,
-                    stream_buffer=self._content_buf if self._content_buf else None,
+                    thinking=self._thinking_buf or None,
+                    stream_buffer="",  # 显式清空
+                    stream_completed=True,
                 )
-            except Exception as exc:
-                logger.warning("消息流式更新失败: %s", exc)
-
-    async def _finalize_message(self) -> None:
-        """消息生成完成：写入最终内容。"""
-        if not self.assistant_db_id:
-            return
-        # save_response_node 已经通过 add_message 保存了最终内容到 messages 表
-        # 这里只需要确保 stream_completed=True、thinking 字段、清空 stream_buffer
-        try:
-            from memory import store as memory_store
-            await memory_store.update_message_streaming(
-                self.assistant_db_id,
-                thinking=self._thinking_buf or None,
-                stream_buffer="",  # 显式清空
-                stream_completed=True,
-            )
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     async def _save_partial(self) -> None:
         """保存部分响应（用户停止或异常时）。"""
         content = self.best_partial
+        # COMPAT: legacy think block parsing — 保存部分响应时移除 <think> 标签。
+        # 待模型 API 统一支持 reasoning_content 结构化字段后可移除。
         stripped = re.sub(r"<think>[\s\S]*?</think>", "", content) if content else ""
         stripped = re.sub(r"<think>[\s\S]*$", "", stripped).strip() if stripped else ""
         if not stripped:
@@ -561,7 +593,7 @@ class StreamSession:
             "route": "" if self.agent_mode else "chat",
             "tool_model": self.model, "answer_model": self.model,
             "cache_hit": False, "cache_similarity": 0.0,
-            "vision_description": "", "needs_clarification": False,
+            "vision_description": "", "needs_clarification": False, "clarification_data": {},
             "pre_user_db_id": self.user_db_id,
             "pre_assistant_db_id": self.assistant_db_id,
             "force_plan": self.force_plan, "plan": [], "plan_id": "",

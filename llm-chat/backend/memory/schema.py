@@ -11,6 +11,8 @@ class Message:
     content: str
     timestamp: float = field(default_factory=time.time)
     id: int = 0         # DB 自增主键（0 表示尚未持久化）
+    tool_summary: str = ""   # 工具调用记录摘要（独立字段，不混入 content）
+    step_summary: str = ""   # 多步执行过程摘要（独立字段，不混入 content）
 
 
 @dataclass

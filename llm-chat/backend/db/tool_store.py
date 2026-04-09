@@ -19,14 +19,16 @@ async def create_tool_execution(
     tool_input: dict,
     sequence_number: int = 0,
 ) -> int:
-    """创建工具调用记录（status=running），返回自增 ID。"""
+    """创建工具调用记录（status=RUNNING），返回自增 ID。"""
+    from db.state_machine import ToolExecutionStatus
+
     async with AsyncSessionLocal() as session:
         row = ToolExecutionModel(
             conv_id=conv_id,
             message_id=message_id,
             tool_name=tool_name,
             tool_input=tool_input,
-            status="running",
+            status=ToolExecutionStatus.RUNNING.value,
             sequence_number=sequence_number,
             created_at=time.time(),
         )
@@ -44,8 +46,18 @@ async def complete_tool_execution(
     status: str = "done",
     duration: float = 0,
 ) -> None:
-    """标记工具调用完成。"""
-    values = {"status": status, "tool_output": output, "duration": duration}
+    """
+    标记工具调用完成，经过状态机校验。
+
+    status 参数接受 ToolExecutionStatus 枚举值或字符串（向后兼容）。
+    """
+    from db.state_machine import ToolExecutionStatus, validate_tool_transition
+
+    target = ToolExecutionStatus(status)
+    # 工具从 RUNNING 出发，校验目标状态合法性
+    validate_tool_transition(ToolExecutionStatus.RUNNING, target)
+
+    values: dict = {"status": target.value, "tool_output": output, "duration": duration}
     if search_items is not None:
         values["search_items"] = search_items
     async with AsyncSessionLocal() as session:

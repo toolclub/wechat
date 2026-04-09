@@ -32,8 +32,6 @@ from llm.chat import get_chat_llm, get_vision_llm
 
 logger = logging.getLogger("graph.nodes.call_model_after_tool")
 
-# 每步最多保留最近消息条数（多步执行场景需要早期工具结果）
-_MAX_MESSAGES = 20
 
 
 class CallModelAfterToolNode(BaseNode):
@@ -73,11 +71,14 @@ class CallModelAfterToolNode(BaseNode):
         is_last = not plan or current_idx >= len(plan) - 1
 
         messages = list(state["messages"])
-        messages = messages[-_MAX_MESSAGES:]
+        # 不截断：历史窗口大小已由 retrieve_context_node 的 context_builder 控制，
+        # 当前轮的工具调用对（AIMessage+ToolMessage）必须保持完整，
+        # 否则截断会破坏 tool_call_id 配对，导致 MiniMax 2013 错误。
 
         # ── 计划模式：注入步骤边界指令 ──────────────────────────────────────
         if plan and current_idx < len(plan):
-            messages = self._inject_boundary(messages, plan, current_idx)
+            last_tool_failed = await self._check_last_tool_failed(state)
+            messages = self._inject_boundary(messages, plan, current_idx, last_tool_failed)
 
         # ── 工具绑定：始终绑定全部工具，让模型自主决定是否搜索/执行代码 ────
         use_tools = bool(self._tools)
@@ -107,6 +108,7 @@ class CallModelAfterToolNode(BaseNode):
         messages: list,
         plan: list,
         current_idx: int,
+        last_tool_failed: bool = False,
     ) -> list:
         """
         步骤边界处理。
@@ -135,15 +137,6 @@ class CallModelAfterToolNode(BaseNode):
         boundary = ""
         if prev_results:
             boundary += "\n\n" + "\n\n".join(prev_results)
-
-        # 检查上一次工具执行是否失败
-        last_tool_failed = False
-        for m in reversed(messages):
-            if type(m).__name__ == "ToolMessage":
-                content_str = str(getattr(m, "content", ""))
-                if any(kw in content_str for kw in ("exit_code=1", "执行失败", "Traceback", "Error", "error")):
-                    last_tool_failed = True
-                break
 
         boundary += (
             f"\n\n===当前执行步骤 {current_idx + 1}/{total}（最后一步）===\n"
@@ -214,6 +207,33 @@ class CallModelAfterToolNode(BaseNode):
             new_messages.append(ai_tool_msg)
         new_messages.extend(tool_msgs)
         return new_messages
+
+    @staticmethod
+    async def _check_last_tool_failed(state: GraphState) -> bool:
+        """
+        从 tool_executions 表查询最近一次工具调用的状态。
+
+        DB-first：通过 status='error' 判断失败，不依赖 ToolMessage 文本中的关键词匹配。
+        降级：DB 查询失败时回退到文本关键词匹配（COMPAT）。
+        """
+        conv_id = state.get("conv_id", "")
+        if not conv_id:
+            return False
+        try:
+            from db.tool_store import get_tool_executions_for_conv
+            tool_execs = await get_tool_executions_for_conv(conv_id)
+            if tool_execs:
+                last_exec = tool_execs[-1]
+                return last_exec.get("status") == "error"
+        except Exception:
+            pass
+        # COMPAT: DB 查询失败时降级到文本关键词匹配
+        messages = list(state.get("messages", []))
+        for m in reversed(messages):
+            if type(m).__name__ == "ToolMessage":
+                content_str = str(getattr(m, "content", ""))
+                return any(kw in content_str for kw in ("exit_code=1", "执行失败", "Traceback"))
+        return False
 
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
     _VISION_TIMEOUT = 300.0
