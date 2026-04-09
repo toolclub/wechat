@@ -120,44 +120,82 @@ class SandboxManager:
     # Worker 调度
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _get_worker_for_session(self, conv_id: str) -> tuple[SSHWorker, str]:
+    async def _get_worker_for_session(self, conv_id: str) -> tuple[SSHWorker, str]:
         """
-        会话亲和 + 故障转移 + 最少连接负载均衡。
+        会话亲和 + DB 持久化 + 故障转移 + 最少连接负载均衡。
 
-        1. 已分配且 Worker 健康 → 返回原 Worker（亲和性）
-        2. 已分配但 Worker 不健康 → 迁移到其他健康 Worker（故障转移）
-        3. 未分配 → 选活跃 session 最少的健康 Worker（负载均衡）
+        查找顺序：
+          1. 本地缓存 _sessions（热路径，无 IO）
+          2. DB conversations.sandbox_worker_id（跨 worker 恢复）
+          3. 负载均衡分配新 Worker
         """
-        # 亲和性：已有映射且 Worker 健康
+        session_dir = f"{SANDBOX_ROOT}/sess_{conv_id}"
+
+        # 1. 本地缓存命中 + Worker 健康
         if conv_id in self._sessions:
             worker_id, session_dir = self._sessions[conv_id]
             if worker_id in self._healthy:
                 return self._all_workers[worker_id], session_dir
-
-            # 故障转移：原 Worker 不可用，迁移到健康 Worker
-            logger.warning(
-                "Worker %s 不可用，session %s 故障转移", worker_id, conv_id,
-            )
+            logger.warning("Worker %s 不可用，session %s 故障转移", worker_id, conv_id)
             del self._sessions[conv_id]
 
+        # 2. 从 DB 恢复（跨 worker / 刷新后）
+        db_worker_id = await self._load_worker_id_from_db(conv_id)
+        if db_worker_id and db_worker_id in self._healthy:
+            self._sessions[conv_id] = (db_worker_id, session_dir)
+            logger.info("Session 从 DB 恢复 | conv=%s → worker=%s", conv_id, db_worker_id)
+            return self._all_workers[db_worker_id], session_dir
+
+        # 3. 负载均衡分配
         if not self._healthy:
             raise RuntimeError("无健康的 Sandbox Worker")
 
-        # 负载均衡：选 session 最少的健康 Worker
         session_counts: dict[str, int] = {wid: 0 for wid in self._healthy}
         for _, (wid, _) in self._sessions.items():
             if wid in session_counts:
                 session_counts[wid] += 1
 
         worker_id = min(session_counts, key=session_counts.get)  # type: ignore
-        session_dir = f"{SANDBOX_ROOT}/sess_{conv_id}"
         self._sessions[conv_id] = (worker_id, session_dir)
 
+        # 写 DB 持久化
+        await self._save_worker_id_to_db(conv_id, worker_id)
+
         logger.info(
-            "Session 分配 | conv=%s → worker=%s | 该 Worker 当前 sessions=%d",
+            "Session 分配 | conv=%s → worker=%s | sessions=%d",
             conv_id, worker_id, session_counts[worker_id] + 1,
         )
         return self._all_workers[worker_id], session_dir
+
+    @staticmethod
+    async def _load_worker_id_from_db(conv_id: str) -> str:
+        """从 DB 异步读取 sandbox_worker_id。"""
+        try:
+            from sqlalchemy import select
+            from db.database import AsyncSessionLocal
+            from db.models import ConversationModel
+            async with AsyncSessionLocal() as session:
+                row = await session.get(ConversationModel, conv_id)
+                return getattr(row, "sandbox_worker_id", "") if row else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    async def _save_worker_id_to_db(conv_id: str, worker_id: str) -> None:
+        """将 sandbox_worker_id 异步写入 DB。"""
+        try:
+            from sqlalchemy import update as sa_update
+            from db.database import AsyncSessionLocal
+            from db.models import ConversationModel
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    sa_update(ConversationModel)
+                    .where(ConversationModel.id == conv_id)
+                    .values(sandbox_worker_id=worker_id)
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning("sandbox_worker_id 写 DB 失败 | conv=%s | %s", conv_id, exc)
 
     # ══════════════════════════════════════════════════════════════════════════
     # 健康检查 + 自动恢复
@@ -233,7 +271,7 @@ class SandboxManager:
             )
 
         timeout = timeout or self._timeout
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         await worker.exec_command(f"mkdir -p {session_dir}")
 
         lang = language.lower().strip()
@@ -326,7 +364,7 @@ class SandboxManager:
             )
 
         timeout = timeout or self._timeout
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         await worker.exec_command(f"mkdir -p {session_dir}")
 
         import time as _time
@@ -391,7 +429,7 @@ class SandboxManager:
             )
 
         timeout = timeout or self._timeout
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         await worker.exec_command(f"mkdir -p {session_dir}")
 
         file_map = {
@@ -457,7 +495,7 @@ class SandboxManager:
             )
 
         timeout = timeout or self._timeout
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         await worker.exec_command(f"mkdir -p {session_dir}")
 
         result = await worker.exec_command(f"cd {session_dir} && {command}", timeout=timeout)
@@ -484,7 +522,7 @@ class SandboxManager:
                 cwd="", commands=[],
             )
 
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         await worker.exec_command(f"mkdir -p {session_dir}")
         full_path = f"{session_dir}/{path.lstrip('/')}"
         parent = "/".join(full_path.rsplit("/", 1)[:-1])
@@ -526,7 +564,7 @@ class SandboxManager:
                 cwd="", commands=[],
             )
 
-        worker, session_dir = self._get_worker_for_session(conv_id)
+        worker, session_dir = await self._get_worker_for_session(conv_id)
         full_path = f"{session_dir}/{path.lstrip('/')}"
         result = await worker.exec_command(f"cat {full_path}")
         commands = [{

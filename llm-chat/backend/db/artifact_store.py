@@ -35,6 +35,7 @@ _EXT_MAP = {
     "xml": "xml", "md": "markdown", "sql": "sql", "vue": "vue",
     "txt": "text", "csv": "text", "log": "text",
     "pptx": "pptx", "ppt": "pptx", "pdf": "pdf",
+    "tar": "archive", "gz": "archive", "zip": "archive", "tgz": "archive",
 }
 
 
@@ -120,7 +121,7 @@ async def get_artifact_meta_list(conv_id: str) -> list[dict]:
                 "language": r.language,
                 "size": r.size,
                 "slide_count": r.slide_count,
-                "binary": r.language in ("pptx", "pdf"),
+                "binary": r.language in ("pptx", "pdf", "archive"),
                 "created_at": r.created_at,
             }
             for r in rows
@@ -153,7 +154,7 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
             "slide_count": row.slide_count,
             "created_at": row.created_at,
         }
-        # PPT: 解包 JSON
+        # PPT：解包 JSON（slides_html + theme）
         if row.language == "pptx" and row.content.startswith("{"):
             try:
                 packed = _json.loads(row.content)
@@ -161,6 +162,15 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
                 item["slides_html"] = packed.get("slides_html", [])
                 item["slide_count"] = packed.get("slide_count", row.slide_count)
                 item["theme"] = packed.get("theme", "")
+                item["binary"] = True
+            except _json.JSONDecodeError:
+                pass
+        # Archive：解包 JSON（只有 binary_b64 + original_size）
+        elif row.language == "archive" and row.content.startswith("{"):
+            try:
+                packed = _json.loads(row.content)
+                item["content"] = packed.get("binary_b64", "")
+                item["size"] = packed.get("original_size", row.size)
                 item["binary"] = True
             except _json.JSONDecodeError:
                 pass

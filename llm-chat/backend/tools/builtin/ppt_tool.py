@@ -179,7 +179,7 @@ async def create_ppt(ppt_json: str) -> str:
 
     # ── 从沙箱读取 .pptx 并保存为 artifact ──
     try:
-        worker, session_dir = sandbox_manager._get_worker_for_session(conv_id)
+        worker, session_dir = await sandbox_manager._get_worker_for_session(conv_id)
         read_result = await worker.exec_command(
             f"base64 -w0 {session_dir}/{filename}", timeout=30,
         )
@@ -278,7 +278,7 @@ ul li::before{{content:'';position:absolute;left:0;top:16px;width:8px;height:8px
 
 async def _upload_binary_to_sandbox(manager, conv_id: str, filename: str, data: bytes) -> None:
     """将二进制数据上传到沙箱会话目录。"""
-    worker, session_dir = manager._get_worker_for_session(conv_id)
+    worker, session_dir = await manager._get_worker_for_session(conv_id)
     remote_path = f"{session_dir}/{filename}"
     b64 = base64.b64encode(data).decode("ascii")
     chunk_size = 50000

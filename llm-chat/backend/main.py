@@ -112,12 +112,12 @@ async def lifespan(app: FastAPI):
             if sandbox_manager.available:
                 # SSH 连接成功，动态注册沙箱工具
                 from tools import register_tool
-                from tools.builtin.sandbox_tools import execute_code, run_shell, sandbox_write, sandbox_read
+                from tools.builtin.sandbox_tools import execute_code, run_shell, sandbox_write, sandbox_read, sandbox_download
                 from tools.builtin.ppt_tool import create_ppt
-                for t in [execute_code, run_shell, sandbox_write, sandbox_read, create_ppt]:
+                for t in [execute_code, run_shell, sandbox_write, sandbox_read, sandbox_download, create_ppt]:
                     register_tool(t)
                 sandbox_ok = True
-                logger.info("沙箱工具已注册（5 个，含 PPT）")
+                logger.info("沙箱工具已注册（6 个，含 PPT + 下载）")
             else:
                 logger.warning("沙箱 Worker 全部连接失败，沙箱工具未注册（模型不可见）")
         except Exception as exc:
@@ -479,6 +479,63 @@ async def get_artifact_detail(artifact_id: int):
     if not data:
         return {"error": "产物不存在"}
     return data
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact(artifact_id: int):
+    """
+    下载文件产物（二进制流，浏览器直接触发下载）。
+
+    支持所有 artifact 类型：code/html 下载源码，pptx 下载二进制，archive 下载 tar.gz。
+    """
+    import base64
+    import json as _json
+    from urllib.parse import quote
+    from db.artifact_store import get_artifact_content
+    from fastapi.responses import Response
+
+    data = await get_artifact_content(artifact_id)
+    if not data:
+        return {"error": "产物不存在"}
+
+    name = data.get("name", "download")
+    content = data.get("content", "")
+    language = data.get("language", "text")
+
+    # 二进制类型（pptx/archive）：从 binary_b64 解码
+    if data.get("binary") or language in ("archive", "pptx", "pdf"):
+        binary_b64 = content
+        # 如果 content 是 JSON 包装的，提取 binary_b64
+        if content.startswith("{"):
+            try:
+                packed = _json.loads(content)
+                binary_b64 = packed.get("binary_b64", content)
+            except _json.JSONDecodeError:
+                pass
+        try:
+            raw_bytes = base64.b64decode(binary_b64)
+        except Exception:
+            return {"error": "文件解码失败"}
+
+        # MIME 类型映射
+        mime_map = {
+            "archive": "application/gzip",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "pdf": "application/pdf",
+        }
+        mime = mime_map.get(language, "application/octet-stream")
+        return Response(
+            content=raw_bytes,
+            media_type=mime,
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+        )
+
+    # 文本类型：直接返回内容
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+    )
 
 
 # ── 执行计划接口 ───────────────────────────────────────────────────────────────

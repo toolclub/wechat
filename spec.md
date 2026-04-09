@@ -77,6 +77,29 @@ CHAT_MODEL="claude-sonnet-4-20250514"
 | 新工具 | `tools/builtin/` @tool 函数 + `tools/__init__.py` 注册 |
 | 新图节点 | 继承 `BaseNode` + `graph/agent.py` 注册 + `edges.py` 路由 |
 
+### 新增产出文件的工具（重要）
+
+工具如果会产出用户可下载的文件（打包、导出、截图等），只需后端两步，前端零改动：
+
+```python
+# 步骤 1：保存到 artifacts 表
+await save_artifact(conv_id, name, path, content, language="archive", message_id=msg_id)
+
+# 步骤 2：发 SSE 事件，必须带 downloadable: True
+await adispatch_custom_event("file_artifact", {
+    "name": name,
+    "path": path,
+    "language": "archive",   # archive/pptx/pdf 等
+    "downloadable": True,    # ← 这个标记让前端自动显示下载卡片
+    "message_id": msg_id,
+})
+```
+
+前端自动处理：
+- `MessageItem.vue`：`downloadable` 产物不需要文件名匹配，直接通过流式过滤
+- `FileArtifactCard.vue`：自动显示下载按钮，走 `/api/artifacts/{id}/download`
+- **不要**从 tool output 文本中正则提取文件名（违反铁律 #1）
+
 ---
 
 ## COMPAT 兼容层（标记了移除条件）
@@ -93,6 +116,7 @@ CHAT_MODEL="claude-sonnet-4-20250514"
 
 ## 踩过的坑（已修复）
 
+- **含工具调用的响应被缓存**：缓存只存文本不含副作用（文件产物、沙箱状态），命中时跳过工具执行 → 产物丢失。已在 `_write_cache` 中检测 `tool_events` 非空时跳过缓存。
 - **消息截断导致 2013**：`messages[-20:]` 截掉 AIMessage 留下 ToolMessage。已删除截断。
 - **reflector 盲目 done**：最后一步工具失败但有 full_response 就判完成。已加 `_last_tool_failed()` 检查。
 - **await 在同步函数**：`_inject_boundary` 是 `def`，DB 查询必须提到 `async` 调用方。

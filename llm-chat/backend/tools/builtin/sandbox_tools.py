@@ -418,3 +418,123 @@ async def sandbox_read(path: str) -> str:
     logger.info("sandbox_read | conv=%s | path=%s", conv_id, path)
     result = await sandbox_manager.read_file(conv_id, path)
     return result.to_display()
+
+
+# 打包文件大小上限（50MB base64 ≈ 37MB 原始）
+_MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024
+
+
+@tool
+async def sandbox_download(path: str = ".") -> str:
+    """
+    将沙箱中的文件或目录打包供用户下载。
+
+    - 如果 path 是目录（或 "."），自动 tar.gz 打包整个目录
+    - 如果 path 是单个文件，直接提供下载
+    - 打包后前端会显示下载按钮，用户点击即可保存到本地
+
+    Args:
+        path: 文件或目录路径（相对于 session 目录），默认 "." 表示整个工作目录
+
+    Returns:
+        下载结果说明
+    """
+    import base64
+    import shlex
+    from langchain_core.callbacks.manager import adispatch_custom_event
+    from sandbox.manager import sandbox_manager
+    from sandbox.context import current_message_id
+    from db.artifact_store import save_artifact
+
+    conv_id = _get_conv_id()
+    msg_id = current_message_id.get() or ""
+    logger.info("sandbox_download | conv=%s | path=%s", conv_id, path)
+
+    # 安全：路径中不允许 .. 或绝对路径（防止逃逸）
+    sanitized = path.replace("..", "").lstrip("/")
+    if not sanitized or sanitized == ".":
+        sanitized = "."
+
+    worker, session_dir = await sandbox_manager._get_worker_for_session(conv_id)
+    target = f"{session_dir}/{sanitized}" if sanitized != "." else session_dir
+    q_target = shlex.quote(target)  # shell 转义，防命令注入
+
+    # 检查路径是文件还是目录
+    check = await worker.exec_command(f"test -d {q_target} && echo DIR || (test -f {q_target} && echo FILE || echo NONE)")
+    path_type = check.stdout.strip()
+
+    if path_type == "NONE":
+        return f"路径不存在: {path}"
+
+    if path_type == "DIR":
+        # 打包目录
+        archive_name = f"download_{conv_id[:8]}.tar.gz"
+        archive_path = f"/tmp/{archive_name}"
+        pack_result = await worker.exec_command(
+            f"tar -czf {shlex.quote(archive_path)} -C {q_target} . 2>&1 && stat -c%s {shlex.quote(archive_path)}",
+            timeout=60,
+        )
+        if pack_result.exit_code != 0:
+            return f"打包失败: {pack_result.stderr or pack_result.stdout}"
+
+        # 读取大小
+        size_str = pack_result.stdout.strip().split('\n')[-1]
+        try:
+            file_size = int(size_str)
+        except ValueError:
+            file_size = 0
+
+        if file_size > _MAX_DOWNLOAD_SIZE:
+            return f"打包文件过大（{file_size // 1024 // 1024}MB），超过 50MB 限制。请指定子目录或具体文件。"
+
+        # base64 读回
+        b64_result = await worker.exec_command(f"base64 -w0 {archive_path}", timeout=60)
+        content_b64 = b64_result.stdout.strip()
+        display_name = archive_name
+        language = "archive"
+    else:
+        # 单文件
+        size_result = await worker.exec_command(f"stat -c%s {q_target}")
+        try:
+            file_size = int(size_result.stdout.strip())
+        except ValueError:
+            file_size = 0
+
+        if file_size > _MAX_DOWNLOAD_SIZE:
+            return f"文件过大（{file_size // 1024 // 1024}MB），超过 50MB 限制。"
+
+        b64_result = await worker.exec_command(f"base64 -w0 {q_target}", timeout=60)
+        content_b64 = b64_result.stdout.strip()
+        display_name = path.rsplit("/", 1)[-1] if "/" in path else path
+        from db.artifact_store import detect_language
+        language = detect_language(display_name)
+
+    if not content_b64:
+        return "文件读取失败（内容为空）"
+
+    # 保存到 artifacts 表
+    import json
+    packed_content = json.dumps({
+        "binary_b64": content_b64,
+        "original_size": file_size,
+    }, ensure_ascii=False)
+
+    artifact = await save_artifact(
+        conv_id, display_name, path, packed_content,
+        language=language, message_id=msg_id, size=file_size,
+    )
+
+    # 通知前端显示下载卡片（带 id，前端下载按钮依赖它）
+    await adispatch_custom_event("file_artifact", {
+        "id": artifact.get("id", 0),
+        "name": display_name,
+        "path": path,
+        "language": language,
+        "size": file_size,
+        "binary": True,
+        "downloadable": True,
+        "message_id": msg_id,
+    })
+
+    size_display = f"{file_size / 1024:.1f}KB" if file_size < 1024 * 1024 else f"{file_size / 1024 / 1024:.1f}MB"
+    return f"文件已准备好下载: {display_name} ({size_display})。用户可在文件卡片中点击下载。"

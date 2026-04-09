@@ -35,6 +35,10 @@ class ConversationModel(Base):
         String(100), nullable=False, default="",
         comment="使用的模型名",
     )
+    sandbox_worker_id = Column(
+        String(50), nullable=False, default="",
+        comment="沙箱 Worker ID（持久化会话亲和性，跨 worker 恢复）",
+    )
     created_at = Column(Float, nullable=False)
     updated_at = Column(Float, nullable=False)
 

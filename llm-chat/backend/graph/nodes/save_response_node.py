@@ -173,6 +173,7 @@ class SaveResponseNode(BaseNode):
         不缓存的情形：
           - 已命中缓存（避免覆盖）
           - 含图片（语义随图片内容变化）
+          - 含工具调用（缓存只存文本，不含工具执行的副作用：文件产物、沙箱状态等）
           - 含工具调用残留文本（脏数据）
         """
         if not full_response:
@@ -180,6 +181,11 @@ class SaveResponseNode(BaseNode):
         if state.get("cache_hit"):
             return
         if state.get("images"):
+            return
+        # 含工具调用的响应不缓存：缓存命中时会跳过工具执行，
+        # 导致文件产物、沙箱文件等副作用丢失
+        tool_events = self._extract_tool_events(state)
+        if tool_events:
             return
 
         # 检测并清理工具调用残留文本

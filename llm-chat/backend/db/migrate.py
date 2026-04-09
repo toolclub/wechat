@@ -60,6 +60,9 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv ON event_log(conv_id)",
     "CREATE INDEX IF NOT EXISTS ix_eventlog_conv_id ON event_log(conv_id, id)",
 
+    # ── conversations 补字段（沙箱会话持久化） ──
+    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS sandbox_worker_id VARCHAR(50) NOT NULL DEFAULT ''",
+
     # ── messages 补字段（工具/步骤摘要分离 + 澄清数据） ──
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_summary TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS step_summary TEXT NOT NULL DEFAULT ''",

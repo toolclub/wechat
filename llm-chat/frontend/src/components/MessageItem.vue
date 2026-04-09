@@ -472,6 +472,7 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
             || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
           if (match) myFiles.add(match[1].trim())
         }
+        // sandbox_download 产出的打包文件通过 downloadable 标记直接放行，不在此处匹配
       }
     }
     if (props.message.steps?.length) {
@@ -479,11 +480,14 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
     }
     if (props.message.toolCalls?.length) collectNames(props.message.toolCalls)
 
+    // downloadable 产物（sandbox_download 产出的打包文件）不需要文件名匹配，直接通过
+    const downloadable = props.cognitive.artifacts.filter(a => (a as any).downloadable)
+
     if (myFiles.size > 0) {
       const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
-      if (matched.length > 0) return matched
+      return [...matched, ...downloadable.filter(a => !matched.includes(a))]
     }
-    // 没有工具调用匹配时（刚开始还没产生 toolCalls），不显示任何产物
+    if (downloadable.length > 0) return downloadable
     return []
   }
 
@@ -508,6 +512,11 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
         const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
           || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
         if (match) myFiles.add(match[1].trim())
+      }
+      // sandbox_download 产出的打包文件（archive）
+      if (tc.name === 'sandbox_download' && tc.done && tc.output) {
+        const m = tc.output.match(/文件已准备好下载:\s*(\S+)/)
+        if (m) myFiles.add(m[1])
       }
     }
   }
