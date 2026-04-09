@@ -89,18 +89,18 @@ function downloadFile() {
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  background: #fff;
-  border: 1.5px solid #D0EEF9;
-  border-radius: 14px;
+  background: var(--cf-card, #fff);
+  border: 1.5px solid rgba(0,174,236,0.18);
+  border-radius: var(--cf-radius-md, 14px);
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
   box-shadow: 0 1px 6px rgba(0,174,236,0.06);
   max-width: 360px;
   margin: 6px 0;
 }
 .artifact-card:hover {
-  border-color: #00AEEC;
-  box-shadow: 0 4px 16px rgba(0,174,236,0.12);
+  border-color: var(--cf-bili-blue, #00AEEC);
+  box-shadow: 0 4px 18px rgba(0,174,236,0.14), 0 0 8px rgba(0,174,236,0.06);
   transform: translateY(-2px) scale(1.01);
 }
 .artifact-card:active {

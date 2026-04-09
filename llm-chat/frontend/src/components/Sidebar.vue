@@ -181,13 +181,15 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
 .sidebar {
   width: var(--cf-sidebar-w);
   flex-shrink: 0;
-  background: var(--cf-sidebar);
+  background: var(--cf-glass-bg, var(--cf-sidebar));
+  backdrop-filter: var(--cf-glass, none);
+  -webkit-backdrop-filter: var(--cf-glass, none);
   display: flex;
   flex-direction: column;
   height: 100%;
   border-radius: var(--cf-radius-lg);
   border: 1px solid var(--cf-border-soft);
-  box-shadow: var(--cf-shadow-sm);
+  box-shadow: var(--cf-shadow-sm), var(--cf-shadow-glow, none);
   overflow: hidden;
 }
 

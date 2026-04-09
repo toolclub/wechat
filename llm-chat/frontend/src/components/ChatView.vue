@@ -308,12 +308,12 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #ffffff;
+  background: var(--cf-card, #ffffff);
   position: relative;
   border-radius: var(--cf-radius-lg);
   overflow: hidden;
   border: 1px solid var(--cf-border-soft);
-  box-shadow: var(--cf-shadow-sm);
+  box-shadow: var(--cf-shadow-sm), var(--cf-shadow-glow, none);
   height: 100%;
 }
 
@@ -349,11 +349,12 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   justify-content: space-between;
   padding: 0 24px;
   height: 56px;
-  background: #ffffff;
-  border-bottom: 1px solid var(--cf-border);
+  background: var(--cf-glass-bg, #ffffff);
+  backdrop-filter: var(--cf-glass, none);
+  -webkit-backdrop-filter: var(--cf-glass, none);
+  border-bottom: 1px solid var(--cf-border-soft);
   flex-shrink: 0;
   z-index: 10;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
 }
 .header-left {
   display: flex;

@@ -207,14 +207,14 @@ export function useChat() {
       }
       s.canContinue = false
 
-      // ── 如果有未完成的流式消息，自动恢复 SSE 连接 ──
+      // ── 如果有未完成的流式消息，自动恢复 SSE 连接（不阻塞，fire-and-forget） ──
       if (fullState.has_streaming) {
-        // 找到正在流式生成的 assistant 消息的 message_id，避免 resume 混入旧轮事件
         const streamingMsg = (fullState.messages || []).findLast(
           (m: any) => m.role === 'assistant' && m.stream_completed === false
         )
         const streamingMsgId = streamingMsg?.message_id || ''
-        await _resumeActiveStream(id, s, fullState.last_event_id || 0, streamingMsgId)
+        // 不 await：resume 是长连接，阻塞会导致 initialLoading 遮罩卡住
+        _resumeActiveStream(id, s, fullState.last_event_id || 0, streamingMsgId)
       }
 
     } catch (err) {

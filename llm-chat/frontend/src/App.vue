@@ -210,17 +210,19 @@ function onDragStart(e: MouseEvent) {
 
 <style>
 :root {
-  /* ══ Bilibili 风格色彩系统 ══ */
-  /* 背景 & 表面 */
-  --cf-bg:          #F1F2F3;   /* Bilibili 经典浅灰背景 */
+  /* ══ Bilibili × 科技感 — 浅色设计系统 ══ */
+
+  /* 背景 & 表面 — 极浅蓝灰底色增加科技氛围 */
+  --cf-bg:          #F0F2F5;
   --cf-sidebar:     #ffffff;
   --cf-card:        #ffffff;
-  --cf-hover:       #E7E8EA;
-  --cf-active:      #E3F6FD;   /* 浅蓝高亮 */
+  --cf-hover:       #E8EBF0;
+  --cf-active:      #E3F6FD;
 
-  /* 边框 */
-  --cf-border:      #E3E5E7;
-  --cf-border-soft: #EBEDF0;
+  /* 边框 — 加入微蓝调，不再纯灰 */
+  --cf-border:      #DFE3E8;
+  --cf-border-soft: #EBF0F5;
+  --cf-border-glow: rgba(0, 174, 236, 0.15); /* 科技感微光边框 */
 
   /* 文字 — Bilibili 标准色阶 */
   --cf-text-1: #18191C;
@@ -230,28 +232,34 @@ function onDragStart(e: MouseEvent) {
   --cf-text-5: #E3E5E7;
 
   /* 主色 — Bilibili 蓝粉双色 */
-  --cf-bili-blue:  #00AEEC;     /* Bilibili 标志蓝 */
+  --cf-bili-blue:  #00AEEC;
   --cf-bili-blue-d:#0095CC;
-  --cf-bili-pink:  #FB7299;     /* Bilibili 标志粉 */
-  --cf-indigo:     #00AEEC;     /* 兼容别名 → bili-blue */
+  --cf-bili-pink:  #FB7299;
+  --cf-indigo:     #00AEEC;
   --cf-indigo-d:   #0095CC;
-  --cf-purple:     #FB7299;     /* 兼容别名 → bili-pink */
-  --cf-green:      #00B578;     /* Bilibili 绿 */
-  --cf-red:        #F25D59;     /* Bilibili 红 */
-  --cf-amber:      #FF9736;     /* Bilibili 橙 */
+  --cf-purple:     #FB7299;
+  --cf-green:      #00B578;
+  --cf-red:        #F25D59;
+  --cf-amber:      #FF9736;
 
-  /* 阴影 — 柔和卡通风 */
-  --cf-shadow-xs: 0 1px 4px rgba(0,0,0,0.04);
-  --cf-shadow-sm: 0 2px 8px rgba(0,0,0,0.06);
-  --cf-shadow-md: 0 4px 16px rgba(0,0,0,0.08);
-  --cf-shadow-lg: 0 8px 28px rgba(0,0,0,0.10);
+  /* 阴影 — 增加蓝调底色，更有科技质感 */
+  --cf-shadow-xs: 0 1px 3px rgba(0, 20, 40, 0.04);
+  --cf-shadow-sm: 0 2px 8px rgba(0, 20, 40, 0.06);
+  --cf-shadow-md: 0 4px 16px rgba(0, 20, 40, 0.08);
+  --cf-shadow-lg: 0 8px 28px rgba(0, 20, 40, 0.10);
+  --cf-shadow-glow: 0 0 20px rgba(0, 174, 236, 0.08); /* 科技微光 */
 
-  /* 圆角 — 更圆更卡通 */
+  /* 圆角 */
   --cf-radius-sm: 10px;
   --cf-radius-md: 14px;
   --cf-radius-lg: 18px;
   --cf-radius-xl: 24px;
 
+  /* 毛玻璃 */
+  --cf-glass: blur(12px) saturate(180%);
+  --cf-glass-bg: rgba(255, 255, 255, 0.72);
+
+  /* 间距 */
   --cf-sidebar-w: 240px;
 }
 

@@ -347,16 +347,16 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 .input-root.centered { max-width: 680px; margin: 0 auto; }
 
 .input-card {
-  background: #fff;
-  border: 1.5px solid #E3E5E7;
-  border-radius: 12px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+  background: var(--cf-card, #fff);
+  border: 1.5px solid var(--cf-border, #DFE3E8);
+  border-radius: var(--cf-radius-md, 14px);
+  box-shadow: var(--cf-shadow-xs);
   overflow: hidden;
-  transition: box-shadow 0.25s, border-color 0.25s;
+  transition: box-shadow 0.3s, border-color 0.3s;
 }
 .input-card:focus-within {
-  border-color: #00AEEC;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.04), 0 0 0 3px rgba(0,174,236,0.06);
+  border-color: var(--cf-bili-blue, #00AEEC);
+  box-shadow: var(--cf-shadow-sm), 0 0 0 3px rgba(0,174,236,0.08), 0 0 16px rgba(0,174,236,0.06);
 }
 .input-card.is-loading { opacity: 0.75; }
 

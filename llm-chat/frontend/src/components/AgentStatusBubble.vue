@@ -133,10 +133,10 @@ const planSteps = computed(() => props.cognitive.plan)
 .status-bubble {
   display: flex;
   align-items: stretch;
-  background: var(--cf-bg, #F1F2F3);
-  border: 1px solid var(--cf-border, #E3E5E7);
-  border-radius: 14px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+  background: var(--cf-card, #ffffff);
+  border: 1px solid var(--cf-border-soft, #EBF0F5);
+  border-radius: var(--cf-radius-md, 14px);
+  box-shadow: var(--cf-shadow-xs), 0 0 8px rgba(0,174,236,0.03);
   overflow: hidden;
   margin: 2px 0 6px;
   max-width: 520px;

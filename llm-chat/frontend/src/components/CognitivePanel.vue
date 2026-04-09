@@ -606,10 +606,10 @@ function copyFileContent() {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #ffffff;
+  background: var(--cf-card, #ffffff);
   border-radius: var(--cf-radius-lg, 18px);
-  border: 1px solid var(--cf-border-soft, #EBEDF0);
-  box-shadow: var(--cf-shadow-sm, 0 2px 8px rgba(0,0,0,0.06));
+  border: 1px solid var(--cf-border-soft, #EBF0F5);
+  box-shadow: var(--cf-shadow-sm), var(--cf-shadow-glow, none);
   overflow: hidden;
 }
 

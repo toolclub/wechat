@@ -1157,11 +1157,11 @@ function cancelEdit() { isEditing.value = false }
 @keyframes ai-breathe {
   0%, 100% {
     border-color: #00AEEC;
-    box-shadow: 0 0 8px rgba(0,174,236,0.25);
+    box-shadow: 0 0 12px rgba(0,174,236,0.3), 0 0 4px rgba(0,174,236,0.15);
   }
   50% {
     border-color: #FB7299;
-    box-shadow: 0 0 8px rgba(251,114,153,0.25);
+    box-shadow: 0 0 12px rgba(251,114,153,0.3), 0 0 4px rgba(251,114,153,0.15);
   }
 }
 .ai-content-wrap {
@@ -1229,10 +1229,15 @@ function cancelEdit() { isEditing.value = false }
 .tool-calls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .tool-block {
   border: 1px solid var(--cf-border);
-  border-radius: 14px;
+  border-radius: var(--cf-radius-md, 14px);
   overflow: hidden;
   background: var(--cf-card);
   box-shadow: var(--cf-shadow-xs);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.tool-block:hover {
+  border-color: var(--cf-border-glow, rgba(0,174,236,0.2));
+  box-shadow: var(--cf-shadow-sm), 0 0 12px rgba(0,174,236,0.04);
 }
 /* 胶囊悬浮提示风格（搜索/读取工具） */
 .tool-block-sources {
@@ -1486,12 +1491,12 @@ function cancelEdit() { isEditing.value = false }
 
 /* ── 推理过程块 — Bilibili 风格 ── */
 .think-block {
-  border: 1px solid #D0EEF9;
-  border-radius: 14px;
+  border: 1px solid var(--cf-border-glow, rgba(0,174,236,0.15));
+  border-radius: var(--cf-radius-md, 14px);
   overflow: hidden;
-  background: #fff;
+  background: var(--cf-card, #fff);
   margin-bottom: 8px;
-  box-shadow: 0 1px 6px rgba(0,174,236,0.06);
+  box-shadow: 0 1px 6px rgba(0,174,236,0.06), inset 0 1px 0 rgba(255,255,255,0.8);
 }
 .think-toggle {
   display: flex;
