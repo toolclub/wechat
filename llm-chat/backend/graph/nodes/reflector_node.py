@@ -38,7 +38,7 @@ _REFLECTOR_SYSTEM = load_prompt("nodes/reflector")
 _MAX_STEP_ITERATIONS = 3
 
 # 注入步骤指令时，前序步骤结果的摘要截断长度
-_STEP_RESULT_SUMMARY_LEN = 300
+_STEP_RESULT_SUMMARY_LEN = 2000
 
 
 class ReflectorNode(BaseNode):
@@ -91,6 +91,7 @@ class ReflectorNode(BaseNode):
                     "reflection":         "最后一步工具执行失败，重试以修复",
                     "plan":               updated_plan,
                     "step_iterations":    step_iters + 1,
+                    "forget_mode":        False,
                 }
             return await self._make_done_result(state, plan, current_idx, full_response)
 
@@ -111,6 +112,7 @@ class ReflectorNode(BaseNode):
                 "reflection":         "步骤未产生响应，自动重试",
                 "plan":               updated_plan,
                 "step_iterations":    step_iters + 1,
+                "forget_mode":        False,
             }
 
         # ── LLM 评估：仅用于重试中有响应的边缘场景 ───────────────────────────────
@@ -297,10 +299,10 @@ class ReflectorNode(BaseNode):
 
     @staticmethod
     def _accumulate_step_results(state: GraphState, full_response: str) -> list[str]:
-        """将当前步骤结果追加到 step_results 列表。"""
+        """将当前步骤结果追加到 step_results 列表（截断防止无限增长）。"""
         existing = list(state.get("step_results") or [])
         if full_response:
-            existing.append(full_response)
+            existing.append(full_response[:3000])
         return existing
 
     @staticmethod

@@ -149,8 +149,8 @@ class SaveResponseNode(BaseNode):
             try:
                 from db.plan_store import finalize_all_steps
                 await finalize_all_steps(plan_id, plan)
-            except Exception:
-                pass  # 不影响主流程
+            except Exception as exc:
+                logger.warning("finalize_all_steps 失败（步骤可能卡在 running）: %s", exc)
 
         return {}
 
@@ -211,11 +211,13 @@ class SaveResponseNode(BaseNode):
             namespace = SemanticCacheNode._derive_cache_namespace(
                 conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id
             )
-            # search 类路由带 TTL（实时数据有时效性）；chat/code 永不过期
+            # Write-through 策略：只有 DB 写入成功后才写缓存（防止缓存中毒）
+            # 所有路由都带 TTL 兜底，search 类 2h，chat/code 类 24h
+            # 即使缓存写入了错误数据，TTL 到期后自动过期
             ttl = (
                 SEMANTIC_CACHE_SEARCH_TTL_HOURS * 3600
                 if route in ("search", "search_code")
-                else None
+                else 24 * 3600  # chat/code 24 小时 TTL 兜底
             )
             await cache.store(user_msg, full_response, namespace, ttl_seconds=ttl)
         except Exception as exc:

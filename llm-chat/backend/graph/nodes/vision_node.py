@@ -157,13 +157,26 @@ class VisionNode(BaseNode):
             stream=True,
         )
 
-        async for chunk in stream:
-            delta = ""
-            if chunk.choices:
-                delta = chunk.choices[0].delta.content or ""
-            if delta:
-                parts.append(delta)
-                await adispatch_custom_event("vision_token", {"content": delta})
+        try:
+            async for chunk in stream:
+                delta = ""
+                if chunk.choices:
+                    delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    parts.append(delta)
+                    await adispatch_custom_event("vision_token", {"content": delta})
+        except Exception as exc:
+            # 视觉分析中断时保留已生成的部分描述（不丢弃已有信息）
+            partial = "".join(parts)
+            if partial:
+                logger.warning(
+                    "VisionNode 流式中断，保留部分描述 | conv=%s | partial_len=%d | error=%s",
+                    conv_id, len(partial), exc,
+                )
+                await adispatch_custom_event("vision_token", {"content": "\n[图像分析中断，以上为部分结果]\n\n---\n\n"})
+                return partial
+            logger.error("VisionNode 流式失败且无部分结果 | conv=%s | %s", conv_id, exc)
+            return ""
 
         # 分析结束后加分隔符，与后续主模型 thinking 内容区分
         await adispatch_custom_event("vision_token", {"content": "\n\n---\n\n"})

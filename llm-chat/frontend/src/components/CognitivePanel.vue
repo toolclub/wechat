@@ -12,6 +12,7 @@ const props = defineProps<{
   loading: boolean
   userMessage?: string
   selectedFile?: FileArtifact | null
+  fileLoading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -489,9 +490,40 @@ function copyFileContent() {
         />
       </div>
 
+      <!-- 文件加载中：Bilibili 小电脑颜文字风格 -->
+      <!-- Bilibili 风格文件加载动画：SVG 小电脑 + 跑步小人 -->
+      <div v-if="fileLoading" class="file-loading-view">
+        <div class="bili-loader">
+          <!-- SVG 小电脑 -->
+          <svg class="bili-pc-svg" width="80" height="64" viewBox="0 0 80 64">
+            <!-- 屏幕 -->
+            <rect x="12" y="2" width="56" height="38" rx="4" fill="#E3F6FD" stroke="#00AEEC" stroke-width="2"/>
+            <!-- 屏幕内眼睛 -->
+            <circle cx="32" cy="18" r="3" fill="#00AEEC"><animate attributeName="r" values="3;2;3" dur="1.5s" repeatCount="indefinite"/></circle>
+            <circle cx="48" cy="18" r="3" fill="#00AEEC"><animate attributeName="r" values="3;2;3" dur="1.5s" begin="0.1s" repeatCount="indefinite"/></circle>
+            <!-- 嘴巴 -->
+            <path d="M35 27 Q40 32 45 27" fill="none" stroke="#00AEEC" stroke-width="1.5" stroke-linecap="round"/>
+            <!-- 底座 -->
+            <rect x="28" y="40" width="24" height="4" rx="1" fill="#00AEEC"/>
+            <rect x="22" y="44" width="36" height="3" rx="1.5" fill="#00AEEC"/>
+            <!-- 左腿 -->
+            <g class="bili-leg-left">
+              <line x1="32" y1="47" x2="28" y2="60" stroke="#00AEEC" stroke-width="2.5" stroke-linecap="round"/>
+              <ellipse cx="26" cy="61" rx="5" ry="2.5" fill="#00AEEC"/>
+            </g>
+            <!-- 右腿 -->
+            <g class="bili-leg-right">
+              <line x1="48" y1="47" x2="52" y2="60" stroke="#00AEEC" stroke-width="2.5" stroke-linecap="round"/>
+              <ellipse cx="54" cy="61" rx="5" ry="2.5" fill="#00AEEC"/>
+            </g>
+          </svg>
+          <div class="bili-loader-text">正在加载中<span class="bili-dot-anim"></span></div>
+        </div>
+      </div>
+
       <!-- PPT 视图（不依赖 fileViewMode，PPT 始终进入此分支） -->
       <!-- 无幻灯片数据：显示下载提示 -->
-      <div v-if="isPptFile && pptSlideCount === 0" class="ppt-empty-view">
+      <div v-if="!fileLoading && isPptFile && pptSlideCount === 0" class="ppt-empty-view">
         <div class="ppt-empty-icon">📊</div>
         <div class="ppt-empty-text">PPT 已生成</div>
         <div class="ppt-empty-sub">{{ selectedFile?.name }} · {{ fileSizeKb }} KB</div>
@@ -504,7 +536,7 @@ function copyFileContent() {
       </div>
 
       <!-- 有幻灯片数据：幻灯片浏览器 -->
-      <div v-if="isPptFile && pptSlideCount > 0" class="ppt-viewer">
+      <div v-if="!fileLoading && isPptFile && pptSlideCount > 0" class="ppt-viewer">
         <div class="ppt-slide-container">
           <iframe
             :srcdoc="pptCurrentSlideHtml"
@@ -967,6 +999,50 @@ function copyFileContent() {
 }
 
 /* ══ PPT 无预览数据时的下载视图 ══ */
+.file-loading-view {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: #F8F9FA;
+}
+.bili-loader {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+}
+.bili-pc-svg {
+  animation: bili-pc-hop 0.6s ease-in-out infinite;
+}
+@keyframes bili-pc-hop {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.bili-leg-left {
+  animation: bili-run-l 0.3s ease-in-out infinite alternate;
+  transform-origin: 32px 47px;
+}
+.bili-leg-right {
+  animation: bili-run-r 0.3s ease-in-out infinite alternate;
+  transform-origin: 48px 47px;
+}
+@keyframes bili-run-l {
+  0% { transform: rotate(-15deg); }
+  100% { transform: rotate(15deg); }
+}
+@keyframes bili-run-r {
+  0% { transform: rotate(15deg); }
+  100% { transform: rotate(-15deg); }
+}
+.bili-loader-text {
+  font-size: 13px; color: var(--cf-text-3, #9499A0);
+}
+.bili-dot-anim::after {
+  content: '';
+  animation: bili-dots 1.5s steps(3, end) infinite;
+}
+@keyframes bili-dots {
+  0% { content: ''; }
+  33% { content: '.'; }
+  66% { content: '..'; }
+  100% { content: '...'; }
+}
 .ppt-empty-view {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 10px;

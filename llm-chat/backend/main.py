@@ -148,7 +148,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
 apply_cors(app)
 
-# ── 流式停止信号（conv_id → asyncio.Event） ──────────────────────────────────
+# ── 流式停止信号 ──
+# 本 worker 内的 asyncio.Event（用于中断当前 worker 的图执行）
+# 跨 worker 停止通过 Redis pub/sub（db.redis_state.publish_stop）
 _stop_events: dict[str, asyncio.Event] = {}
 
 
@@ -404,15 +406,21 @@ async def chat(req: ChatRequest, request: Request):
 
 @app.post("/api/chat/{conv_id}/stop")
 async def stop_chat(conv_id: str):
-    """主动停止某个会话的流式输出。"""
+    """主动停止某个会话的流式输出（本 worker + 跨 worker Redis）。"""
+    # 1. 本 worker 停止
     event = _stop_events.get(conv_id)
     if event:
         event.set()
-    # 取消当前 worker 的活跃 session
     from graph.runner.stream import _active_sessions
     session = _active_sessions.get(conv_id)
     if session and session._graph_task and not session._graph_task.done():
         session._graph_task.cancel()
+    # 2. 跨 worker 停止（通过 Redis 通知其他 worker）
+    try:
+        from db.redis_state import publish_stop
+        await publish_stop(conv_id)
+    except Exception:
+        pass
     return {"ok": True}
 
 

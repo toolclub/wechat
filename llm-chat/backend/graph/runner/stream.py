@@ -34,7 +34,8 @@ from graph.state import GraphState
 
 logger = logging.getLogger("graph.runner.stream")
 
-# 进程内追踪活跃会话（只用于 SSE 实时推送，不用于数据持久化）
+# 进程内追踪活跃会话（仅用于本 worker 的 SSE 实时推送）
+# 跨 worker 的活跃状态由 Redis 管理（db.redis_state）
 _active_sessions: dict[str, "StreamSession"] = {}
 
 
@@ -47,6 +48,7 @@ class StreamSession:
     """管理单个流式对话的完整生命周期（DB-first）。"""
 
     def __init__(
+            
         self,
         conv_id: str,
         user_message: str,
@@ -74,6 +76,10 @@ class StreamSession:
         # DB 行 ID（写入后填充）
         self.user_db_id: int = 0
         self.assistant_db_id: int = 0
+
+        # 对话状态机（持有实例，贯穿整个会话生命周期）
+        from fsm.conversation import ConversationSM
+        self._conv_sm = ConversationSM.from_db_status("active", conv_id=conv_id)
 
         # 内部状态
         self.queue: asyncio.Queue[tuple] = asyncio.Queue()
@@ -126,18 +132,26 @@ class StreamSession:
         """启动会话并 yield SSE 事件。"""
         from memory import store as memory_store
 
-        # ── 立即写 DB：用户消息 + 空的 assistant 消息 ──
-        await memory_store.update_status(self.conv_id, "streaming")
+        # ── 状态机驱动：active → streaming ──
+        self._conv_sm.send_event("streaming")
+        await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
 
-        self.user_db_id = await memory_store.create_message_immediate(
-            self.conv_id, "user", self.user_message,
-            images=self.images,
-        )
-        self.assistant_db_id = await memory_store.create_message_immediate(
-            self.conv_id, "assistant", "",
-            message_id=self.assistant_message_id,
-            stream_completed=False,
-        )
+        try:
+            self.user_db_id = await memory_store.create_message_immediate(
+                self.conv_id, "user", self.user_message,
+                images=self.images,
+            )
+            self.assistant_db_id = await memory_store.create_message_immediate(
+                self.conv_id, "assistant", "",
+                message_id=self.assistant_message_id,
+                stream_completed=False,
+            )
+        except Exception as exc:
+            logger.error("消息预写失败，中止流 | conv=%s | %s", self.conv_id, exc)
+            yield sse({"error": "消息创建失败，请重试", "can_continue": False})
+            yield sse({"done": True, "compressed": False})
+            await memory_store.update_status(self.conv_id, "error")
+            return
 
         # 写入 resume_context 事件（第一个事件，刷新时恢复用户消息）
         resume_sse = sse({"resume_context": {
@@ -146,8 +160,13 @@ class StreamSession:
         }})
         self._emit_sse(resume_sse, "resume_context")
 
-        # 注册活跃会话
+        # 注册活跃会话（本 worker 内存 + Redis 跨 worker）
         _active_sessions[self.conv_id] = self
+        try:
+            from db.redis_state import register_streaming
+            await register_streaming(self.conv_id)
+        except Exception:
+            pass  # Redis 不可用时降级到进程内 dict
 
         # 启动后台任务
         self._graph_task = asyncio.create_task(self._run_graph())
@@ -295,6 +314,8 @@ class StreamSession:
                 self._sse_done = True
                 for w in self._sse_waiters:
                     w.set()
+            if self._graph_task and not self._graph_task.done():
+                self._graph_task.cancel()
             if self._hb_task:
                 self._hb_task.cancel()
             if self._flush_task:
@@ -403,14 +424,17 @@ class StreamSession:
                 # 优先用累积的 sandbox 终端输出（和推理过程一致），
                 # 没有的话 fallback 到 tool_result 的 output 字段
                 output = self._sandbox_output_buf or tr.get("output", "")
-                # DB-first：从 tool_result 事件读取结构化 status 字段
-                # SandboxFormatter 根据 exit_code 设置 status="error"/"done"
-                status = tr.get("status", "done")
+                # 状态机驱动：running → done/error/timeout
+                from fsm.tool_execution import ToolExecutionSM
+                raw_status = tr.get("status", "done")
+                tool_sm = ToolExecutionSM()
+                tool_sm.send_event(raw_status)
+                status = tool_sm.current_value
                 try:
                     from db.tool_store import complete_tool_execution
                     await complete_tool_execution(
                         self._pending_tool_exec_id,
-                        output=output[:20000],  # 终端输出可能较长
+                        output=output[:20000],
                         status=status,
                         search_items=self._pending_search_items or None,
                     )
@@ -529,13 +553,20 @@ class StreamSession:
             pass
 
     async def _set_done(self, status: str) -> None:
-        """标记会话结束。"""
+        """通过状态机驱动会话结束：streaming → completed/error/active。"""
         self._sse_done = True
         for w in self._sse_waiters:
             w.set()
         try:
+            self._conv_sm.send_event(status)
             from memory import store as memory_store
-            await memory_store.update_status(self.conv_id, status)
+            await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
+        except Exception:
+            pass
+        # 注销 Redis 活跃会话
+        try:
+            from db.redis_state import unregister_streaming
+            await unregister_streaming(self.conv_id)
         except Exception:
             pass
 
@@ -548,6 +579,15 @@ class StreamSession:
             while True:
                 await asyncio.sleep(3)
                 await self.queue.put(("ping", None))
+                # Redis 活跃会话续期 + 停止信号检测（带 2 秒超时，防止 Redis 慢时阻塞心跳）
+                try:
+                    from db.redis_state import heartbeat_streaming, check_stop
+                    await asyncio.wait_for(heartbeat_streaming(self.conv_id), timeout=2)
+                    if await asyncio.wait_for(check_stop(self.conv_id), timeout=2):
+                        if self.stop_event:
+                            self.stop_event.set()
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             pass
 

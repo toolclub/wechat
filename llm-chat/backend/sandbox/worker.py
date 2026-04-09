@@ -78,6 +78,7 @@ class SSHWorker:
         self._pool: list = []
         self._pool_index = 0
         self._pool_lock = asyncio.Lock()
+        self._pool_last_used: dict[int, float] = {}  # idx → 最后使用时间戳
 
     def _ssh_kwargs(self) -> dict:
         kwargs: dict = {
@@ -103,26 +104,51 @@ class SSHWorker:
             self.worker_id, self._host, self._port, len(self._pool),
         )
 
+    _HEALTH_CHECK_INTERVAL = 30  # 只对闲置超过 30 秒的连接做探活
+
     async def _get_conn(self):
-        """轮询获取一个健康连接（Round-Robin）。"""
+        """轮询获取一个健康连接（Round-Robin + 按需探活）。"""
         import asyncssh
+        now = time.monotonic()
         async with self._pool_lock:
             for _ in range(self._pool_size):
                 idx = self._pool_index % len(self._pool)
                 self._pool_index += 1
                 conn = self._pool[idx]
-                if not conn.is_closed():
+                if conn.is_closed():
+                    try:
+                        conn = await asyncssh.connect(**self._ssh_kwargs())
+                        self._pool[idx] = conn
+                        self._pool_last_used[idx] = now
+                        return conn
+                    except Exception:
+                        continue
+                # 最近使用过的连接直接返回（跳过探活，减少延迟）
+                if now - self._pool_last_used.get(idx, 0) < self._HEALTH_CHECK_INTERVAL:
+                    self._pool_last_used[idx] = now
                     return conn
-                # 连接断了，重建
+                # 闲置超过 30 秒，发探活命令确认
                 try:
-                    new_conn = await asyncssh.connect(**self._ssh_kwargs())
-                    self._pool[idx] = new_conn
-                    return new_conn
+                    result = await asyncio.wait_for(
+                        conn.run("echo ok", check=False, timeout=3), timeout=5,
+                    )
+                    if result.exit_status == 0:
+                        self._pool_last_used[idx] = now
+                        return conn
+                except Exception:
+                    pass
+                # 探活失败，重建连接
+                try:
+                    conn = await asyncssh.connect(**self._ssh_kwargs())
+                    self._pool[idx] = conn
+                    self._pool_last_used[idx] = now
+                    return conn
                 except Exception:
                     continue
-            # 所有连接都断了，尝试重建第一个
+            # 所有连接都不可用，尝试重建第一个
             new_conn = await asyncssh.connect(**self._ssh_kwargs())
             self._pool[0] = new_conn
+            self._pool_last_used[0] = now
             return new_conn
 
     async def close(self) -> None:

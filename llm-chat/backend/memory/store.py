@@ -156,6 +156,23 @@ async def init() -> None:
 
     logger.info("对话存储初始化完成，共加载 %d 个对话", len(_store))
 
+    # 启动 Redis 缓存失效监听（收到其他 worker 的通知时重新从 DB 加载）
+    async def _on_invalidate(conv_id: str):
+        """
+        其他 worker 修改了对话 → 刷新本地缓存（而非直接 pop，防止正在读取时 KeyError）。
+        从 DB 重新加载最新数据覆盖旧缓存。
+        """
+        try:
+            await db_get_conversation(conv_id)  # 内部会刷新 _store[conv_id]
+        except Exception:
+            _store.pop(conv_id, None)  # DB 也失败时才 pop
+
+    try:
+        from db.redis_state import start_cache_invalidation_listener
+        await start_cache_invalidation_listener(_on_invalidate)
+    except Exception as exc:
+        logger.warning("Redis 缓存失效监听启动失败（降级为本地缓存）: %s", exc)
+
 
 # ── CRUD（异步写操作）─────────────────────────────────────────────────────────
 
@@ -239,6 +256,7 @@ async def add_message(
     """
     conv = _store.get(conv_id)
     if not conv:
+        logger.warning("add_message 跳过：对话 %s 不在缓存中（可能已被删除）", conv_id)
         return
 
     now = time.time()
@@ -293,26 +311,33 @@ async def add_message(
     conv.title = new_title
 
 
+async def _notify_cache_invalidation(conv_id: str) -> None:
+    """通知其他 worker 失效本地缓存（Redis pub/sub）。"""
+    try:
+        from db.redis_state import publish_cache_invalidation
+        await publish_cache_invalidation(conv_id)
+    except Exception:
+        pass  # Redis 不可用时降级
+
+
 async def update_status(conv_id: str, status: str) -> None:
     """
-    更新对话状态，经过状态机校验。
+    将对话状态持久化到 DB + 通知缓存失效。
 
-    非法转换只记录警告，不阻断主流程（避免因状态不一致导致对话卡死）。
+    状态校验由调用方的状态机实例负责（StreamSession._conv_sm），
+    此函数只做持久化，不做校验。
     """
-    from db.state_machine import ConversationStatus, validate_conv_transition
-
-    target = ConversationStatus(status)
     conv = _store.get(conv_id)
     if conv:
-        validate_conv_transition(conv.status, target)
-        conv.status = target.value
+        conv.status = status
     async with AsyncSessionLocal() as session:
         await session.execute(
             sa_update(ConversationModel)
             .where(ConversationModel.id == conv_id)
-            .values(status=target.value, updated_at=time.time())
+            .values(status=status, updated_at=time.time())
         )
         await session.commit()
+    await _notify_cache_invalidation(conv_id)
 
 
 async def create_message_immediate(

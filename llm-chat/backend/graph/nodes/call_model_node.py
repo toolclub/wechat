@@ -95,7 +95,8 @@ class CallModelNode(BaseNode):
         #   - chat/code 路由（planner 直接跳过规划）
         #   - search/search_code 路由且 planner_node 的澄清预检已返回空计划
         # 有图片时 planner_node 不拦截（图片即风格参考），plan 非空，此处不会触发。
-        if not plan and step_iters == 0 and cur_idx == 0 and _needs_webpage_clarification(user_msg):
+        already_clarifying = state.get("needs_clarification", False)
+        if not already_clarifying and not plan and step_iters == 0 and cur_idx == 0 and _needs_webpage_clarification(user_msg):
             conv_id = state.get("conv_id", "")
             logger.info(
                 "call_model 网页澄清预检命中，跳过 LLM | conv=%s | user_msg=%.60s",
@@ -122,7 +123,7 @@ class CallModelNode(BaseNode):
         # ── 消息列表（本地副本，步骤 1+ 使用聚焦上下文，不喂完整历史） ────────
         current_idx = cur_idx
 
-        if plan and current_idx > 0:
+        if plan and current_idx > 0 and current_idx < len(plan):
             # 步骤 1+：用 GraphState.plan 中已有的步骤结果构建聚焦消息，
             # 完全不依赖 state["messages"] 的积累历史，实现真正的上下文隔离。
             messages = self._build_focused_step_messages(state, plan, current_idx)
@@ -360,7 +361,7 @@ class CallModelNode(BaseNode):
         """
         无图片时走主 LLM 路径：使用 LLM_BASE_URL + tool_model。
 
-          - use_tools=True  → 非流式（工具调用需要完整 JSON）
+          - use_tools=True  → 流式（thinking/content 实时推送 + tool_calls 收集）
           - use_tools=False → 流式（逐 token 派发 llm_token 事件供前端实时渲染）
         """
         llm          = get_chat_llm(model=model, temperature=temperature)

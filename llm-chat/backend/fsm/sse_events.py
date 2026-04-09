@@ -29,6 +29,7 @@ class SSEEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     TOOL_CALL = "tool_call"
     TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_ARGS = "tool_call_args"
     SEARCH_ITEM = "search_item"
     SANDBOX_OUTPUT = "sandbox_output"
 
@@ -66,6 +67,7 @@ _PRIORITY_ORDER: list[SSEEventType] = [
     SSEEventType.TOOL_RESULT,
     SSEEventType.TOOL_CALL,
     SSEEventType.TOOL_CALL_START,
+    SSEEventType.TOOL_CALL_ARGS,
     SSEEventType.SEARCH_ITEM,
     SSEEventType.SANDBOX_OUTPUT,
     SSEEventType.FILE_ARTIFACT,

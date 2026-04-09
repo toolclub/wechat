@@ -292,8 +292,10 @@ class BaseNode(ABC):
                 elif kind == "thinking" and text:
                     await adispatch_custom_event("llm_thinking", {"content": text, "node": node})
                 elif kind == "tool_call_start" and text:
-                    # 工具调用参数开始生成：立即通知前端，让终端提前显示 loading
                     await adispatch_custom_event("tool_call_start", {"name": text, "node": node})
+                elif kind == "tool_call_args" and text:
+                    # 工具参数片段实时推送：前端在终端中展示"正在写代码"
+                    await adispatch_custom_event("tool_call_args", {"text": text, "node": node})
                 elif kind == "__done__":
                     final_data = json.loads(text)
         except Exception as exc:

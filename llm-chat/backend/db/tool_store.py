@@ -47,17 +47,11 @@ async def complete_tool_execution(
     duration: float = 0,
 ) -> None:
     """
-    标记工具调用完成，经过状态机校验。
+    将工具调用结果持久化到 DB。
 
-    status 参数接受 ToolExecutionStatus 枚举值或字符串（向后兼容）。
+    状态校验由调用方的 ToolExecutionSM 实例负责，此函数只做持久化。
     """
-    from db.state_machine import ToolExecutionStatus, validate_tool_transition
-
-    target = ToolExecutionStatus(status)
-    # 工具从 RUNNING 出发，校验目标状态合法性
-    validate_tool_transition(ToolExecutionStatus.RUNNING, target)
-
-    values: dict = {"status": target.value, "tool_output": output, "duration": duration}
+    values: dict = {"status": status, "tool_output": output, "duration": duration}
     if search_items is not None:
         values["search_items"] = search_items
     async with AsyncSessionLocal() as session:

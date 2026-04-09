@@ -456,9 +456,35 @@ const vAutoScroll: Directive<HTMLElement> = {
 const fileArtifacts = computed<FileArtifact[]>(() => {
   if (props.message.role !== 'assistant') return []
 
-  // 正在生成中（loading）→ 直接用 cognitive.artifacts（SSE 实时推送）
+  // 正在生成中（loading）→ 从 cognitive.artifacts 中过滤出当前消息关联的产物
+  // 不能直接返回全部 cognitive.artifacts，否则第一轮产物会跑到第二轮消息下面
   if (props.isLastLoading && props.cognitive?.artifacts?.length) {
-    return props.cognitive.artifacts
+    // 收集当前消息中所有工具写入的文件名
+    const myFiles = new Set<string>()
+    const collectNames = (toolCalls: ToolCallRecord[]) => {
+      for (const tc of toolCalls) {
+        if (tc.name === 'sandbox_write' && tc.done) {
+          const path = String((tc.input as any).path || '')
+          if (path) myFiles.add(path.split('/').pop() || path)
+        }
+        if (tc.name === 'create_ppt' && tc.done && tc.output) {
+          const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
+            || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
+          if (match) myFiles.add(match[1].trim())
+        }
+      }
+    }
+    if (props.message.steps?.length) {
+      for (const step of props.message.steps) collectNames(step.toolCalls)
+    }
+    if (props.message.toolCalls?.length) collectNames(props.message.toolCalls)
+
+    if (myFiles.size > 0) {
+      const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
+      if (matched.length > 0) return matched
+    }
+    // 没有工具调用匹配时（刚开始还没产生 toolCalls），不显示任何产物
+    return []
   }
 
   // ── 已完成：从 message.artifacts 恢复（DB message_id 外键，不依赖正则） ──

@@ -304,9 +304,9 @@ class CallModelAfterToolNode(BaseNode):
         """
         主 LLM 路径。
 
-        tools_schema 非空时：非流式调用（需要完整 tool_calls JSON），
-                           模型可继续调用工具（如 write 后 execute）。
+        tools_schema 非空时：流式调用（thinking/content 实时推送 + tool_calls 收集）。
         tools_schema 为空时：流式调用（逐 token 输出最终回复）。
+        两种路径都是流式，前端实时可见。
         """
         llm          = get_chat_llm(model=model, temperature=temperature)
         oai_messages = self._to_openai_messages(messages)
@@ -314,7 +314,7 @@ class CallModelAfterToolNode(BaseNode):
         from logging_config import log_prompt
 
         step_label = "末步" if is_last else "中间步骤"
-        mode_label = "非流式+工具" if tools_schema else "流式"
+        mode_label = "流式+工具" if tools_schema else "流式"
         logger.info(
             "call_model_after_tool LLM 请求（%s，%s） | conv=%s | model=%s | msgs=%d",
             mode_label, step_label, conv_id, model, len(oai_messages),

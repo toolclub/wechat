@@ -342,6 +342,7 @@ class PlannerNode(BaseNode):
                 "plan":               [],
                 "current_step_index": 0,
                 "step_iterations":    0,
+                "needs_clarification": True,  # 标记已触发澄清，call_model 检查此标记跳过重复触发
             }
 
         llm = get_chat_llm(model=model, temperature=0.1)

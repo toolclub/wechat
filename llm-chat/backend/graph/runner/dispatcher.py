@@ -39,6 +39,7 @@ from graph.runner.handlers import (
 from graph.runner.handlers.sandbox_handler import SandboxOutputHandler
 from graph.runner.handlers.artifact_handler import FileArtifactHandler
 from graph.runner.handlers.tool_call_start_handler import ToolCallStartHandler
+from graph.runner.handlers.tool_call_progress_handler import ToolCallArgsHandler
 
 # ── Handler 注册顺序即优先级 ─────────────────────────────────────────────────
 # LLMStreamHandler 监听 on_custom_event(llm_token)，在节点执行中逐 token 触发。
@@ -62,6 +63,7 @@ _HANDLERS: list[EventHandler] = [
     LLMStartHandler(),                  # 监听 on_chain_start → 推送 thinking 状态
     LLMStreamHandler(),                 # 监听 on_custom_event(llm_token) → 逐 token 推流
     ToolCallStartHandler(),              # 工具参数开始生成（on_custom_event tool_call_start）→ 前端提前显示终端
+    ToolCallArgsHandler(),               # 工具参数片段流式推送（on_custom_event tool_call_args）→ 终端实时显示代码生成
     ToolStartHandler(),
     ToolEndHandler(),
     SaveResponseEndHandler(),

@@ -21,6 +21,7 @@ from graph.runner.handlers.tool_handlers import ToolEndHandler, ToolStartHandler
 from graph.runner.handlers.vision_handler import VisionStartHandler, VisionStreamHandler
 from graph.runner.handlers.artifact_handler import FileArtifactHandler
 from graph.runner.handlers.tool_call_start_handler import ToolCallStartHandler
+from graph.runner.handlers.tool_call_progress_handler import ToolCallArgsHandler
 
 __all__ = [
     "EventHandler",
@@ -43,4 +44,5 @@ __all__ = [
     "CompressEndHandler",
     "FileArtifactHandler",
     "ToolCallStartHandler",
+    "ToolCallArgsHandler",
 ]

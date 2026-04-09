@@ -188,12 +188,19 @@ class LLMClient:
             **create_kwargs
         )
 
+        import time as _time
+
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         # tool_calls 拼装：index → {id, name, arguments_fragments}
         tc_builders: dict[int, dict] = {}
         # 已通知前端"开始生成"的工具 index 集合
         tc_notified: set[int] = set()
+        # 参数流式节流：攒一批再发（防止 SSE 洪泛）
+        _args_buf: list[str] = []
+        _args_last_flush = _time.monotonic()
+        _ARGS_FLUSH_INTERVAL = 0.2  # 200ms 发一次
+        _ARGS_FLUSH_SIZE = 500      # 或累积 500 字符发一次
 
         async for chunk in stream:
             if not chunk.choices:
@@ -226,13 +233,26 @@ class LLMClient:
                         if tc_delta.function and tc_delta.function.name:
                             tc_builders[idx]["name"] = tc_delta.function.name
                     if tc_delta.function and tc_delta.function.arguments:
-                        tc_builders[idx]["arguments"] += tc_delta.function.arguments
+                        frag = tc_delta.function.arguments
+                        tc_builders[idx]["arguments"] += frag
+                        _args_buf.append(frag)
+                        # 节流：200ms 或 500 字符发一批（防止 SSE 洪泛）
+                        _now = _time.monotonic()
+                        _buf_len = sum(len(s) for s in _args_buf)
+                        if _now - _args_last_flush >= _ARGS_FLUSH_INTERVAL or _buf_len >= _ARGS_FLUSH_SIZE:
+                            yield ("tool_call_args", "".join(_args_buf))
+                            _args_buf.clear()
+                            _args_last_flush = _now
 
-                    # 首次检测到工具名时，立即通知前端"工具调用参数正在生成中"
-                    # 前端可以提前显示终端 loading 状态，不用等 48 秒参数生成完
+                    # 首次检测到工具名时，立即通知前端
                     if idx not in tc_notified and tc_builders[idx]["name"]:
                         tc_notified.add(idx)
                         yield ("tool_call_start", tc_builders[idx]["name"])
+
+        # 刷出剩余的参数缓冲
+        if _args_buf:
+            yield ("tool_call_args", "".join(_args_buf))
+            _args_buf.clear()
 
         # 拼装最终结果
         content = "".join(content_parts)

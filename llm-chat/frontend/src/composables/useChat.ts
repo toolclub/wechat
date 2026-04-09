@@ -35,6 +35,11 @@ export function useChat() {
   const conversations = ref<ConversationInfo[]>([])
   const currentConvId = ref<string | null>(null)
   const convStates = reactive<Record<string, ConvState>>({})
+  const initialLoading = ref(false)  // 页面刷新时从 DB 恢复数据的全局 loading
+
+  // ── 防抖：用户猛刷新时 2 秒内只执行一次 full-state 请求 ──
+  let _lastSelectTime = 0
+  const _SELECT_DEBOUNCE_MS = 2000
 
   // Used to attach workflowPlan/workflowGoal to the next user message push
   const _nextWorkflowPlan = ref<PlanStep[] | null>(null)
@@ -114,6 +119,11 @@ export function useChat() {
     currentConvId.value = id
     window.location.hash = id
     if (convStates[id]?.loading) return
+
+    // 防抖：2 秒内对同一对话的重复请求直接跳过
+    const now = Date.now()
+    if (now - _lastSelectTime < _SELECT_DEBOUNCE_MS) return
+    _lastSelectTime = now
     const s = getOrCreate(id)
 
     // ── 一次性从 DB 获取完整状态（full-state API 直接查数据库，跨 worker 安全） ──
@@ -387,7 +397,14 @@ export function useChat() {
 
   async function restoreFromHash() {
     const id = window.location.hash.slice(1)
-    if (id) await selectConversation(id)
+    if (id) {
+      initialLoading.value = true
+      try {
+        await selectConversation(id)
+      } finally {
+        initialLoading.value = false
+      }
+    }
   }
 
   // 下一次 send 附加的 force_plan（由 applyModifiedPlan 设置，send 消费后清空）
@@ -662,6 +679,15 @@ export function useChat() {
           }
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
           addTrace(s.cognitive, { type: 'tool_call', content: `⏳ 正在生成 ${name} 参数...`, toolName: name })
+        },
+        // onToolCallArgs：工具参数片段流式到达，追加到当前生成中的工具 output（终端实时显示代码生成）
+        (text: string) => {
+          const step = activeStep()
+          const toolList = step ? step.toolCalls : msg().toolCalls
+          // 优先找 _generating 标记的（来自 tool_call_start），兜底找最后一个未完成的
+          const tc = toolList?.findLast(t => !t.done && (t.input as any)?._generating)
+            || toolList?.findLast(t => !t.done)
+          if (tc) tc.output = (tc.output || '') + text
         },
       )
     } catch (err: any) {
@@ -941,7 +967,7 @@ export function useChat() {
 
   return {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
-    canContinue,
+    canContinue, initialLoading,
     loadConversations, selectConversation, restoreFromHash,
     newConversation, removeConversation,
     send, cancelStream, stopConversation, applyModifiedPlan, submitClarification, continueLast,

@@ -63,33 +63,35 @@ const currentConvTitle = computed(() => {
 
 // ── 文件预览状态 ──────────────────────────────────────────────────────────────
 const selectedFile = ref<FileArtifact | null>(null)
+const fileLoading = ref(false)
 
 async function onSelectFile(file: FileArtifact) {
-  let resolved = file
+  // 立即打开面板 + 显示 loading 占位（先让用户看到反馈）
+  selectedFile.value = file
+  panelOpen.value = true
+  if (file.language === 'pptx') {
+    panelWidth.value = Math.max(panelWidth.value, 520)
+  }
 
   // 如果是元数据模式（无 content），按需从后端加载完整内容
   const needsLoad = !file.content || (file.language === 'pptx' && !file.slides_html?.length)
-  if (needsLoad) {
+  if (!needsLoad) return
+
+  fileLoading.value = true
+  try {
     // 来源1：cognitive.artifacts（SSE 实时推送的，有完整内容）
     const fromCog = chat.cognitive.value.artifacts.find(
       (a: FileArtifact) => a.name === file.name && a.content
     )
     if (fromCog) {
-      resolved = fromCog
+      selectedFile.value = fromCog
     } else if (file.id) {
-      // 来源2：按 ID 从后端加载完整内容（按需，不卡会话加载）
-      try {
-        const full = await import('./api').then(m => m.fetchArtifactContent(file.id!))
-        if (full) resolved = full as FileArtifact
-      } catch {}
+      // 来源2：按 ID 从后端加载完整内容
+      const full = await import('./api').then(m => m.fetchArtifactContent(file.id!))
+      if (full) selectedFile.value = full as FileArtifact
     }
-  }
-
-  selectedFile.value = resolved
-  panelOpen.value = true
-  if (resolved.language === 'pptx') {
-    panelWidth.value = Math.max(panelWidth.value, 520)
-  }
+  } catch {}
+  fileLoading.value = false
 }
 
 watch(() => chat.currentConvId.value, () => {
@@ -100,15 +102,23 @@ watch(() => chat.currentConvId.value, () => {
 const panelWidth = ref(400)
 const isDragging = ref(false)
 
+// 拖拽遮罩：防止 iframe 等子元素吃掉 mouse 事件
+let _dragOverlay: HTMLElement | null = null
+
 function onDragStart(e: MouseEvent) {
   e.preventDefault()
   isDragging.value = true
   document.body.style.cursor = 'col-resize'
   document.body.style.userSelect = 'none'
 
+  // 创建全屏透明遮罩，覆盖所有 iframe 和子元素
+  _dragOverlay = document.createElement('div')
+  _dragOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;cursor:col-resize;'
+  document.body.appendChild(_dragOverlay)
+
   const startX = e.clientX
   const startW = panelWidth.value
-  const maxW = window.innerWidth - 240 - 400 // sidebar - 最小 chat 宽度
+  const maxW = window.innerWidth - 240 - 400
 
   function onMove(ev: MouseEvent) {
     const delta = startX - ev.clientX
@@ -118,6 +128,7 @@ function onDragStart(e: MouseEvent) {
     isDragging.value = false
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
+    if (_dragOverlay) { _dragOverlay.remove(); _dragOverlay = null }
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
   }
@@ -136,6 +147,14 @@ function onDragStart(e: MouseEvent) {
       @select="chat.selectConversation($event)"
       @delete="chat.removeConversation($event)"
     />
+
+    <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->
+    <div v-if="chat.initialLoading.value" class="global-loading-overlay">
+      <div class="global-loading-content">
+        <div class="bili-kaomoji">(｡･ω･｡)</div>
+        <div class="bili-loading-dots">正在恢复对话<span class="dots-anim"></span></div>
+      </div>
+    </div>
 
     <!-- 主内容区 -->
     <div class="main-area">
@@ -178,6 +197,7 @@ function onDragStart(e: MouseEvent) {
           :loading="chat.loading.value"
           :user-message="currentGoal"
           :selected-file="selectedFile"
+          :file-loading="fileLoading"
           style="width:100%;height:100%;"
           @collapse="panelOpen = false"
           @modify-plan="chat.applyModifiedPlan($event)"
@@ -386,6 +406,37 @@ body.dark .term-code-inline { background: #222325; border-color: #323335; color:
 
 <style scoped>
 /* 整体布局 */
+.global-loading-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 9999;
+  background: var(--cf-bg, #F1F2F3);
+  display: flex; align-items: center; justify-content: center;
+}
+.global-loading-content {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.bili-kaomoji {
+  font-size: 42px; color: var(--cf-text-2, #61666D);
+  animation: bili-bounce 1.2s ease-in-out infinite;
+}
+@keyframes bili-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+.bili-loading-dots {
+  font-size: 14px; color: var(--cf-text-3, #9499A0);
+}
+.dots-anim::after {
+  content: '';
+  animation: dots 1.5s steps(3, end) infinite;
+}
+@keyframes dots {
+  0% { content: ''; }
+  33% { content: '.'; }
+  66% { content: '..'; }
+  100% { content: '...'; }
+}
+
 .app {
   display: flex;
   height: 100vh;

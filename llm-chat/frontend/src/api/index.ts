@@ -178,6 +178,7 @@ export async function resumeStream(
       if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
       if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
       if (data.content)         onChunk(data.content)
       if (data.tool_call)       onToolCall(data.tool_call.name, data.tool_call.input)
       if (data.tool_result)     onToolResult(data.tool_result.name, data.tool_result)
@@ -242,6 +243,7 @@ export async function sendMessage(
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
   onToolCallStart?: (name: string) => void,
+  onToolCallArgs?: (text: string) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -293,6 +295,7 @@ export async function sendMessage(
       if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)    onFileArtifact?.(data.file_artifact as FileArtifact)
       if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
       if (data.content)         onChunk(data.content)
       if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
       if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
