@@ -78,15 +78,19 @@ async def save_artifact(
                 row.size = size or row.size
                 row.slide_count = slide_count or row.slide_count
                 row.created_at = now
+                await session.commit()
+                artifact_data["id"] = row.id
             else:
-                session.add(ArtifactModel(
+                new_row = ArtifactModel(
                     conv_id=conv_id, message_id=message_id,
                     name=name, path=path, language=lang,
                     content=content, size=size, slide_count=slide_count,
                     created_at=now,
-                ))
-            await session.commit()
-        artifact_data["id"] = row.id if row else 0  # best effort
+                )
+                session.add(new_row)
+                await session.flush()  # flush 拿到自增 ID
+                artifact_data["id"] = new_row.id
+                await session.commit()
     except Exception:
         logger.exception("save_artifact failed | conv=%s path=%s", conv_id, path)
     return artifact_data

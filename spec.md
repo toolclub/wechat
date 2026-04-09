@@ -144,6 +144,11 @@ await adispatch_custom_event("file_artifact", {
 - **tool_call_args SSE 洪泛**：每个 JSON 片段都发一次。已加节流（200ms 或 500 字符一批）。
 - **心跳 Redis 调用无超时**：Redis 慢时阻塞心跳循环。已加 `wait_for(timeout=2)`。
 - **onToolCallArgs 找不到工具**：`_generating` 标记可能不存在。已加兜底 `findLast(t => !t.done)`。
+- **`save_artifact` INSERT 后 id=0**：`session.add()` 后直接 `commit()` 没 `flush()`，新记录的自增 ID 拿不到 → SSE 事件带 `id:0` → 前端下载 `/api/artifacts/0/download` 返回空。已改为先 `flush()` 再 `commit()`。
+- **沙箱会话跨 worker 丢失**：`_sessions` 是进程内 dict，刷新后落到不同 worker → 分配新沙箱 → 原文件找不到。已加 `conversations.sandbox_worker_id` DB 字段持久化。
+- **`_get_worker_for_session` 用同步 DB 引擎**：为了同步读 DB 引入了 psycopg 第二套连接池，容器没装驱动就崩。已改为 async（所有调用方本来就是 async），砍掉同步引擎。
+- **命令注入**：`sandbox_download` 的 `path` 参数直接拼进 shell 命令，特殊字符可执行任意命令。已加 `shlex.quote()` + 路径清理（禁 `..` 和绝对路径）。
+- **下载 API 非 ASCII 文件名乱码**：`Content-Disposition: filename="中文.tar.gz"` 不符合 RFC 5987。已改为 `filename*=UTF-8''` 编码。
 
 ---
 
