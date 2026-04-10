@@ -76,6 +76,15 @@ CHAT_MODEL="claude-sonnet-4-20250514"
 | 新 SSE 事件 | `fsm/sse_events.py` 枚举 + `_PRIORITY_ORDER` |
 | 新工具 | `tools/builtin/` @tool 函数 + `tools/__init__.py` 注册 |
 | 新图节点 | 继承 `BaseNode` + `graph/agent.py` 注册 + `edges.py` 路由 |
+| **任何改动** | 对应模块测试 + `T-SMOKE-*` 冒烟（见 `test_case.md`） |
+
+### 测试规范
+
+- 测试用例文档：`backend/test_case.md`（只读此文件，不需要读测试代码）
+- 测试代码：`backend/tests/`（Docker 镜像排除）
+- **改代码必须跑对应模块的测试**，对照 `test_case.md` 末尾的"spec 对照检查"表
+- 新增功能必须补充测试用例（先更新 `test_case.md`，再写测试代码）
+- 标记：`@pytest.mark.unit`（无 IO）、`@pytest.mark.integration`（需 DB/Redis）、`@pytest.mark.smoke`（端到端）
 
 ### 新增产出文件的工具（重要）
 
@@ -116,7 +125,7 @@ await adispatch_custom_event("file_artifact", {
 
 ## 踩过的坑（已修复）
 
-- **含工具调用的响应被缓存**：缓存只存文本不含副作用（文件产物、沙箱状态），命中时跳过工具执行 → 产物丢失。已在 `_write_cache` 中检测 `tool_events` 非空时跳过缓存。
+- **语义缓存设计缺陷（已禁用，待重构）**：当前缓存把整个响应当纯文本存，忽略副作用（工具调用、文件产物、沙箱状态）。命中时跳过工具执行 → 产物丢失。临时修复（`_write_cache` 跳过工具响应 + 启动清缓存）不够彻底。已通过 `SEMANTIC_CACHE_ENABLED=false` 禁用。重构方向：只缓存纯知识问答（无工具调用），缓存 value 需含元数据标记（`has_tools`），命中时检查上下文一致性。
 - **消息截断导致 2013**：`messages[-20:]` 截掉 AIMessage 留下 ToolMessage。已删除截断。
 - **reflector 盲目 done**：最后一步工具失败但有 full_response 就判完成。已加 `_last_tool_failed()` 检查。
 - **await 在同步函数**：`_inject_boundary` 是 `def`，DB 查询必须提到 `async` 调用方。
@@ -144,6 +153,7 @@ await adispatch_custom_event("file_artifact", {
 - **tool_call_args SSE 洪泛**：每个 JSON 片段都发一次。已加节流（200ms 或 500 字符一批）。
 - **心跳 Redis 调用无超时**：Redis 慢时阻塞心跳循环。已加 `wait_for(timeout=2)`。
 - **onToolCallArgs 找不到工具**：`_generating` 标记可能不存在。已加兜底 `findLast(t => !t.done)`。
+- **`ToolExecutionStatus.RUNNING.value` AttributeError**：重构状态机时把 `ToolExecutionStatus` 从 Enum 误改为普通类（类属性是裸字符串没有 `.value`），`tool_store.py` 调 `.value` 崩溃 → 异常被 `_track_sse_for_db` 吞掉 → **所有 tool_execution 记录从未写入 DB** → 刷新后终端全部消失。已改回 `str, Enum` 枚举。教训：**状态枚举必须继承 `(str, Enum)`，不要用普通类模拟**。
 - **`save_artifact` INSERT 后 id=0**：`session.add()` 后直接 `commit()` 没 `flush()`，新记录的自增 ID 拿不到 → SSE 事件带 `id:0` → 前端下载 `/api/artifacts/0/download` 返回空。已改为先 `flush()` 再 `commit()`。
 - **沙箱会话跨 worker 丢失**：`_sessions` 是进程内 dict，刷新后落到不同 worker → 分配新沙箱 → 原文件找不到。已加 `conversations.sandbox_worker_id` DB 字段持久化。
 - **`_get_worker_for_session` 用同步 DB 引擎**：为了同步读 DB 引入了 psycopg 第二套连接池，容器没装驱动就崩。已改为 async（所有调用方本来就是 async），砍掉同步引擎。

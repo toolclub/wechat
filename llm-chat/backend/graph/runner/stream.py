@@ -102,11 +102,11 @@ class StreamSession:
         self._last_flush = time.time()
         self._tool_seq = 0
 
-        # 工具调用 DB 持久化（刷新后恢复 sandbox 终端等）
-        self._pending_tool_exec_id: int = 0
-        self._pending_tool_name: str = ""
-        self._sandbox_output_buf: str = ""  # 累积当前工具的 sandbox 终端输出
-        self._pending_search_items: list[dict] = []  # 累积当前工具的搜索结果
+        # 工具调用 DB 持久化（支持多工具并行，按 seq 追踪每个工具的状态）
+        self._tool_exec_map: dict[int, int] = {}   # tool_seq → tool_execution DB id
+        self._tool_output_map: dict[int, str] = {}  # tool_seq → 累积的 sandbox 输出
+        self._tool_search_map: dict[int, list] = {} # tool_seq → 搜索结果
+        self._current_tool_seq: int = 0              # 当前活跃工具的 seq（最新 tool_call）
 
         # 消息终态化锁（防止 _periodic_flush 和 _finalize_message 竞态）
         self._finalize_lock = asyncio.Lock()
@@ -365,39 +365,44 @@ class StreamSession:
         if data.get("content"):
             self._content_buf += data["content"]
 
-        # ── 工具调用开始 → 创建 tool_execution 记录 ──
+        # ── 工具调用开始 → 创建 tool_execution 记录（支持多工具并行） ──
         if data.get("tool_call"):
             tc = data["tool_call"]
             self._tool_seq += 1
-            self._pending_tool_name = tc.get("name", "")
-            self._sandbox_output_buf = ""  # 重置终端输出缓冲
-            self._pending_search_items = []  # 重置搜索结果缓冲
+            seq = self._tool_seq
+            self._current_tool_seq = seq
+            self._tool_output_map[seq] = ""
+            self._tool_search_map[seq] = []
             try:
                 from db.tool_store import create_tool_execution
-                self._pending_tool_exec_id = await create_tool_execution(
+                exec_id = await create_tool_execution(
                     conv_id=self.conv_id,
                     message_id=self.assistant_message_id,
                     tool_name=tc.get("name", ""),
                     tool_input=tc.get("input", {}),
-                    sequence_number=self._tool_seq,
+                    sequence_number=seq,
                 )
+                self._tool_exec_map[seq] = exec_id
             except Exception as exc:
                 logger.warning("tool_execution 创建失败: %s", exc)
-                self._pending_tool_exec_id = 0
 
-        # ── sandbox 终端输出 → 累积（刷新后恢复用） ──
+        # ── sandbox 终端输出 → 累积到当前活跃工具 ──
         if data.get("sandbox_output"):
             so = data["sandbox_output"]
-            self._sandbox_output_buf += so.get("text", "")
+            seq = self._current_tool_seq
+            if seq in self._tool_output_map:
+                self._tool_output_map[seq] += so.get("text", "")
 
-        # ── 搜索结果 → 累积到缓冲，tool_result 时写入 DB ──
+        # ── 搜索结果 → 累积到当前活跃工具 ──
         if data.get("search_item"):
             si = data["search_item"]
-            self._pending_search_items.append({
-                "url": si.get("url", ""),
-                "title": si.get("title", ""),
-                "status": si.get("status", "done"),
-            })
+            seq = self._current_tool_seq
+            if seq in self._tool_search_map:
+                self._tool_search_map[seq].append({
+                    "url": si.get("url", ""),
+                    "title": si.get("title", ""),
+                    "status": si.get("status", "done"),
+                })
 
         # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
         if data.get("file_artifact"):
@@ -417,13 +422,14 @@ class StreamSession:
             except Exception as exc:
                 logger.warning("artifact 兜底保存失败: %s", exc)
 
-        # ── 工具调用结束 → 标记完成，写入累积的终端输出和搜索结果 ──
+        # ── 工具调用结束 → 按 seq 匹配对应工具，写入 DB ──
         if data.get("tool_result"):
             tr = data["tool_result"]
-            if self._pending_tool_exec_id:
-                # 优先用累积的 sandbox 终端输出（和推理过程一致），
-                # 没有的话 fallback 到 tool_result 的 output 字段
-                output = self._sandbox_output_buf or tr.get("output", "")
+            seq = self._current_tool_seq
+            exec_id = self._tool_exec_map.get(seq, 0)
+            if exec_id:
+                output = self._tool_output_map.get(seq, "") or tr.get("output", "")
+                search_items = self._tool_search_map.get(seq) or None
                 # 状态机驱动：running → done/error/timeout
                 from fsm.tool_execution import ToolExecutionSM
                 raw_status = tr.get("status", "done")
@@ -433,16 +439,17 @@ class StreamSession:
                 try:
                     from db.tool_store import complete_tool_execution
                     await complete_tool_execution(
-                        self._pending_tool_exec_id,
+                        exec_id,
                         output=output[:20000],
                         status=status,
-                        search_items=self._pending_search_items or None,
+                        search_items=search_items,
                     )
                 except Exception as exc:
                     logger.warning("tool_execution 完成失败: %s", exc)
-                self._pending_tool_exec_id = 0
-                self._sandbox_output_buf = ""
-                self._pending_search_items = []
+                # 清理已完成工具的缓冲
+                self._tool_exec_map.pop(seq, None)
+                self._tool_output_map.pop(seq, None)
+                self._tool_search_map.pop(seq, None)
 
     @staticmethod
     def _detect_event_type(sse_str: str) -> str:
@@ -517,8 +524,8 @@ class StreamSession:
                     stream_buffer="",  # 显式清空
                     stream_completed=True,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("_finalize_message 写 DB 失败: %s", exc)
 
     async def _save_partial(self) -> None:
         """保存部分响应（用户停止或异常时）。"""
@@ -549,8 +556,8 @@ class StreamSession:
             await memory_store.update_message_streaming(
                 self.assistant_db_id, stream_buffer="", stream_completed=True,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("_mark_stream_completed 失败: %s", exc)
 
     async def _set_done(self, status: str) -> None:
         """通过状态机驱动会话结束：streaming → completed/error/active。"""
@@ -561,8 +568,8 @@ class StreamSession:
             self._conv_sm.send_event(status)
             from memory import store as memory_store
             await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("_set_done 状态持久化失败: %s", exc)
         # 注销 Redis 活跃会话
         try:
             from db.redis_state import unregister_streaming

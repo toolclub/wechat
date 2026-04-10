@@ -211,12 +211,18 @@ interface Section {
 const sections = computed<Section[]>(() => {
   if (props.message.role !== 'assistant') return []
   if (props.message.steps?.length) {
-    return props.message.steps.map(step => ({
+    const result = props.message.steps.map(step => ({
       step,
       toolCalls: step.toolCalls,
       thinking: step.thinking,
       content: step.content,
     }))
+    // 兜底：steps 没有 toolCalls（DB 恢复时工具在 message 级别），分配到最后一个 section
+    const totalStepTools = result.reduce((n, s) => n + s.toolCalls.length, 0)
+    if (totalStepTools === 0 && props.message.toolCalls?.length) {
+      result[result.length - 1].toolCalls = props.message.toolCalls
+    }
+    return result
   }
   return [{
     step: null,

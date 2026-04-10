@@ -79,6 +79,12 @@ watch(
   () => props.messages.length,
   async (newLen, oldLen) => {
     if (newLen < oldLen) {
+      // 消息被删除（如编辑重发），强制滚到底部
+      userScrolledUp = false
+      await nextTick()
+      scrollToBottom(true)
+    } else if (oldLen === 0 && newLen > 0) {
+      // 首次加载 / 切换对话：消息从 DB 批量恢复，直接滚到底部
       userScrolledUp = false
       await nextTick()
       scrollToBottom(true)

@@ -37,9 +37,10 @@ export function useChat() {
   const convStates = reactive<Record<string, ConvState>>({})
   const initialLoading = ref(false)  // 页面刷新时从 DB 恢复数据的全局 loading
 
-  // ── 防抖：用户猛刷新时 2 秒内只执行一次 full-state 请求 ──
-  let _lastSelectTime = 0
-  const _SELECT_DEBOUNCE_MS = 2000
+  // ── 防抖：快速切换对话时 last-wins，丢弃过时的 full-state 响应 ──
+  let _selectVersion = 0                       // 递增版本号，标记最新一次 select
+  const _selectCache = new Map<string, number>() // conv_id → 上次请求的时间戳（同会话去重）
+  const _SELECT_SAME_DEBOUNCE_MS = 2000          // 同一对话 2 秒内不重复请求
 
   // Used to attach workflowPlan/workflowGoal to the next user message push
   const _nextWorkflowPlan = ref<PlanStep[] | null>(null)
@@ -120,15 +121,28 @@ export function useChat() {
     window.location.hash = id
     if (convStates[id]?.loading) return
 
-    // 防抖：2 秒内对同一对话的重复请求直接跳过
+    // ── 防抖策略：同会话去重 + 跨会话 last-wins ──
+    // 1. 同一对话 2 秒内不重复请求（防 F5 猛刷）
     const now = Date.now()
-    if (now - _lastSelectTime < _SELECT_DEBOUNCE_MS) return
-    _lastSelectTime = now
+    const lastTime = _selectCache.get(id) || 0
+    if (now - lastTime < _SELECT_SAME_DEBOUNCE_MS) return
+    _selectCache.set(id, now)
+
+    // 2. 不同对话快速切换时，版本号递增使过时响应自动失效（last-wins）
+    const version = ++_selectVersion
     const s = getOrCreate(id)
+
+    // 首次加载该对话时显示全局 loading 遮罩（防止闪烁"新对话"空页面）
+    const needsLoading = s.messages.length === 0
+    if (needsLoading) initialLoading.value = true
 
     // ── 一次性从 DB 获取完整状态（full-state API 直接查数据库，跨 worker 安全） ──
     try {
       const fullState = await api.fetchFullState(id)
+
+      // last-wins：如果用户在等待期间又切换了别的对话，丢弃这个过时响应
+      if (version !== _selectVersion) return
+
       if (fullState.error) {
         s.messages = []; s.cognitive = makeEmptyCognitiveState(); s.canContinue = false
         return
@@ -167,7 +181,7 @@ export function useChat() {
             searchItems: te.search_items?.length ? te.search_items : undefined,
             fetchStatus: te.tool_name === 'fetch_webpage'
               ? (te.status === 'done' ? 'done' : 'loading') : undefined,
-            done: te.status === 'done',
+            done: te.status !== 'running',  // error/done/timeout 都算完成
           }))
         }
 
@@ -204,6 +218,25 @@ export function useChat() {
           id: st.id, title: st.title, description: st.description ?? '',
           status: st.status ?? 'done', result: st.result ?? '',
         }))
+
+        // ── 从 plan 数据重建 msg.steps（刷新后恢复多步渲染） ──
+        // plan.steps 的 result 字段保存了每步的模型输出（最多 3000 字符）
+        const planSteps = fullState.plan.steps || []
+        const hasStepResults = planSteps.some((st: any) => st.result)
+        if (hasStepResults && s.messages.length > 0) {
+          const lastAssistantIdx = s.messages.findLastIndex((m: Message) => m.role === 'assistant')
+          if (lastAssistantIdx >= 0) {
+            const lastAssistant = s.messages[lastAssistantIdx]
+            lastAssistant.steps = planSteps.map((st: any, i: number): StepRecord => ({
+              index: i,
+              title: st.title,
+              status: st.status ?? 'done',
+              toolCalls: [],   // 工具记录在 message 级别，由 sections 计算兜底
+              thinking: '',
+              content: st.result ?? '',
+            }))
+          }
+        }
       }
       s.canContinue = false
 
@@ -220,6 +253,8 @@ export function useChat() {
     } catch (err) {
       console.error('[selectConversation] 加载失败:', err)
       s.messages = []; s.cognitive = makeEmptyCognitiveState(); s.canContinue = false
+    } finally {
+      if (needsLoading) initialLoading.value = false
     }
   }
 

@@ -7,3 +7,6 @@ __pycache__/
 conversations/
 *.log
 .git/
+tests/
+test_case.md
+pytest.ini

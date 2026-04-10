@@ -81,6 +81,14 @@ async def lifespan(app: FastAPI):
     # 3. 初始化语义缓存（Redis Search）
     try:
         await init_cache()
+        # 启动时清理语义缓存（清除可能含工具调用响应的旧脏数据）
+        # 缓存是加速层，清空后会自然重建，不影响功能
+        try:
+            from cache.factory import get_cache
+            await get_cache().clear()
+            logger.info("语义缓存已清理（启动时一次性清除旧数据）")
+        except Exception:
+            pass
     except Exception as exc:
         logger.error("语义缓存初始化失败（已降级为 NullCache）: %s", exc)
 
@@ -419,8 +427,8 @@ async def stop_chat(conv_id: str):
     try:
         from db.redis_state import publish_stop
         await publish_stop(conv_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Redis publish_stop 失败: %s", exc)
     return {"ok": True}
 
 
