@@ -217,7 +217,8 @@ const sections = computed<Section[]>(() => {
       thinking: step.thinking,
       content: step.content,
     }))
-    // 兜底：steps 没有 toolCalls（DB 恢复时工具在 message 级别），分配到最后一个 section
+    // DB 恢复兜底：如果所有 step 的 toolCalls 都空但 message 级别有（旧数据无 step_index），
+    // 将 message 级别工具分配到最后一个 section，保证工具卡片可见
     const totalStepTools = result.reduce((n, s) => n + s.toolCalls.length, 0)
     if (totalStepTools === 0 && props.message.toolCalls?.length) {
       result[result.length - 1].toolCalls = props.message.toolCalls

@@ -381,6 +381,7 @@ class StreamSession:
                     tool_name=tc.get("name", ""),
                     tool_input=tc.get("input", {}),
                     sequence_number=seq,
+                    step_index=self._step_idx if self._plan_id else None,
                 )
                 self._tool_exec_map[seq] = exec_id
             except Exception as exc:
@@ -643,6 +644,7 @@ class StreamSession:
             "vision_description": "", "needs_clarification": False, "clarification_data": {},
             "pre_user_db_id": self.user_db_id,
             "pre_assistant_db_id": self.assistant_db_id,
+            "assistant_message_id": self.assistant_message_id,
             "force_plan": self.force_plan, "plan": [], "plan_id": "",
             "plan_goal": "", "current_step_index": 0,
             "step_iterations": 0, "reflector_decision": "",

@@ -73,6 +73,12 @@ _MIGRATIONS = [
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS size INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS slide_count INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS ix_artifacts_message ON artifacts(message_id)",
+
+    # ── tool_executions 补字段（步骤索引，关联计划步骤） ──
+    "ALTER TABLE tool_executions ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT NULL",
+
+    # ── plan_steps 补字段（关联 assistant 消息） ──
+    "ALTER TABLE plan_steps ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",
 ]
 
 

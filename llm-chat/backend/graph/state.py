@@ -67,3 +67,4 @@ class GraphState(TypedDict):
     # ── DB 预写行 ID（StreamSession 在流开始时写入 DB，save_response UPDATE 而非 INSERT）──
     pre_user_db_id: int          # 预写的 user 消息 DB ID
     pre_assistant_db_id: int     # 预写的 assistant 消息 DB ID
+    assistant_message_id: str    # assistant 消息的业务 ID（用于 plan_steps.message_id 关联）

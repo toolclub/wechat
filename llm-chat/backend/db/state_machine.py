@@ -8,6 +8,7 @@ from enum import Enum
 from fsm.sse_events import SSEEventType, detect_sse_event_type
 from fsm.conversation import ConversationSM
 from fsm.tool_execution import ToolExecutionSM
+from fsm.plan_step import PlanStepSM
 
 
 def validate_conv_transition(current: str, target_status: str) -> bool:
@@ -49,13 +50,23 @@ class ToolExecutionStatus(str, Enum):
     TIMEOUT = "timeout"
 
 
+class PlanStepStatus(str, Enum):
+    """计划步骤状态枚举。继承 str 使 .value 返回字符串，兼容 DB 存储和 JSON 序列化。"""
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
 __all__ = [
     "ConversationSM",
     "ToolExecutionSM",
+    "PlanStepSM",
     "SSEEventType",
     "detect_sse_event_type",
     "validate_conv_transition",
     "validate_tool_transition",
     "ConversationStatus",
     "ToolExecutionStatus",
+    "PlanStepStatus",
 ]

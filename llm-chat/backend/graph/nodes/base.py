@@ -170,10 +170,31 @@ class BaseNode(ABC):
 
     @staticmethod
     def _mark_step(plan: list[PlanStep], idx: int, status: str) -> list[PlanStep]:
-        """返回将指定步骤状态设为 status 的新计划列表（不修改原列表）。"""
+        """
+        返回将指定步骤状态设为 status 的新计划列表（不修改原列表）。
+
+        状态转换通过 PlanStepSM 状态机校验：pending→running→done|failed。
+        非法转换记录警告并跳过（不崩溃，降级容错）。
+        """
         updated = list(plan)
         if 0 <= idx < len(updated):
-            updated[idx] = {**updated[idx], "status": status}
+            current_status = updated[idx].get("status", "pending")
+            # 已在目标状态（如 retry 时 running → running），跳过状态机直接返回
+            if current_status == status:
+                return updated
+            from fsm.plan_step import PlanStepSM
+            try:
+                sm = PlanStepSM.from_db_status(current_status)
+                new_status = sm.send_event(status)
+            except Exception:
+                # 状态机校验失败（如 done → running），降级直接设置
+                import logging
+                logging.getLogger("graph.nodes.base").warning(
+                    "步骤状态转换异常: %s → %s (idx=%d)，降级直接设置",
+                    current_status, status, idx,
+                )
+                new_status = status
+            updated[idx] = {**updated[idx], "status": new_status}
         return updated
 
     # ══════════════════════════════════════════════════════════════════════════

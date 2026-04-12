@@ -18,6 +18,7 @@ export interface ToolCallRecord {
   searchItems?: SearchItem[]
   fetchStatus?: 'loading' | 'done' | 'fail'
   done: boolean
+  step_index?: number   // DB 字段：所属计划步骤索引（刷新恢复时用于分发到对应步骤）
 }
 
 export interface PlanStep {
@@ -59,6 +60,7 @@ export interface Message {
   steps?: StepRecord[]
   images?: string[]
   timestamp?: number
+  message_id?: string                  // DB 业务 ID（用于 plan.message_id 精确匹配）
   toolCalls?: ToolCallRecord[]
   artifacts?: FileArtifact[]           // 关联的产物元数据（DB 外键，刷新恢复用）
   workflowPlan?: PlanStep[]
