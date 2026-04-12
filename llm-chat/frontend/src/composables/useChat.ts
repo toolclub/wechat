@@ -162,11 +162,11 @@ export function useChat() {
               .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')  // COMPAT: 旧数据兼容
           : rawContent
 
-        const msg: Message & { message_id?: string } = {
+        const msg: Message = {
           role: m.role,
           content: cleanContent,
           timestamp: m.timestamp,
-          message_id: m.message_id || undefined,  // 用于 plan.message_id 精确匹配
+          message_id: m.message_id || undefined,  // DB 业务 ID，用于 plan.message_id 精确匹配
         }
 
         // thinking 直接从 messages 表恢复（不再依赖 message_details）
