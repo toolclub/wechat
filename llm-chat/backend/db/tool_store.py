@@ -18,6 +18,7 @@ async def create_tool_execution(
     tool_name: str,
     tool_input: dict,
     sequence_number: int = 0,
+    step_index: int | None = None,
 ) -> int:
     """创建工具调用记录（status=RUNNING），返回自增 ID。"""
     from db.state_machine import ToolExecutionStatus
@@ -30,6 +31,7 @@ async def create_tool_execution(
             tool_input=tool_input,
             status=ToolExecutionStatus.RUNNING.value,
             sequence_number=sequence_number,
+            step_index=step_index,
             created_at=time.time(),
         )
         session.add(row)
@@ -92,6 +94,7 @@ async def get_tool_executions_for_conv(conv_id: str) -> list[dict]:
             "tool_output": r.tool_output,
             "search_items": r.search_items or [],
             "status": r.status,
+            "step_index": r.step_index,
             "sequence_number": r.sequence_number,
             "duration": r.duration,
             "created_at": r.created_at,

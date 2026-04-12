@@ -105,6 +105,10 @@ class ToolExecutionModel(Base):
         String(20), nullable=False, default="running",
         comment="running / done / error",
     )
+    step_index = Column(
+        Integer, nullable=True, default=None,
+        comment="所属计划步骤索引（0-based），无计划时为 NULL",
+    )
     sequence_number = Column(Integer, nullable=False, default=0)
     duration = Column(Float, nullable=False, default=0)
     created_at = Column(Float, nullable=False)
@@ -146,6 +150,10 @@ class PlanStepModel(Base):
 
     id = Column(String(36), primary_key=True)
     conv_id = Column(String(36), nullable=False, index=True)
+    message_id = Column(
+        String(36), nullable=False, default="",
+        comment="关联的 assistant 消息 ID（哪条消息触发了这个计划）",
+    )
     goal = Column(Text, nullable=False, default="")
     steps = Column(JSONB, nullable=False, default=list)
     current_step = Column(Integer, nullable=False, default=0)

@@ -38,6 +38,20 @@ RUNNING ─finish→ DONE | ─fail→ ERROR | ─expire→ TIMEOUT
 
 `_track_sse_for_db` 收到 `tool_result` 时创建 `ToolExecutionSM` 实例做转换，结果写 DB。`SandboxFormatter` 从 `exit_code` 判断 done/error。
 
+### 计划步骤（`fsm/plan_step.py`）
+
+```
+PENDING ─start→ RUNNING ─finish→ DONE
+                         ─fail──→ FAILED
+```
+
+`_mark_step()` 通过 `PlanStepSM` 校验状态转换后写 DB。`plan_steps.steps` JSONB 存储每步状态和结果。
+
+DB 关联：
+- `plan_steps.message_id` → 关联触发该计划的 assistant 消息
+- `tool_executions.step_index` → 关联工具属于哪个计划步骤（0-based，无计划时 NULL）
+- 前端刷新时通过 `step_index` 精确分发工具到对应步骤，通过 `plan.message_id` 匹配消息
+
 ### 消息写入时序
 
 ```

@@ -82,6 +82,19 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | `ConversationStatus("active") == ConversationStatus.ACTIVE` | `True` |
 | `json.dumps({"s": ConversationStatus.ACTIVE})` | `'{"s": "active"}'` |
 
+### T-FSM-07: 计划步骤状态机
+
+| 用例 | 输入 | 期望 |
+|------|------|------|
+| pending → running | `send_event("running")` | current_value = "running" |
+| running → done | `send_event("done")` | current_value = "done" |
+| running → failed | `send_event("failed")` | current_value = "failed" |
+| done → running (终态不可转) | `send_event("running")` | 抛 TransitionNotAllowed |
+| pending → done (跳步) | `send_event("done")` | 抛 TransitionNotAllowed |
+| from_db_status("running") | `PlanStepSM.from_db_status("running")` | current_value = "running" |
+| from_db_status 无效值 | `PlanStepSM.from_db_status("xxx")` | current_value = "pending"（降级默认值） |
+| PlanStepStatus 枚举 | `PlanStepStatus.DONE.value` | `"done"` |
+
 ---
 
 ## 二、数据库层 (db/)
@@ -91,10 +104,19 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 用例 | 操作 | 期望 | 标记 |
 |------|------|------|------|
 | 创建工具记录 | `create_tool_execution(conv_id, msg_id, "web_search", {})` | 返回 int > 0，status="running" | integration |
+| 创建工具记录带 step_index | `create_tool_execution(..., step_index=1)` | DB 行 step_index=1 | integration |
+| 创建工具记录无计划 | `create_tool_execution(..., step_index=None)` | DB 行 step_index=NULL | integration |
 | 完成工具 | `complete_tool_execution(id, output="ok", status="done")` | DB 行 status="done" | integration |
 | 带搜索结果完成 | `complete_tool_execution(id, search_items=[...])` | search_items 非空 | integration |
-| 获取对话工具 | `get_tool_executions_for_conv(conv_id)` | 返回列表，按 id 排序 | integration |
+| 获取对话工具 | `get_tool_executions_for_conv(conv_id)` | 返回列表含 step_index 字段，按 id 排序 | integration |
 | 获取消息工具 | `get_tool_executions_for_message(msg_id)` | 只返回该 message 的工具 | integration |
+
+### T-DB-01b: plan_store 关联
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 创建计划带 message_id | `create_plan(..., message_id="abc123")` | DB 行 message_id="abc123" | integration |
+| 获取计划返回 message_id | `get_latest_plan_for_conv(conv_id)` | 返回 dict 含 message_id | integration |
 
 ### T-DB-02: artifact_store
 

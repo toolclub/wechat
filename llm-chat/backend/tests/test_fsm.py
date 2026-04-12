@@ -221,3 +221,69 @@ class TestEnumCompat:
         from db.state_machine import validate_tool_transition
         assert validate_tool_transition("running", "done") is True
         assert validate_tool_transition("done", "error") is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# T-FSM-07: 计划步骤状态机
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestPlanStepSM:
+    def test_pending_to_running(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        sm.send_event("running")
+        assert sm.current_value == "running"
+
+    def test_running_to_done(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        sm.send_event("running")
+        sm.send_event("done")
+        assert sm.current_value == "done"
+
+    def test_running_to_failed(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        sm.send_event("running")
+        sm.send_event("failed")
+        assert sm.current_value == "failed"
+
+    def test_done_is_final(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        sm.send_event("running")
+        sm.send_event("done")
+        with pytest.raises(Exception):
+            sm.send_event("running")
+
+    def test_pending_to_done_rejected(self):
+        """跳步不允许：pending 不能直接到 done"""
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        with pytest.raises(Exception):
+            sm.send_event("done")
+
+    def test_from_db_status_running(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM.from_db_status("running")
+        assert sm.current_value == "running"
+
+    def test_from_db_status_invalid(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM.from_db_status("xxx")
+        assert sm.current_value == "pending"
+
+    def test_plan_step_status_enum(self):
+        from db.state_machine import PlanStepStatus
+        assert PlanStepStatus.DONE.value == "done"
+        assert PlanStepStatus.PENDING == "pending"
+
+    def test_full_lifecycle(self):
+        from fsm.plan_step import PlanStepSM
+        sm = PlanStepSM()
+        assert sm.current_value == "pending"
+        sm.send_event("running")
+        assert sm.current_value == "running"
+        sm.send_event("done")
+        assert sm.current_value == "done"

@@ -162,17 +162,18 @@ export function useChat() {
               .replace(/\n\n【执行过程摘要】[\s\S]*$/, '')  // COMPAT: 旧数据兼容
           : rawContent
 
-        const msg: Message = {
+        const msg: Message & { message_id?: string } = {
           role: m.role,
           content: cleanContent,
           timestamp: m.timestamp,
+          message_id: m.message_id || undefined,  // 用于 plan.message_id 精确匹配
         }
 
         // thinking 直接从 messages 表恢复（不再依赖 message_details）
         if (m.thinking) msg.thinking = m.thinking
         if (m.images?.length) msg.images = m.images
 
-        // tool_executions 从新表恢复
+        // tool_executions 从新表恢复（含 step_index 用于步骤分发）
         if (m.tool_executions?.length) {
           msg.toolCalls = m.tool_executions.map((te: any) => ({
             name: te.tool_name,
@@ -182,6 +183,7 @@ export function useChat() {
             fetchStatus: te.tool_name === 'fetch_webpage'
               ? (te.status === 'done' ? 'done' : 'loading') : undefined,
             done: te.status !== 'running',  // error/done/timeout 都算完成
+            step_index: te.step_index ?? undefined,  // DB 字段，用于步骤分发
           }))
         }
 
@@ -219,22 +221,47 @@ export function useChat() {
           status: st.status ?? 'done', result: st.result ?? '',
         }))
 
-        // ── 从 plan 数据重建 msg.steps（刷新后恢复多步渲染） ──
-        // plan.steps 的 result 字段保存了每步的模型输出（最多 3000 字符）
+        // ── DB-first：从 plan + tool_executions 精确重建 msg.steps ──
+        // plan.steps[i].result 保存了每步的模型输出（最多 3000 字符）
+        // tool_executions[].step_index 标记了工具属于哪个步骤
         const planSteps = fullState.plan.steps || []
+        const planMsgId = fullState.plan.message_id || ''
         const hasStepResults = planSteps.some((st: any) => st.result)
         if (hasStepResults && s.messages.length > 0) {
-          const lastAssistantIdx = s.messages.findLastIndex((m: Message) => m.role === 'assistant')
-          if (lastAssistantIdx >= 0) {
-            const lastAssistant = s.messages[lastAssistantIdx]
+          // 通过 plan.message_id 精确匹配 assistant 消息（无 message_id 时降级到最后一条）
+          const targetIdx = planMsgId
+            ? s.messages.findLastIndex((m: any) => m.role === 'assistant' && m.message_id === planMsgId)
+            : -1
+          const assistantIdx = targetIdx >= 0
+            ? targetIdx
+            : s.messages.findLastIndex((m: Message) => m.role === 'assistant')
+          if (assistantIdx >= 0) {
+            const lastAssistant = s.messages[assistantIdx]
+            // 按 step_index 分发 toolCalls 到对应步骤
+            const toolsByStep = new Map<number, typeof lastAssistant.toolCalls>()
+            if (lastAssistant.toolCalls) {
+              for (const tc of lastAssistant.toolCalls) {
+                const si = (tc as any).step_index
+                if (si != null) {
+                  if (!toolsByStep.has(si)) toolsByStep.set(si, [])
+                  toolsByStep.get(si)!.push(tc)
+                }
+              }
+            }
             lastAssistant.steps = planSteps.map((st: any, i: number): StepRecord => ({
               index: i,
               title: st.title,
               status: st.status ?? 'done',
-              toolCalls: [],   // 工具记录在 message 级别，由 sections 计算兜底
+              toolCalls: toolsByStep.get(i) ?? [],
               thinking: '',
               content: st.result ?? '',
             }))
+            // 有 step_index 的工具已分配到步骤，从 message 级别移除避免重复
+            if (toolsByStep.size > 0 && lastAssistant.toolCalls) {
+              lastAssistant.toolCalls = lastAssistant.toolCalls.filter(
+                (tc: any) => tc.step_index == null
+              )
+            }
           }
         }
       }

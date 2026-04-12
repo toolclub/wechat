@@ -120,13 +120,18 @@ class CallModelNode(BaseNode):
         use_tools = bool(self._tools)
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
 
-        # ── 消息列表（本地副本，步骤 1+ 使用聚焦上下文，不喂完整历史） ────────
+        # ── 消息列表（本地副本，有计划时做上下文隔离，防止模型提前执行后续步骤） ──
         current_idx = cur_idx
 
         if plan and current_idx > 0 and current_idx < len(plan):
             # 步骤 1+：用 GraphState.plan 中已有的步骤结果构建聚焦消息，
             # 完全不依赖 state["messages"] 的积累历史，实现真正的上下文隔离。
             messages = self._build_focused_step_messages(state, plan, current_idx)
+        elif plan and current_idx == 0 and current_idx < len(plan) and step_iters == 0:
+            # 步骤 0：保留对话历史（模型需要知道"刚刚讨论了什么"），
+            # 但替换系统提示为聚焦版 + 重写用户消息为步骤指令，
+            # 防止模型看到原始请求后提前执行最终任务（如直接写 PPT）。
+            messages = self._build_step0_messages(state, plan)
         else:
             messages = list(state["messages"])
 
@@ -139,26 +144,6 @@ class CallModelNode(BaseNode):
             step_iters,
             len(messages),
         )
-
-        # 步骤 0：首次调用时注入步骤上下文到最后一条 HumanMessage
-        if plan and current_idx == 0 and current_idx < len(plan) and step_iters == 0:
-            step     = plan[current_idx]
-            total    = len(plan)
-            step_ctx = (
-                f"\n\n---\n**[执行步骤 {current_idx + 1}/{total}]: {step['title']}**\n"
-                f"具体任务：{step['description']}\n"
-                "请使用工具完成此步骤，收集所需信息。"
-            )
-            # 追加到最后的 HumanMessage（仅用于本次 LLM 调用，不写回 state）
-            if messages and messages[-1].__class__.__name__ == "HumanMessage":
-                last_content = messages[-1].content
-                if isinstance(last_content, list):
-                    # 多模态消息：追加文本部分
-                    messages[-1] = HumanMessage(
-                        content=list(last_content) + [{"type": "text", "text": step_ctx}]
-                    )
-                else:
-                    messages[-1] = HumanMessage(content=str(last_content) + step_ctx)
 
         # ── 路径选择 ────────────────────────────────────────────────────────
         # VisionNode 已在上游完成图片分析，vision_description 写入 state。
@@ -173,8 +158,50 @@ class CallModelNode(BaseNode):
             return await self._llm_path(state, messages, model, temperature, use_tools, tools_schema, conv_id)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # 聚焦步骤消息构建（步骤 1+ 专用）
+    # 聚焦步骤消息构建
     # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _build_step0_messages(state: GraphState, plan: list) -> list:
+        """
+        步骤 0 消息构建：保留对话历史 + 聚焦当前步骤。
+
+        与步骤 1+ 不同，步骤 0 需要对话历史（模型要知道"刚刚讨论了什么"），
+        但必须做两件事防止模型提前执行后续步骤：
+          1. 替换 SystemMessage 为聚焦执行者提示（"每次只完成当前步骤"）
+          2. 替换最后的 HumanMessage 为步骤指令（隐藏原始用户请求中的最终意图）
+        """
+        step  = plan[0]
+        total = len(plan)
+        messages = list(state["messages"])
+
+        # 1. 替换 SystemMessage：加入聚焦约束
+        focused_system = _load_prompt("nodes/call_model_step")
+        if messages and messages[0].__class__.__name__ == "SystemMessage":
+            # 保留原系统提示的基础能力，追加聚焦约束
+            messages[0] = SystemMessage(
+                content=messages[0].content + "\n\n" + focused_system
+            )
+
+        # 2. 替换最后的 HumanMessage：用步骤指令代替原始用户请求
+        #    原始请求（如"帮我写PPT"）会让模型跳过前置步骤直接生成产品
+        #    保留用户消息的前半部分作为背景（如"帮我把刚刚对比的结果"），
+        #    但用步骤指令明确限定当前任务边界
+        user_msg = state.get("user_message", "")
+        step_instruction = (
+            f"用户的完整需求是：{user_msg}\n"
+            f"该需求已被拆解为 {total} 个步骤，你现在只需要完成第 1 步。\n\n"
+            f"---\n"
+            f"**[执行步骤 1/{total}]: {step['title']}**\n"
+            f"具体任务：{step['description']}\n\n"
+            f"⚠️ 严格只完成当前步骤，不要提前执行后续步骤的任务。"
+        )
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].__class__.__name__ == "HumanMessage":
+                messages[i] = HumanMessage(content=step_instruction)
+                break
+
+        return messages
 
     @staticmethod
     def _build_focused_step_messages(
@@ -187,7 +214,7 @@ class CallModelNode(BaseNode):
 
         设计原则：
           - 模型只看到：总目标 + 已完成步骤摘要 + 当前步骤指令
-          - 不含原始对话历史、mid_term_summary、long_term_memories
+          - 不含原始对话历史（步骤 0 由 _build_step0_messages 处理，保留历史）
           - 末步使用对话的系统提示（保持风格/人格一致）
           - 中间步骤使用聚焦执行者系统提示（防止提前生成最终产品）
 

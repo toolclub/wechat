@@ -182,6 +182,7 @@ class PlannerNode(BaseNode):
                 conv_id=conv_id,
                 goal=goal,
                 steps=[dict(s) for s in plan],
+                message_id=state.get("assistant_message_id", ""),
             )
         except Exception:
             logger.warning("force_plan 写入 DB 失败 | conv=%s", conv_id, exc_info=True)
@@ -515,6 +516,7 @@ class PlannerNode(BaseNode):
                     conv_id=state.get("conv_id", ""),
                     goal=goal,
                     steps=steps_for_db,
+                    message_id=state.get("assistant_message_id", ""),
                 )
             except Exception as exc:
                 logger.error("写入 plan_steps DB 失败: %s", exc)

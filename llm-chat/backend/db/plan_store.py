@@ -27,10 +27,12 @@ async def create_plan(
     conv_id: str,
     goal: str,
     steps: list[dict],
+    message_id: str = "",
 ) -> None:
     """
     将 planner 规划结果写入 plan_steps 表。
     全部字段来自 GraphState，不依赖 DB 读取。
+    message_id 关联触发该计划的 assistant 消息。
     """
     now = time.time()
     try:
@@ -38,6 +40,7 @@ async def create_plan(
             session.add(PlanStepModel(
                 id=plan_id,
                 conv_id=conv_id,
+                message_id=message_id,
                 goal=goal,
                 steps=steps,
                 current_step=0,
@@ -159,9 +162,10 @@ async def get_latest_plan_for_conv(conv_id: str) -> dict | None:
             if not row:
                 return None
             return {
-                "id":    row.id,
-                "goal":  row.goal,
-                "steps": list(row.steps or []),
+                "id":         row.id,
+                "message_id": row.message_id,
+                "goal":       row.goal,
+                "steps":      list(row.steps or []),
             }
     except Exception as exc:
         logger.error("读取最新计划失败 | conv=%s | error=%s", conv_id, exc)
