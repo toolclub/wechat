@@ -293,8 +293,13 @@ class ReflectorNode(BaseNode):
             tool_execs = await get_tool_executions_for_conv(conv_id)
             if tool_execs:
                 return tool_execs[-1].get("status") == "error"
-        except Exception:
-            pass
+        except Exception as exc:
+            # spec 铁律 #9：DB 查询失败要落日志，否则 reflector 错误判定路径
+            # 永远走"未失败"分支，多步循环可能卡死都查不出原因。
+            import logging
+            logging.getLogger("graph.nodes.reflector").warning(
+                "_last_tool_failed 查询 tool_executions 失败 conv=%s: %s", conv_id, exc,
+            )
         return False
 
     @staticmethod

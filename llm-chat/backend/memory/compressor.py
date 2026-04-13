@@ -44,7 +44,7 @@ async def maybe_compress(conv_id: str) -> bool:
     Returns:
         True 表示执行了压缩，False 表示未执行。
     """
-    conv = memory_store.get(conv_id)
+    conv = await memory_store.get(conv_id)
     if not conv or not should_compress(conv):
         return False
 

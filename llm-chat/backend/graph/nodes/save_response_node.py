@@ -158,6 +158,107 @@ class SaveResponseNode(BaseNode):
     # 私有工具方法
     # ══════════════════════════════════════════════════════════════════════════
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # 语义缓存写入（4 个阶段 + 1 个调度器）
+    # ──────────────────────────────────────────────────────────────────────────
+    #
+    # 原来 _write_cache 一个方法同时承担了 5 件事：跳过判定、脏数据清理、TTL
+    # 计算、命名空间派生、实际 cache.store 调用。读写谁都看不清楚，改一处
+    # 要翻 70 行。
+    #
+    # 拆成 4 个职责单一的纯函数 + 1 个调度器方法：
+    #
+    #     _should_cache    : 返回"要不要缓存"的布尔值（跳过判定 + None 值语义）
+    #     _clean_response  : 清理工具调用残留文本，返回清洗后的字符串或 None
+    #     _compute_ttl     : 根据 route 决定过期时间（秒）
+    #     _write_cache     : 调度器，编排上面三步 + 实际调用 cache.store
+    #
+    # 收益：
+    #   1. 每个小函数可以单独写单元测试（不用 mock 整个 cache backend）
+    #   2. 将来要加新的"不缓存条件"或新路由 TTL 只改一个函数
+    #   3. 阅读 _write_cache 时一眼看清整个流程
+
+    def _should_cache(
+        self,
+        state: GraphState,
+        full_response: str,
+    ) -> bool:
+        """
+        判断本轮响应是否应该写入语义缓存。
+
+        不缓存的情形（按检查顺序）：
+          - 响应为空
+          - 已命中缓存（避免覆盖自己读到的东西，无意义）
+          - 含图片（语义随图片内容变化，缓存命中会跳过 VisionNode，结果错）
+          - 含工具调用（缓存只存文本，命中后会跳过工具执行，丢失文件产物/沙箱
+            状态等副作用，导致下一次命中看起来"做了事"但实际没做）
+        """
+        if not full_response:
+            return False
+        if state.get("cache_hit"):
+            return False
+        if state.get("images"):
+            return False
+        # 含工具调用的响应不缓存
+        if self._extract_tool_events(state):
+            return False
+        return True
+
+    def _clean_response(self, full_response: str) -> str | None:
+        """
+        检测并清理 MiniMax 等模型输出的工具调用残留文本。
+
+        Returns:
+            - 清理后的字符串（可写入缓存）
+            - None 表示清理后为空，本轮不应写入缓存
+
+        处理流程：
+          1. 扫描是否存在 _TOOL_CALL_ARTIFACTS 里的任一 marker
+          2. 若存在，正则剥掉三类残留（[TOOL_CALL]...[/TOOL_CALL] /
+             minimax:tool_call... / <tool_call>...</tool_call>）
+          3. 剥离后为空字符串返回 None（整条就是工具调用 noise，没有
+             真正的文本内容可缓存）
+        """
+        has_artifact = any(a in full_response for a in _TOOL_CALL_ARTIFACTS)
+        if not has_artifact:
+            return full_response
+
+        cleaned = re.sub(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", "", full_response, flags=re.DOTALL)
+        cleaned = re.sub(r"minimax:tool_call.*", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL)
+        cleaned = cleaned.strip()
+
+        if not cleaned:
+            logger.warning(
+                "ARTIFACT SKIP | 响应清理后为空，跳过缓存 | response='%.100s'",
+                full_response,
+            )
+            return None
+
+        logger.warning(
+            "ARTIFACT CLEAN | 工具调用残留文本已清理后写入缓存 | response='%.100s'",
+            full_response,
+        )
+        return cleaned
+
+    @staticmethod
+    def _compute_ttl(route: str) -> int:
+        """
+        根据路由类型计算缓存 TTL（秒）。
+
+        - search / search_code: 短 TTL（默认 2 小时），搜索结果时效性强，
+          避免返回过期新闻/文档
+        - 其他（chat / code）  : 24 小时兜底，防止缓存中毒永久有效
+
+        所有路由都必须带 TTL，是因为早期版本出过一次事故：某轮响应错误地
+        把工具调用残留文本写进了缓存（那次 _clean_response 逻辑还没加），
+        没有 TTL 的话这条脏数据会永久命中所有相似请求。现在 TTL 是兜底的
+        "即使清理逻辑失效也不会永久污染"保险。
+        """
+        if route in ("search", "search_code"):
+            return SEMANTIC_CACHE_SEARCH_TTL_HOURS * 3600
+        return 24 * 3600
+
     async def _write_cache(
         self,
         state: GraphState,
@@ -168,64 +269,39 @@ class SaveResponseNode(BaseNode):
         conv_id: str,
     ) -> None:
         """
-        将本轮对话写入语义缓存。
+        语义缓存写入的顶层调度器。
 
-        不缓存的情形：
-          - 已命中缓存（避免覆盖）
-          - 含图片（语义随图片内容变化）
-          - 含工具调用（缓存只存文本，不含工具执行的副作用：文件产物、沙箱状态等）
-          - 含工具调用残留文本（脏数据）
+        按 `_should_cache → _clean_response → derive_cache_namespace →
+        _compute_ttl → cache.store` 的顺序编排。任何一步判定不缓存就提前
+        return，不再继续下游。
+
+        所有 IO 异常都被捕获并落 warning（铁律 #9），不能让缓存写入失败
+        影响主流程的 SSE 响应。
         """
-        if not full_response:
-            return
-        if state.get("cache_hit"):
-            return
-        if state.get("images"):
-            return
-        # 含工具调用的响应不缓存：缓存命中时会跳过工具执行，
-        # 导致文件产物、沙箱文件等副作用丢失
-        tool_events = self._extract_tool_events(state)
-        if tool_events:
+        # 1) 是否应该缓存
+        if not self._should_cache(state, full_response):
             return
 
-        # 检测并清理工具调用残留文本
-        has_artifact = any(a in full_response for a in _TOOL_CALL_ARTIFACTS)
-        if has_artifact:
-            cleaned = re.sub(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", "", full_response, flags=re.DOTALL)
-            cleaned = re.sub(r"minimax:tool_call.*", "", cleaned, flags=re.DOTALL)
-            cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL)
-            cleaned = cleaned.strip()
-            if cleaned:
-                logger.warning(
-                    "ARTIFACT CLEAN | 工具调用残留文本已清理后写入缓存 | response='%.100s'",
-                    full_response,
-                )
-                full_response = cleaned
-            else:
-                logger.warning(
-                    "ARTIFACT SKIP | 响应清理后为空，跳过缓存 | response='%.100s'",
-                    full_response,
-                )
-                return
+        # 2) 清理残留文本（None 表示清洗后为空，不缓存）
+        cleaned = self._clean_response(full_response)
+        if cleaned is None:
+            return
 
+        # 3) 实际写入缓存（派生命名空间 + 计算 TTL + 调用 cache backend）
         try:
             from cache.factory import get_cache
-            from graph.nodes.cache_node import SemanticCacheNode
+            from graph.nodes.cache_node import derive_cache_namespace
 
-            cache     = get_cache()
-            conv      = memory_store.get(conv_id)
-            namespace = SemanticCacheNode._derive_cache_namespace(
-                conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id
+            # system_prompt 由 SemanticCacheNode 在图入口统一注入 state，
+            # 这里直接读取，避免重复查 conversations 表（Commit 7 的改动）。
+            system_prompt = state.get("system_prompt", "")
+            namespace = derive_cache_namespace(
+                system_prompt, conv_id, SEMANTIC_CACHE_NAMESPACE_MODE, client_id
             )
-            # Write-through 策略：只有 DB 写入成功后才写缓存（防止缓存中毒）
-            # 所有路由都带 TTL 兜底，search 类 2h，chat/code 类 24h
-            # 即使缓存写入了错误数据，TTL 到期后自动过期
-            ttl = (
-                SEMANTIC_CACHE_SEARCH_TTL_HOURS * 3600
-                if route in ("search", "search_code")
-                else 24 * 3600  # chat/code 24 小时 TTL 兜底
-            )
-            await cache.store(user_msg, full_response, namespace, ttl_seconds=ttl)
+            ttl = self._compute_ttl(route)
+
+            cache = get_cache()
+            await cache.store(user_msg, cleaned, namespace, ttl_seconds=ttl)
         except Exception as exc:
             logger.warning("写入语义缓存失败（不影响主流程）: %s", exc)
 

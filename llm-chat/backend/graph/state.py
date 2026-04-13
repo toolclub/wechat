@@ -35,6 +35,14 @@ class GraphState(TypedDict):
     long_term_memories: list[str]
     forget_mode: bool
 
+    # ── 对话元数据（由 SemanticCacheNode 在入口处一次性注入，下游共用） ──────
+    # 历史上 cache_node / call_model_node / save_response_node 各自独立调用
+    # memory_store.get_meta() 来拿 system_prompt，造成同一轮三次 DB 往返。
+    # 现在 cache_node（永远是第一个节点）统一把 conversations 行的关键字段
+    # 写进 GraphState，下游节点直接读取，避免重复查库。
+    # 空字符串表示"对话未配置自定义 system_prompt"，各节点应使用默认值。
+    system_prompt: str
+
     # ── 输出 ────────────────────────────────────────────────────────────────
     full_response: str
     compressed: bool

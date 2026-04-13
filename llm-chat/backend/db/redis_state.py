@@ -1,16 +1,15 @@
 """
-Redis 跨 worker 共享状态 — 替代进程内 dict
+Redis 跨 worker 共享状态 — 仅保留 stop 信号
 
-解决的问题：
-  - _stop_events: 进程内 dict → Redis pub/sub
-  - _active_sessions: 进程内 dict → Redis key 带 TTL
-  - _store 缓存失效: 进程内 dict → Redis pub/sub 通知其他 worker 失效
+历史上还托管过 streaming 注册和 store 缓存失效，已迁移到 DB：
+  - streaming 活跃判定 → conversations.last_heartbeat_at
+    （memory.store.heartbeat / is_streaming）
+  - store 缓存失效   → 已废除内存缓存，所有读直接命中 DB
 
-所有 worker 共享 Redis 实例（已在 docker-compose 中部署）。
+stop 信号留在 Redis 是因为它本质是"广播给所有 worker 的瞬时事件"，
+DB 不适合做 pub/sub。失败时退化为本 worker 内的 _stop_events dict。
 """
-import asyncio
 import logging
-import time
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -19,7 +18,6 @@ from config import REDIS_URL
 
 logger = logging.getLogger("db.redis_state")
 
-# ── Redis 客户端（复用语义缓存的 Redis 实例） ──────────────────────────────────
 _redis: Optional[aioredis.Redis] = None
 
 
@@ -36,7 +34,7 @@ def _get_redis() -> aioredis.Redis:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. 停止信号（替代 _stop_events 进程内 dict）
+# 停止信号（跨 worker 通知正在跑的图执行立即退出）
 # ══════════════════════════════════════════════════════════════════════════════
 
 _STOP_KEY_PREFIX = "chatflow:stop:"
@@ -63,89 +61,3 @@ async def clear_stop(conv_id: str) -> None:
     """清除停止信号。"""
     r = _get_redis()
     await r.delete(f"{_STOP_KEY_PREFIX}{conv_id}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. 活跃会话注册（替代 _active_sessions 进程内 dict）
-# ══════════════════════════════════════════════════════════════════════════════
-
-_STREAMING_KEY_PREFIX = "chatflow:streaming:"
-_STREAMING_TTL = 600  # 10 分钟 TTL（心跳续期，超时自动清理）
-
-
-async def register_streaming(conv_id: str, worker_id: str = "") -> None:
-    """注册当前对话为活跃流式会话（跨 worker 可见）。"""
-    r = _get_redis()
-    key = f"{_STREAMING_KEY_PREFIX}{conv_id}"
-    await r.set(key, worker_id or str(time.time()), ex=_STREAMING_TTL)
-
-
-async def heartbeat_streaming(conv_id: str) -> None:
-    """续期活跃会话 TTL（心跳时调用）。"""
-    r = _get_redis()
-    key = f"{_STREAMING_KEY_PREFIX}{conv_id}"
-    await r.expire(key, _STREAMING_TTL)
-
-
-async def unregister_streaming(conv_id: str) -> None:
-    """注销活跃会话。"""
-    r = _get_redis()
-    await r.delete(f"{_STREAMING_KEY_PREFIX}{conv_id}")
-
-
-async def is_streaming(conv_id: str) -> bool:
-    """检查对话是否正在流式生成（跨 worker）。"""
-    r = _get_redis()
-    key = f"{_STREAMING_KEY_PREFIX}{conv_id}"
-    return await r.exists(key) > 0
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 3. 缓存失效通知（替代 _store 本地缓存的跨 worker 失效）
-# ══════════════════════════════════════════════════════════════════════════════
-
-_INVALIDATION_CHANNEL = "chatflow:cache_invalidate"
-
-# 本地订阅任务（在 app 启动时初始化）
-_sub_task: Optional[asyncio.Task] = None
-
-
-async def publish_cache_invalidation(conv_id: str) -> None:
-    """通知所有 worker 失效指定对话的本地缓存。"""
-    r = _get_redis()
-    await r.publish(_INVALIDATION_CHANNEL, conv_id)
-
-
-async def start_cache_invalidation_listener(on_invalidate) -> None:
-    """
-    启动缓存失效监听（在 lifespan 中调用）。
-
-    on_invalidate: async callable(conv_id: str) — 收到失效通知后的回调。
-    """
-    global _sub_task
-
-    async def _listen():
-        r = _get_redis()
-        pubsub = r.pubsub()
-        await pubsub.subscribe(_INVALIDATION_CHANNEL)
-        try:
-            async for msg in pubsub.listen():
-                if msg["type"] == "message":
-                    conv_id = msg["data"]
-                    if conv_id:
-                        await on_invalidate(conv_id)
-        except asyncio.CancelledError:
-            await pubsub.unsubscribe(_INVALIDATION_CHANNEL)
-        except Exception as exc:
-            logger.warning("缓存失效监听异常: %s", exc)
-
-    _sub_task = asyncio.create_task(_listen())
-    logger.info("缓存失效监听已启动")
-
-
-async def stop_cache_invalidation_listener() -> None:
-    """停止缓存失效监听。"""
-    global _sub_task
-    if _sub_task:
-        _sub_task.cancel()
-        _sub_task = None

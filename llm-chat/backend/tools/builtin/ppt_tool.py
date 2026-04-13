@@ -166,8 +166,13 @@ async def create_ppt(ppt_json: str) -> str:
             await adispatch_custom_event("sandbox_output", {
                 "stream": stream, "text": text, "tool_name": "create_ppt",
             })
-        except Exception:
-            pass  # 沙箱输出事件失败不影响 PPT 生成
+        except Exception as exc:
+            # spec 铁律 #9：沙箱输出事件失败不影响 PPT 生成主流程，
+            # 但仍然要落日志，否则前端终端面板内容缺失都查不出原因。
+            import logging
+            logging.getLogger("tools.ppt").warning(
+                "PPT 沙箱输出事件 dispatch 失败（PPT 生成继续）: %s", exc,
+            )
 
     result = await sandbox_manager.execute_code_streaming(
         conv_id, "python", script,

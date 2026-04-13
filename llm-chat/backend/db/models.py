@@ -5,7 +5,8 @@ SQLAlchemy ORM 模型定义（重构版 — DB-first 架构）
   - messages 表新增 thinking/stream_buffer/stream_completed/message_id/sequence_number
   - 新增 event_log 表：SSE 事件持久化（替代纯内存 event_buffer）
   - 新增 tool_executions 表：工具调用独立记录
-  - 保留 message_details 表向后兼容（逐步废弃）
+  - 移除 message_details 表 ORM（数据已全部迁移到 messages 新字段，
+    历史表保留在 init.sql 中标记 LEGACY，不主动 DROP 防止误删生产数据）
 """
 from sqlalchemy import Column, String, Text, Integer, Float, Boolean, Index
 from sqlalchemy.dialects.postgresql import JSONB
@@ -38,6 +39,12 @@ class ConversationModel(Base):
     sandbox_worker_id = Column(
         String(50), nullable=False, default="",
         comment="沙箱 Worker ID（持久化会话亲和性，跨 worker 恢复）",
+    )
+    last_heartbeat_at = Column(
+        Float, nullable=False, default=0.0,
+        comment="流式生成心跳时间戳（秒）；流式期间每 3s 更新一次，"
+                "用于检测 worker 崩溃后 status='streaming' 的僵尸状态。"
+                "判定活跃：status='streaming' AND now-last_heartbeat_at < 30s",
     )
     created_at = Column(Float, nullable=False)
     updated_at = Column(Float, nullable=False)
@@ -202,27 +209,7 @@ class ToolEventModel(Base):
     )
 
 
-class MessageDetailModel(Base):
-    """消息详情表（旧版，保留向后兼容，逐步由 messages 新字段替代）"""
-    __tablename__ = "message_details"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    conv_id = Column(String(36), nullable=False)
-    msg_index = Column(Integer, nullable=False)
-    role = Column(String(20), nullable=False)
-    content = Column(Text, nullable=False, default="")
-    thinking = Column(Text, nullable=False, default="")
-    tool_calls = Column(JSONB, nullable=False, default=list)
-    steps = Column(JSONB, nullable=False, default=list)
-    search_results = Column(JSONB, nullable=False, default=list)
-    sandbox_output = Column(Text, nullable=False, default="")
-    stream_completed = Column(Boolean, nullable=False, default=True)
-    stream_buffer = Column(Text, nullable=False, default="")
-    images = Column(JSONB, nullable=False, default=list)
-    created_at = Column(Float, nullable=False)
-    updated_at = Column(Float, nullable=False)
-
-    __table_args__ = (
-        Index("ix_msgdetail_conv", "conv_id"),
-        Index("ix_msgdetail_conv_idx", "conv_id", "msg_index"),
-    )
+# NOTE: MessageDetailModel 已删除（2026-04-13）
+# 原表 message_details 在 messages 表新增 thinking/stream_buffer/stream_completed
+# 字段后已经被完全替代，db/message_detail_store.py 也无任何调用方。
+# 物理表保留在 db/init.sql 中（标记 LEGACY），不主动 DROP 防止误删生产数据。

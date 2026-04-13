@@ -225,8 +225,13 @@ class CallModelAfterToolNode(BaseNode):
             if tool_execs:
                 last_exec = tool_execs[-1]
                 return last_exec.get("status") == "error"
-        except Exception:
-            pass
+        except Exception as exc:
+            # spec 铁律 #9：DB 查询失败要落日志，下面会走文本降级路径，
+            # 但若降级也判错，至少日志里能定位到 DB 才是根因。
+            import logging
+            logging.getLogger("graph.nodes.call_model_after_tool").warning(
+                "tool_executions 查询失败，降级到文本匹配 conv=%s: %s", conv_id, exc,
+            )
         # COMPAT: DB 查询失败时降级到文本关键词匹配
         messages = list(state.get("messages", []))
         for m in reversed(messages):

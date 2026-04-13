@@ -126,7 +126,7 @@ class CallModelNode(BaseNode):
         if plan and current_idx > 0 and current_idx < len(plan):
             # 步骤 1+：用 GraphState.plan 中已有的步骤结果构建聚焦消息，
             # 完全不依赖 state["messages"] 的积累历史，实现真正的上下文隔离。
-            messages = self._build_focused_step_messages(state, plan, current_idx)
+            messages = await self._build_focused_step_messages(state, plan, current_idx)
         elif plan and current_idx == 0 and current_idx < len(plan) and step_iters == 0:
             # 步骤 0：保留对话历史（模型需要知道"刚刚讨论了什么"），
             # 但替换系统提示为聚焦版 + 重写用户消息为步骤指令，
@@ -204,7 +204,7 @@ class CallModelNode(BaseNode):
         return messages
 
     @staticmethod
-    def _build_focused_step_messages(
+    async def _build_focused_step_messages(
         state: GraphState,
         plan: list,
         current_idx: int,
@@ -223,24 +223,19 @@ class CallModelNode(BaseNode):
           → HumanMessage（当前步骤指令）
         """
         from config import DEFAULT_SYSTEM_PROMPT
-        from memory import store as memory_store
 
         total       = len(plan)
         is_last     = current_idx >= total - 1
         # 续写场景：user_message 是"继续"，用 plan_goal 还原原始任务目标
         user_msg    = state.get("plan_goal") or state.get("user_message", "")
         vision_desc = state.get("vision_description", "")
-        conv_id     = state.get("conv_id", "")
 
         # ── 系统提示 ────────────────────────────────────────────────────────
         if is_last:
-            # 末步：用对话的自定义系统提示，确保最终回复风格符合用户期望
-            conv = memory_store.get(conv_id)
-            system_content = (
-                conv.system_prompt
-                if conv and conv.system_prompt
-                else DEFAULT_SYSTEM_PROMPT
-            )
+            # 末步：用对话的自定义系统提示，确保最终回复风格符合用户期望。
+            # system_prompt 由 SemanticCacheNode 在图入口一次性注入 state，
+            # 这里直接读取，避免重复查 conversations 表。
+            system_content = state.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
         else:
             # 中间步骤：专注执行者角色，防止提前生成最终产品
             system_content = _load_prompt("nodes/call_model_step")

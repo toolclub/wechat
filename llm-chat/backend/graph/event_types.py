@@ -48,6 +48,7 @@ class CacheHitNodeOutput(TypedDict, total=False):
     cache_hit: bool       # True 表示命中缓存
     full_response: str    # 命中时：缓存的答案；未命中时：空字符串
     cache_similarity: float  # 命中时的相似度分数
+    system_prompt: str    # 从 conversations 行注入到 state，下游节点共用（避免重复 get_meta）
 
 
 class RouteNodeOutput(TypedDict, total=False):

@@ -26,29 +26,37 @@ import time
 import uuid
 from typing import AsyncGenerator
 
+from db.artifact_store import save_artifact
+from db.event_store import get_events_since
+from db.redis_state import check_stop
+from db.state_machine import SSEEventType, detect_sse_event_type
+from fsm.conversation import ConversationSM
 from graph.agent import get_graph, get_simple_graph
 from graph.runner.context import StreamContext
+from graph.runner.db_event_batcher import DBEventBatcher
 from graph.runner.dispatcher import dispatcher
+from graph.runner.session_registry import get_session_registry
+from graph.runner.tool_execution_tracker import ToolExecutionTracker
 from graph.runner.utils import sse
 from graph.state import GraphState
+from memory import store as memory_store
+from sandbox.context import current_conv_id, current_message_id
 
 logger = logging.getLogger("graph.runner.stream")
 
-# 进程内追踪活跃会话（仅用于本 worker 的 SSE 实时推送）
-# 跨 worker 的活跃状态由 Redis 管理（db.redis_state）
-_active_sessions: dict[str, "StreamSession"] = {}
-
 
 def is_streaming_in_worker(conv_id: str) -> bool:
-    """当前 worker 是否正在处理该对话的流式输出。"""
-    return conv_id in _active_sessions
+    """当前 worker 是否正在处理该对话的流式输出（仅本进程视图）。
+
+    跨 worker 判定见 memory.store.is_streaming（DB 心跳真相源）。
+    """
+    return get_session_registry().is_active(conv_id)
 
 
 class StreamSession:
     """管理单个流式对话的完整生命周期（DB-first）。"""
 
     def __init__(
-            
         self,
         conv_id: str,
         user_message: str,
@@ -78,7 +86,6 @@ class StreamSession:
         self.assistant_db_id: int = 0
 
         # 对话状态机（持有实例，贯穿整个会话生命周期）
-        from fsm.conversation import ConversationSM
         self._conv_sm = ConversationSM.from_db_status("active", conv_id=conv_id)
 
         # 内部状态
@@ -95,22 +102,27 @@ class StreamSession:
         self._sse_done = False
         self._sse_waiters: list[asyncio.Event] = []
 
-        # DB 写入缓冲（批量写入 event_log）
-        self._event_batch: list[dict] = []
-        self._thinking_buf = ""
-        self._content_buf = ""
-        self._last_flush = time.time()
-        self._tool_seq = 0
-
-        # 工具调用 DB 持久化（支持多工具并行，按 seq 追踪每个工具的状态）
-        self._tool_exec_map: dict[int, int] = {}   # tool_seq → tool_execution DB id
-        self._tool_output_map: dict[int, str] = {}  # tool_seq → 累积的 sandbox 输出
-        self._tool_search_map: dict[int, list] = {} # tool_seq → 搜索结果
-        self._current_tool_seq: int = 0              # 当前活跃工具的 seq（最新 tool_call）
-
-        # 消息终态化锁（防止 _periodic_flush 和 _finalize_message 竞态）
+        # ── 终态化协调状态（在锁内被多个组件读写） ──────────────────────────────
+        # _finalize_lock：保护 messages 表流式字段（thinking/stream_buffer），
+        #   避免 _periodic_flush 和 _finalize_message 竞态导致最终内容被覆盖。
+        # _finalized_flag：单元素 list 包装的 bool，作为 mutable 引用让
+        #   StreamSession 和 DBEventBatcher 共享同一个"终态化与否"标志。
         self._finalize_lock = asyncio.Lock()
-        self._finalized = False  # 终态标记，防止重复 finalize
+        self._finalized_flag: list[bool] = [False]
+
+        # ── 组合 OO 组件（拆 StreamSession 上帝对象） ───────────────────────────
+        # DBEventBatcher：管 event_log 批次 + messages 流式字段缓冲
+        self._batcher = DBEventBatcher(
+            conv_id=conv_id,
+            message_id=self.assistant_message_id,
+            finalize_lock=self._finalize_lock,
+            finalized_flag=self._finalized_flag,
+        )
+        # ToolExecutionTracker：管多工具并行的 sequence/output/search 状态
+        self._tool_tracker = ToolExecutionTracker(
+            conv_id=conv_id,
+            message_id=self.assistant_message_id,
+        )
 
         # 任务引用
         self._graph_task: asyncio.Task | None = None
@@ -130,8 +142,6 @@ class StreamSession:
 
     async def stream(self) -> AsyncGenerator[str, None]:
         """启动会话并 yield SSE 事件。"""
-        from memory import store as memory_store
-
         # ── 状态机驱动：active → streaming ──
         self._conv_sm.send_event("streaming")
         await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
@@ -146,6 +156,8 @@ class StreamSession:
                 message_id=self.assistant_message_id,
                 stream_completed=False,
             )
+            # 回填 batcher：消息行存在后才能 UPDATE 流式字段
+            self._batcher.assistant_db_id = self.assistant_db_id
         except Exception as exc:
             logger.error("消息预写失败，中止流 | conv=%s | %s", self.conv_id, exc)
             yield sse({"error": "消息创建失败，请重试", "can_continue": False})
@@ -160,13 +172,14 @@ class StreamSession:
         }})
         self._emit_sse(resume_sse, "resume_context")
 
-        # 注册活跃会话（本 worker 内存 + Redis 跨 worker）
-        _active_sessions[self.conv_id] = self
+        # 注册活跃会话：本 worker 内存（用于 cancel 任务）+ DB 心跳（跨 worker）
+        # DB 心跳替代了旧的 Redis chatflow:streaming:{conv_id} key——
+        # conversations.last_heartbeat_at 是真相源，避免 Redis 失效时丢状态
+        get_session_registry().register(self.conv_id, self)
         try:
-            from db.redis_state import register_streaming
-            await register_streaming(self.conv_id)
-        except Exception:
-            pass  # Redis 不可用时降级到进程内 dict
+            await memory_store.heartbeat(self.conv_id)
+        except Exception as exc:
+            logger.warning("初始心跳写入失败: %s", exc)
 
         # 启动后台任务
         self._graph_task = asyncio.create_task(self._run_graph())
@@ -185,7 +198,6 @@ class StreamSession:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _run_graph(self) -> None:
-        from sandbox.context import current_conv_id, current_message_id
         current_conv_id.set(self.conv_id)
         current_message_id.set(self.assistant_message_id)
 
@@ -251,8 +263,6 @@ class StreamSession:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _consume_events(self) -> None:
-        from memory import store as memory_store
-
         try:
             while True:
                 kind, payload = await self.queue.get()
@@ -306,8 +316,10 @@ class StreamSession:
             try:
                 self._emit_sse(sse({"error": f"内部错误: {exc}", "can_continue": bool(self.best_partial)}), "error")
                 self._emit_sse(sse({"done": True, "compressed": False}), "done")
-            except Exception:
-                pass
+            except Exception as emit_exc:
+                # spec 铁律 #9：消费者已在 except 路径，兜底通知客户端失败也要落日志。
+                # 否则前端 SSE 流会永远挂起且无任何线索。
+                logger.warning("消费者异常路径下兜底发送 error/done 事件失败: %s", emit_exc)
         finally:
             # 确保 _sse_done 被设置（即使异常路径也能让 _feed_client 退出）
             if not self._sse_done:
@@ -320,38 +332,44 @@ class StreamSession:
                 self._hb_task.cancel()
             if self._flush_task:
                 self._flush_task.cancel()
-            # 只有当 _active_sessions 中还是自己时才移除（避免新 session 被老 session 误删）
-            if _active_sessions.get(self.conv_id) is self:
-                _active_sessions.pop(self.conv_id, None)
+            # 条件式注销：注册表只在存的还是自己时才移除，避免老 session 误删新 session
+            get_session_registry().remove_if(self.conv_id, self)
 
     # ══════════════════════════════════════════════════════════════════════════
     # SSE 推送 + DB 写入
     # ══════════════════════════════════════════════════════════════════════════
 
     def _emit_sse(self, sse_str: str, event_type: str = "") -> None:
-        """推送 SSE 事件到内存缓冲 + 加入 DB 写入批次。"""
+        """推送 SSE 事件到内存缓冲 + 委托给 batcher 落库。
+
+        注意：本函数同时承担两件事：
+          1. 内存缓冲（_sse_events） — 当前连接客户端的实时推送通道
+          2. 落库批次（batcher）     — 给刷新恢复 / 跨 worker 续接用
+        ping 事件只走通道 1，不落库（避免噪音）。
+        """
         self._sse_events.append(sse_str)
         for w in self._sse_waiters:
             w.set()
 
-        # 加入 DB 写入批次（ping 不写 DB）
-        from db.state_machine import SSEEventType
-        if event_type != SSEEventType.PING.value and sse_str:
-            self._event_batch.append({
-                "conv_id": self.conv_id,
-                "message_id": self.assistant_message_id,
-                "event_type": event_type or self._detect_event_type(sse_str),
-                "sse_string": sse_str,
-            })
+        # ping 不持久化（pure 心跳事件，前端不需要刷新恢复）
+        if event_type == SSEEventType.PING.value or not sse_str:
+            return
+        self._batcher.enqueue_event(
+            sse_string=sse_str,
+            event_type=event_type or self._detect_event_type(sse_str),
+        )
 
     async def _track_sse_for_db(self, sse_str: str) -> None:
         """
-        从 SSE 字符串提取 thinking/content/tool 用于定期刷新到 DB。
+        从 SSE 字符串提取结构化数据，分发给 batcher 和 tool_tracker 持久化。
 
-        工具调用持久化流程（确保刷新后能恢复 sandbox 终端）：
-          tool_call   → 立即 INSERT tool_executions (status=running)
-          sandbox_output → 累积到 _sandbox_output_buf（终端过程输出）
-          tool_result → UPDATE tool_executions (status=done, output=累积的终端输出)
+        分发规则：
+          - thinking / content 增量 → batcher.append_thinking / append_content
+          - tool_call            → tool_tracker.start_tool
+          - sandbox_output       → tool_tracker.append_output
+          - search_item          → tool_tracker.append_search_item
+          - tool_result          → tool_tracker.finish_tool
+          - file_artifact        → 兜底写 artifacts 表（工具内可能已写过一遍）
         """
         if not sse_str.startswith("data: "):
             return
@@ -360,56 +378,32 @@ class StreamSession:
         except (json.JSONDecodeError, ValueError):
             return
 
+        # ── LLM 流式 token → 累积到 batcher ──
         if data.get("thinking"):
-            self._thinking_buf += data["thinking"]
+            self._batcher.append_thinking(data["thinking"])
         if data.get("content"):
-            self._content_buf += data["content"]
+            self._batcher.append_content(data["content"])
 
-        # ── 工具调用开始 → 创建 tool_execution 记录（支持多工具并行） ──
+        # ── 工具调用开始 → tracker 创建 tool_executions 记录 ──
         if data.get("tool_call"):
             tc = data["tool_call"]
-            self._tool_seq += 1
-            seq = self._tool_seq
-            self._current_tool_seq = seq
-            self._tool_output_map[seq] = ""
-            self._tool_search_map[seq] = []
-            try:
-                from db.tool_store import create_tool_execution
-                exec_id = await create_tool_execution(
-                    conv_id=self.conv_id,
-                    message_id=self.assistant_message_id,
-                    tool_name=tc.get("name", ""),
-                    tool_input=tc.get("input", {}),
-                    sequence_number=seq,
-                    step_index=self._step_idx if self._plan_id else None,
-                )
-                self._tool_exec_map[seq] = exec_id
-            except Exception as exc:
-                logger.warning("tool_execution 创建失败: %s", exc)
+            await self._tool_tracker.start_tool(
+                tool_name=tc.get("name", ""),
+                tool_input=tc.get("input", {}),
+                # 只在有 plan 时关联 step_index，否则传 None（无计划场景）
+                step_index=self._step_idx if self._plan_id else None,
+            )
 
-        # ── sandbox 终端输出 → 累积到当前活跃工具 ──
+        # ── sandbox 终端输出 / 搜索结果 → tracker 累积到当前活跃工具 ──
         if data.get("sandbox_output"):
-            so = data["sandbox_output"]
-            seq = self._current_tool_seq
-            if seq in self._tool_output_map:
-                self._tool_output_map[seq] += so.get("text", "")
-
-        # ── 搜索结果 → 累积到当前活跃工具 ──
+            self._tool_tracker.append_output(data["sandbox_output"].get("text", ""))
         if data.get("search_item"):
-            si = data["search_item"]
-            seq = self._current_tool_seq
-            if seq in self._tool_search_map:
-                self._tool_search_map[seq].append({
-                    "url": si.get("url", ""),
-                    "title": si.get("title", ""),
-                    "status": si.get("status", "done"),
-                })
+            self._tool_tracker.append_search_item(data["search_item"])
 
         # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
         if data.get("file_artifact"):
             fa = data["file_artifact"]
             try:
-                from db.artifact_store import save_artifact
                 # file_artifact 事件中只存元数据（binary 内容由工具内的 save_artifact 保存）
                 # 这里是兜底：如果工具内没保存，至少保存一次
                 if not fa.get("binary"):
@@ -423,34 +417,13 @@ class StreamSession:
             except Exception as exc:
                 logger.warning("artifact 兜底保存失败: %s", exc)
 
-        # ── 工具调用结束 → 按 seq 匹配对应工具，写入 DB ──
+        # ── 工具调用结束 → tracker 按当前 seq 匹配并写最终状态 ──
         if data.get("tool_result"):
             tr = data["tool_result"]
-            seq = self._current_tool_seq
-            exec_id = self._tool_exec_map.get(seq, 0)
-            if exec_id:
-                output = self._tool_output_map.get(seq, "") or tr.get("output", "")
-                search_items = self._tool_search_map.get(seq) or None
-                # 状态机驱动：running → done/error/timeout
-                from fsm.tool_execution import ToolExecutionSM
-                raw_status = tr.get("status", "done")
-                tool_sm = ToolExecutionSM()
-                tool_sm.send_event(raw_status)
-                status = tool_sm.current_value
-                try:
-                    from db.tool_store import complete_tool_execution
-                    await complete_tool_execution(
-                        exec_id,
-                        output=output[:20000],
-                        status=status,
-                        search_items=search_items,
-                    )
-                except Exception as exc:
-                    logger.warning("tool_execution 完成失败: %s", exc)
-                # 清理已完成工具的缓冲
-                self._tool_exec_map.pop(seq, None)
-                self._tool_output_map.pop(seq, None)
-                self._tool_search_map.pop(seq, None)
+            await self._tool_tracker.finish_tool(
+                raw_status=tr.get("status", "done"),
+                fallback_output=tr.get("output", ""),
+            )
 
     @staticmethod
     def _detect_event_type(sse_str: str) -> str:
@@ -466,11 +439,10 @@ class StreamSession:
             data = json.loads(sse_str[6:].strip())
         except Exception:
             return "unknown"
-        from db.state_machine import detect_sse_event_type
         return detect_sse_event_type(data).value
 
     async def _periodic_flush(self) -> None:
-        """每 500ms 刷新累积数据到 DB。"""
+        """每 500ms 刷新累积数据到 DB（委托给 batcher）。"""
         try:
             while True:
                 await asyncio.sleep(0.5)
@@ -479,49 +451,33 @@ class StreamSession:
             await self._flush_to_db()
 
     async def _flush_to_db(self) -> None:
-        """将累积的事件批量写入 event_log，并更新 messages 的 thinking/buffer。"""
-        # event_log 始终写入（包括终态化后的 done/stopped 事件），不受 _finalized 限制
-        if self._event_batch:
-            batch = self._event_batch[:]
-            self._event_batch.clear()
-            try:
-                from db.event_store import append_events_batch
-                await append_events_batch(batch)
-            except Exception as exc:
-                logger.warning("event_log 批量写入失败: %s", exc)
+        """将累积的事件批量写入 event_log，并更新 messages 的 thinking/buffer。
 
-        # messages 表更新：终态化后跳过（防止覆盖最终内容）
-        async with self._finalize_lock:
-            if self._finalized:
-                return
-
-            if (self._thinking_buf or self._content_buf) and self.assistant_db_id:
-                try:
-                    from memory import store as memory_store
-                    await memory_store.update_message_streaming(
-                        self.assistant_db_id,
-                        thinking=self._thinking_buf if self._thinking_buf else None,
-                        stream_buffer=self._content_buf if self._content_buf else None,
-                    )
-                except Exception as exc:
-                    logger.warning("消息流式更新失败: %s", exc)
+        所有逻辑已收敛到 DBEventBatcher.flush_all，本方法保留薄壳以便未来加
+        额外的 hook（例如指标采集）。
+        """
+        await self._batcher.flush_all()
 
     async def _finalize_message(self) -> None:
-        """消息生成完成：写入最终内容，标记终态，防止后续 flush 覆盖。"""
+        """消息生成完成：写入最终内容，标记终态，防止后续 flush 覆盖。
+
+        终态化是幂等的：_finalized_flag 一旦为 True，后续调用直接返回。
+        本方法和 batcher.flush_message_buffers 共享 _finalize_lock，保证
+        "标记终态"和"写流式增量"互斥，避免最终内容被中间态覆盖。
+        """
         if not self.assistant_db_id:
             return
         async with self._finalize_lock:
-            if self._finalized:
+            if self._finalized_flag[0]:
                 return  # 幂等：已终态化则跳过
-            self._finalized = True
+            self._finalized_flag[0] = True
 
             # save_response_node 已经通过 add_message 保存了最终内容到 messages 表
             # 这里确保 stream_completed=True、thinking 字段、清空 stream_buffer
             try:
-                from memory import store as memory_store
                 await memory_store.update_message_streaming(
                     self.assistant_db_id,
-                    thinking=self._thinking_buf or None,
+                    thinking=self._batcher.thinking_buffer or None,
                     stream_buffer="",  # 显式清空
                     stream_completed=True,
                 )
@@ -538,12 +494,11 @@ class StreamSession:
         if not stripped:
             return
         try:
-            from memory import store as memory_store
             tag = "\n\n[回复中断，以上为部分结果。用户可能要求继续。]"
             await memory_store.finalize_message(
                 self.assistant_db_id,
                 content=stripped + tag,
-                thinking=self._thinking_buf,
+                thinking=self._batcher.thinking_buffer,
             )
         except Exception as exc:
             logger.warning("保存部分响应失败: %s", exc)
@@ -553,7 +508,6 @@ class StreamSession:
         if not self.assistant_db_id:
             return
         try:
-            from memory import store as memory_store
             await memory_store.update_message_streaming(
                 self.assistant_db_id, stream_buffer="", stream_completed=True,
             )
@@ -567,35 +521,42 @@ class StreamSession:
             w.set()
         try:
             self._conv_sm.send_event(status)
-            from memory import store as memory_store
             await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
         except Exception as exc:
             logger.warning("_set_done 状态持久化失败: %s", exc)
-        # 注销 Redis 活跃会话
-        try:
-            from db.redis_state import unregister_streaming
-            await unregister_streaming(self.conv_id)
-        except Exception:
-            pass
 
     # ══════════════════════════════════════════════════════════════════════════
     # 心跳 + 客户端推送
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _heartbeat(self) -> None:
+        """
+        每 3 秒：
+          1. 推一个 ping SSE 让客户端知道连接还活着
+          2. 写 conversations.last_heartbeat_at 让前端的 streaming-status 不会
+             把崩溃的 worker 当成"还在生成中"
+          3. 检查 Redis 跨 worker stop 信号
+        """
         try:
             while True:
                 await asyncio.sleep(3)
                 await self.queue.put(("ping", None))
-                # Redis 活跃会话续期 + 停止信号检测（带 2 秒超时，防止 Redis 慢时阻塞心跳）
+                # DB 心跳（带 2 秒超时，DB 慢时不阻塞心跳循环）
                 try:
-                    from db.redis_state import heartbeat_streaming, check_stop
-                    await asyncio.wait_for(heartbeat_streaming(self.conv_id), timeout=2)
+                    await asyncio.wait_for(
+                        memory_store.heartbeat(self.conv_id), timeout=2
+                    )
+                except Exception as exc:
+                    logger.warning("DB 心跳更新失败: %s", exc)
+                # 跨 worker stop 信号检测
+                try:
                     if await asyncio.wait_for(check_stop(self.conv_id), timeout=2):
                         if self.stop_event:
                             self.stop_event.set()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # spec 铁律 #9：Redis 失败不能阻塞心跳循环，但必须落日志。
+                    # 否则跨 worker stop 信号永远不生效都查不出来。
+                    logger.warning("Redis stop 信号检测失败（本次心跳跳过）: %s", exc)
         except asyncio.CancelledError:
             pass
 
@@ -681,8 +642,6 @@ async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str =
 
     message_id: 限定只回放指定 assistant message 的事件（多轮对话时避免混入旧轮）。
     """
-    from db.event_store import get_events_since
-
     # 从 DB 读取遗漏的事件（按 message_id 过滤，避免多轮事件混淆）
     events = await get_events_since(conv_id, after_event_id, message_id=message_id)
     for evt in events:
@@ -695,7 +654,7 @@ async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str =
         return
 
     # 如果当前 worker 正在处理，切换到实时推送
-    session = _active_sessions.get(conv_id)
+    session = get_session_registry().get(conv_id)
     if session:
         # 从 session 的内存缓冲继续（跳过已从 DB 发过的）
         idx = len(session._sse_events)  # 从当前位置开始

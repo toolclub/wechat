@@ -80,8 +80,10 @@ from graph.state import GraphState
 
 logger = logging.getLogger("graph.agent")
 
+# 编译后的图缓存：仅 "default" / "simple" 两个 key
+# 注：这里没有用类封装是因为只有 2 个 key + 2 个 getter，包成 AgentRegistry
+# 反而绕路。如果后续要支持多模型独立编译，再考虑抽类。
 _graph_cache: dict[str, Any] = {}
-_tools: list[BaseTool] = []
 
 
 def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
@@ -263,8 +265,6 @@ def build_simple_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
 
 def init(tools: list[BaseTool], model: str = CHAT_MODEL) -> None:
     """应用启动时调用，编译并缓存两张图（完整 Agent 图 + 简单对话图）。"""
-    global _tools
-    _tools = tools
     _graph_cache["default"] = build_graph(tools, model)
     _graph_cache["simple"]  = build_simple_graph(tools, model)
     logger.info(
@@ -274,7 +274,11 @@ def init(tools: list[BaseTool], model: str = CHAT_MODEL) -> None:
 
 
 def get_graph(model: str = CHAT_MODEL) -> Any:
-    """返回完整 Agent 图（含 planner / reflector / router）。"""
+    """返回完整 Agent 图（含 planner / reflector / router）。
+
+    `model` 参数当前未使用 — 编译图时已经把模型名通过 NodeClass 内部读
+    config 完成，调用时不需要切换。保留参数是为了将来扩展（多模型独立编译）。
+    """
     if "default" not in _graph_cache:
         raise RuntimeError("Agent 图未初始化，请先调用 graph.agent.init(tools)")
     return _graph_cache["default"]

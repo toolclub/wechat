@@ -77,7 +77,10 @@ CREATE INDEX IF NOT EXISTS ix_tool_events_conv_created ON tool_events(conv_id, c
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active';
 COMMENT ON COLUMN conversations.status IS '对话状态：active（空闲）/ streaming（流式输出中）/ completed（已完成）/ error（错误）';
 
--- ── 消息详情表（完整结构化数据，供刷新后恢复 UI） ──────────────────────────────
+-- ── 消息详情表（LEGACY — 已被 messages 新字段替代，ORM 已删除） ────────────────
+-- LEGACY: thinking / stream_buffer / stream_completed 已迁入 messages 表，
+-- 此表对新部署不再需要。物理保留是为了让既有部署 ALTER 时不报错，
+-- 若确认不需要历史数据可手动 DROP TABLE message_details。
 CREATE TABLE IF NOT EXISTS message_details (
     id               SERIAL           NOT NULL,
     conv_id          VARCHAR(36)      NOT NULL,

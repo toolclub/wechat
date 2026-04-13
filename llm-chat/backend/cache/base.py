@@ -15,8 +15,6 @@ from typing import Optional
 class CacheLookupResult:
     """缓存命中结果"""
 
-    def __init__(self): ...
-
     answer: str
     matched_question: str
     similarity: float

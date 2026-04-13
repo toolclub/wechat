@@ -3,64 +3,80 @@ ChatFlow Backend —— LangChain + LangGraph 重构版
 author: leizihao
 email: lzh19162600626@gmail.com
 
-启动顺序（lifespan）：
-  0. 初始化日志系统
-  1. 初始化 PostgreSQL 连接并创建表结构
-  2. 从数据库加载全部对话到内存缓存
-  3. 初始化 Qdrant Collection（若启用长期记忆）
-  4. 加载 MCP 工具（若配置了 MCP_SERVERS）
-  5. 构建并编译 LangGraph Agent 图
+═══════════════════════════════════════════════════════════════════════════════
+本文件职责
+═══════════════════════════════════════════════════════════════════════════════
 
-新增接口：
-  GET  /api/tools                        —— 查看当前可用工具列表
-  GET  /api/conversations/{id}/memory    —— 记忆状态调试
-  GET  /api/conversations/{id}/tools     —— 对话工具调用历史（供前端刷新后复现）
-  GET  /api/conversations/{id}/artifacts —— 对话文件产物列表（供前端刷新后恢复文件卡片）
+重构后 main.py 只承担三件事：
+
+  1. 应用生命周期（lifespan）：初始化日志 / DB / 缓存 / RAG / MCP / 沙箱 /
+     LangGraph 图。顺序和故障降级策略见 lifespan() 函数。
+  2. 创建 FastAPI app 实例并挂上跨域策略（layers.extension.apply_cors）。
+  3. 按业务边界把 5 个 APIRouter 包含进来：
+        api.conversations   —— 对话 CRUD + 完整状态 + 流式状态
+        api.chat            —— 流式对话 + 停止 + 恢复
+        api.artifacts       —— 文件产物元数据 / 详情 / 下载
+        api.tools           —— 工具清单 + 对话工具历史
+        api.debug           —— 记忆 / 沙箱 / embedding / plan / 模型列表
+
+路由处理函数不再放在这里。想改某个接口去对应的 api/*.py 文件编辑。
 """
-import asyncio
 import logging
-import uuid
 
-import httpx
 import uvicorn
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI
 
-from models import ChatRequest, CreateConversationRequest, UpdateConversationRequest
-from memory import store as memory_store
-from memory.tool_events import get_tool_events
-from rag import retriever as rag_retriever
-from tools.mcp.loader import load_mcp_tools
-from tools import get_all_tools, get_tool_names, get_tools_info
-from graph import agent as graph_agent
-from graph import runner as graph_runner
-from layers.extension import apply_cors
-from db.database import init_engine, get_engine
-from db.models import Base
-from logging_config import setup_logging
+from api import artifacts as artifacts_router
+from api import chat as chat_router
+from api import conversations as conversations_router
+from api import debug as debug_router
+from api import tools as tools_router
 from cache.factory import init_cache
 from config import (
-    CHAT_MODEL,
     BACKEND_HOST,
     BACKEND_PORT,
-    EMBEDDING_MODEL,
+    CHAT_MODEL,
+    DATABASE_URL,
+    LOG_DIR,
     LONGTERM_MEMORY_ENABLED,
     MCP_SERVERS,
     SEMANTIC_CACHE_ENABLED,
-    API_BASE_URL,
-    DATABASE_URL,
-    LOG_DIR,
 )
+from db.database import get_engine, init_engine
+from db.models import Base
+from graph import agent as graph_agent
+from layers.extension import apply_cors
+from logging_config import setup_logging
+from memory import store as memory_store
+from rag import retriever as rag_retriever
+from tools import get_all_tools
+from tools.mcp.loader import load_mcp_tools
 
 logger = logging.getLogger("main")
 
 
-# ── 应用生命周期 ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# 应用生命周期
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    应用启动 / 关闭钩子。
+
+    启动顺序（每步失败的降级策略不同，见函数内注释）：
+      0. setup_logging           ← 必须最先，否则后续异常无法落盘
+      1. init_engine + 建表 + 迁移 ← DB 不通直接启动失败（无法降级）
+      2. memory_store.init        ← 对话存储（DB-first，无内存预热）
+      3. init_cache + 清缓存       ← 失败降级为 NullCache
+      4. init_collection (Qdrant) ← 失败降级为长期记忆不可用
+      5. load_mcp_tools           ← 失败降级为该 MCP Server 不可用
+      5.5 sandbox.init            ← 失败降级为沙箱工具不注册
+      6. graph_agent.init         ← 编译 Agent 图，必须最后（依赖所有工具）
+    """
     # ── 启动 ──
 
     # 0. 初始化日志系统
@@ -75,7 +91,7 @@ async def lifespan(app: FastAPI):
         await run_migrations(conn)
     logger.info("数据库初始化完成")
 
-    # 2. 从数据库加载对话到内存缓存
+    # 2. 初始化对话存储（DB-first，无内存预加载）
     await memory_store.init()
 
     # 3. 初始化语义缓存（Redis Search）
@@ -87,8 +103,9 @@ async def lifespan(app: FastAPI):
             from cache.factory import get_cache
             await get_cache().clear()
             logger.info("语义缓存已清理（启动时一次性清除旧数据）")
-        except Exception:
-            pass
+        except Exception as exc:
+            # spec 铁律 #9：不吞异常。启动时清缓存失败不致命，但要落日志。
+            logger.warning("启动时清理语义缓存失败（不影响启动）: %s", exc)
     except Exception as exc:
         logger.error("语义缓存初始化失败（已降级为 NullCache）: %s", exc)
 
@@ -147,462 +164,32 @@ async def lifespan(app: FastAPI):
     )
 
     yield
+
     # ── 关闭 ──
     if sandbox_ok:
         from sandbox.manager import sandbox_manager
         await sandbox_manager.shutdown()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FastAPI app + 路由挂载
+# ═══════════════════════════════════════════════════════════════════════════════
+
 app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
 apply_cors(app)
 
-# ── 流式停止信号 ──
-# 本 worker 内的 asyncio.Event（用于中断当前 worker 的图执行）
-# 跨 worker 停止通过 Redis pub/sub（db.redis_state.publish_stop）
-_stop_events: dict[str, asyncio.Event] = {}
-
-
-# ── 模型接口 ──────────────────────────────────────────────────────────────────
-
-@app.get("/api/models")
-async def get_models():
-    """列出 Ollama 中已下载的所有模型。"""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{API_BASE_URL}/api/tags")
-            data = resp.json()
-            models = [
-                m["name"] for m in data.get("models", [])
-                if not m["name"].startswith(EMBEDDING_MODEL.split(":")[0])
-            ]
-    except Exception:
-        models = [CHAT_MODEL]
-    return {"models": models}
-
-
-# ── 对话管理 ──────────────────────────────────────────────────────────────────
-
-@app.get("/api/conversations")
-async def get_conversations(request: Request):
-    client_id = request.headers.get("X-Client-ID", "")
-    # 直接从 DB 读取，确保多 worker 一致性
-    convs = await memory_store.db_list_conversations(client_id)
-    return {"conversations": convs}
-
-
-@app.post("/api/conversations")
-async def create_conversation(req: CreateConversationRequest, request: Request):
-    client_id = request.headers.get("X-Client-ID", "")
-    conv_id = str(uuid.uuid4())[:8]
-    conv = await memory_store.create(
-        conv_id=conv_id,
-        title=req.title or "新对话",
-        system_prompt=req.system_prompt or "",
-        client_id=client_id,
-    )
-    return {"id": conv.id, "title": conv.title}
-
-
-@app.get("/api/conversations/{conv_id}")
-async def get_conversation(conv_id: str):
-    # 直接从 DB 读取，确保多 worker 一致性
-    data = await memory_store.db_get_conversation(conv_id)
-    if not data:
-        return {"error": "对话不存在"}
-    return data
-
-
-@app.patch("/api/conversations/{conv_id}")
-async def update_conversation(conv_id: str, req: UpdateConversationRequest):
-    # 先从 DB 加载到本 worker 缓存
-    conv_data = await memory_store.db_get_conversation(conv_id)
-    if not conv_data:
-        return {"error": "对话不存在"}
-    conv = memory_store.get(conv_id)
-    if not conv:
-        return {"error": "对话不存在"}
-    if req.title is not None:
-        conv.title = req.title
-    if req.system_prompt is not None:
-        conv.system_prompt = req.system_prompt
-    await memory_store.save(conv)
-    return {"ok": True}
-
-
-@app.delete("/api/conversations/{conv_id}")
-async def delete_conversation(conv_id: str):
-    await memory_store.delete(conv_id)
-    if LONGTERM_MEMORY_ENABLED:
-        await rag_retriever.delete_by_conv(conv_id)
-    return {"ok": True}
-
-
-# ── 聊天（流式 SSE） ──────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/full-state")
-async def get_full_state(conv_id: str):
-    """
-    获取对话的完整状态，供前端刷新后恢复 UI。
-
-    返回：消息列表（含 thinking、tool_calls、steps 等结构化数据）、
-    执行计划、文件产物、工具历史、流式状态。
-    """
-    from db.artifact_store import get_artifact_meta_list
-    from db.plan_store import get_latest_plan_for_conv
-    from db.tool_store import get_tool_executions_for_conv
-    from db.event_store import get_latest_event_id
-
-    # 直接从 DB 读取（跨 worker 一致性）
-    conv_data = await memory_store.db_get_conversation(conv_id)
-    if not conv_data:
-        return {"error": "对话不存在"}
-
-    # 并行加载所有关联数据
-    tool_execs, latest_plan, artifacts, last_event_id = await asyncio.gather(
-        get_tool_executions_for_conv(conv_id),
-        get_latest_plan_for_conv(conv_id),
-        get_artifact_meta_list(conv_id),  # 只返回元数据，不含 content（加载快）
-        get_latest_event_id(conv_id),
-    )
-
-    # 检查是否有未完成的流式消息（DB 字段，跨 worker 安全）
-    has_streaming = any(
-        not m.get("stream_completed", True)
-        for m in conv_data["messages"]
-        if m.get("role") == "assistant"
-    )
-
-    # 按 message 组织 tool_executions 和 artifacts
-    tool_by_msg: dict[str, list] = {}
-    for t in tool_execs:
-        tool_by_msg.setdefault(t["message_id"], []).append(t)
-
-    artifact_by_msg: dict[str, list] = {}
-    for a in artifacts:
-        if a.get("message_id"):
-            artifact_by_msg.setdefault(a["message_id"], []).append(a)
-
-    # 组装消息（含 thinking + tool_executions + artifacts 元数据 + stream 状态）
-    enriched_messages = []
-    for m in conv_data["messages"]:
-        msg = {**m}
-        msg_id = m.get("message_id", "")
-        if msg_id and msg_id in tool_by_msg:
-            msg["tool_executions"] = tool_by_msg[msg_id]
-        if msg_id and msg_id in artifact_by_msg:
-            msg["artifacts"] = artifact_by_msg[msg_id]
-        enriched_messages.append(msg)
-
-    # 未关联到 message 的旧 artifact（兼容迁移前数据），只返回元数据
-    orphan_artifacts = [a for a in artifacts if not a.get("message_id")]
-
-    return {
-        "id": conv_data["id"],
-        "title": conv_data["title"],
-        "status": conv_data.get("status", "active"),
-        "messages": enriched_messages,
-        "plan": latest_plan,
-        "artifacts": orphan_artifacts,  # 只保留未关联的旧数据（元数据，无 content）
-        "has_streaming": has_streaming,
-        "last_event_id": last_event_id,
-    }
-
-
-@app.get("/api/conversations/{conv_id}/resume")
-async def resume_chat(conv_id: str, request: Request, after_event_id: int = 0, message_id: str = ""):
-    """
-    恢复流式输出（SSE）— DB-first 版。
-
-    从 event_log 表读取 after_event_id 之后的事件，
-    然后切换到实时推送。跨 worker 安全。
-
-    message_id: 可选，限定只回放指定 assistant message 的事件（多轮对话时避免混入旧轮）。
-    """
-    from graph.runner.stream import resume_stream
-
-    async def safe_resume():
-        try:
-            async for chunk in resume_stream(conv_id, after_event_id, message_id):
-                if await request.is_disconnected():
-                    break
-                yield chunk
-        except asyncio.CancelledError:
-            pass
-
-    return StreamingResponse(
-        safe_resume(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.post("/api/chat")
-async def chat(req: ChatRequest, request: Request):
-    """
-    流式对话接口（SSE）。
-
-    SSE 事件格式：
-      data: {"content": "..."}         ← 增量 token
-      data: {"tool_call": {...}}        ← 工具调用
-      data: {"search_item": {...}}      ← 单条搜索结果（实时追加）
-      data: {"tool_result": {...}}      ← 工具完成信号
-      data: {"done": true, "compressed": bool}  ← 完成信号
-      data: {"stopped": true}           ← 用户主动停止
-    """
-    client_id = request.headers.get("X-Client-ID", "")
-
-    # ── 入口日志（确认请求已到达 Python 层，可排查 nginx/网络层丢包） ─────────
-    img_bytes = sum(len(img) for img in req.images)
-    logger.info(
-        "POST /api/chat | conv=%s | client=%s | model=%s | msg_len=%d"
-        " | images=%d | img_total_kb=%.1f",
-        req.conversation_id,
-        client_id[:8] if client_id else "-",
-        req.model or CHAT_MODEL,
-        len(req.message),
-        len(req.images),
-        img_bytes / 1024,
-    )
-    # 先从 DB 加载到本 worker 缓存（多 worker 时可能在其他 worker 创建的）
-    conv = memory_store.get(req.conversation_id)
-    if not conv:
-        await memory_store.db_get_conversation(req.conversation_id)
-        conv = memory_store.get(req.conversation_id)
-    if not conv:
-        conv = await memory_store.create(req.conversation_id, client_id=client_id)
-
-    # 如果该会话已有正在进行的流，先停止
-    old_event = _stop_events.get(req.conversation_id)
-    if old_event:
-        old_event.set()
-    # 取消当前 worker 上的活跃 session（如果有）
-    from graph.runner.stream import _active_sessions
-    old_session = _active_sessions.get(req.conversation_id)
-    if old_session and old_session._graph_task and not old_session._graph_task.done():
-        old_session._graph_task.cancel()
-
-    stop_event = asyncio.Event()
-    _stop_events[req.conversation_id] = stop_event
-
-    async def safe_stream():
-        try:
-            async for chunk in graph_runner.stream_response(
-                conv_id=req.conversation_id,
-                user_message=req.message,
-                model=req.model or CHAT_MODEL,
-                temperature=req.temperature,
-                client_id=client_id,
-                images=req.images,
-                agent_mode=req.agent_mode,
-                force_plan=req.force_plan,
-                stop_event=stop_event,
-            ):
-                if await request.is_disconnected():
-                    break
-                yield chunk
-        finally:
-            # 只清理属于自己的 stop_event（避免把下一轮的 stop_event 误删）
-            if _stop_events.get(req.conversation_id) is stop_event:
-                _stop_events.pop(req.conversation_id, None)
-
-    return StreamingResponse(
-        safe_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.post("/api/chat/{conv_id}/stop")
-async def stop_chat(conv_id: str):
-    """主动停止某个会话的流式输出（本 worker + 跨 worker Redis）。"""
-    # 1. 本 worker 停止
-    event = _stop_events.get(conv_id)
-    if event:
-        event.set()
-    from graph.runner.stream import _active_sessions
-    session = _active_sessions.get(conv_id)
-    if session and session._graph_task and not session._graph_task.done():
-        session._graph_task.cancel()
-    # 2. 跨 worker 停止（通过 Redis 通知其他 worker）
-    try:
-        from db.redis_state import publish_stop
-        await publish_stop(conv_id)
-    except Exception as exc:
-        logger.warning("Redis publish_stop 失败: %s", exc)
-    return {"ok": True}
-
-
-# ── 流式状态查询 ─────────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/streaming-status")
-async def get_streaming_status(conv_id: str):
-    """检查对话是否有活跃的流式输出（DB-first，跨 worker 安全）。"""
-    from db.event_store import get_latest_event_id
-    # 从 DB 读取对话状态
-    conv_data = await memory_store.db_get_conversation(conv_id)
-    if not conv_data:
-        return {"streaming": False, "last_event_id": 0}
-
-    is_streaming = conv_data.get("status") == "streaming"
-    last_eid = await get_latest_event_id(conv_id) if is_streaming else 0
-
-    return {
-        "streaming": is_streaming,
-        "last_event_id": last_eid,
-    }
-
-
-# ── 工具接口 ──────────────────────────────────────────────────────────────────
-
-@app.get("/api/tools")
-async def list_tools():
-    """列出当前所有可用工具（内置 + MCP + 动态注册）。"""
-    return {"tools": get_tools_info()}
-
-
-# ── 对话工具调用历史 ───────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/tools")
-async def get_conversation_tools(conv_id: str):
-    """获取对话的工具调用历史（供前端刷新后复现"此会话经历了什么"）。"""
-    events = await get_tool_events(conv_id)
-    return {"events": events}
-
-
-# ── 文件产物接口 ───────────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/artifacts")
-async def get_conversation_artifacts(conv_id: str):
-    """获取对话的文件产物元数据列表（不含 content，加载快）。"""
-    from db.artifact_store import get_artifact_meta_list
-    artifacts = await get_artifact_meta_list(conv_id)
-    return {"artifacts": artifacts}
-
-
-@app.get("/api/artifacts/{artifact_id}")
-async def get_artifact_detail(artifact_id: int):
-    """按需加载单个产物的完整内容（含二进制、slides_html 等）。前端点击时调用。"""
-    from db.artifact_store import get_artifact_content
-    data = await get_artifact_content(artifact_id)
-    if not data:
-        return {"error": "产物不存在"}
-    return data
-
-
-@app.get("/api/artifacts/{artifact_id}/download")
-async def download_artifact(artifact_id: int):
-    """
-    下载文件产物（二进制流，浏览器直接触发下载）。
-
-    支持所有 artifact 类型：code/html 下载源码，pptx 下载二进制，archive 下载 tar.gz。
-    """
-    import base64
-    import json as _json
-    from urllib.parse import quote
-    from db.artifact_store import get_artifact_content
-    from fastapi.responses import Response
-
-    data = await get_artifact_content(artifact_id)
-    if not data:
-        return {"error": "产物不存在"}
-
-    name = data.get("name", "download")
-    content = data.get("content", "")
-    language = data.get("language", "text")
-
-    # 二进制类型（pptx/archive）：从 binary_b64 解码
-    if data.get("binary") or language in ("archive", "pptx", "pdf"):
-        binary_b64 = content
-        # 如果 content 是 JSON 包装的，提取 binary_b64
-        if content.startswith("{"):
-            try:
-                packed = _json.loads(content)
-                binary_b64 = packed.get("binary_b64", content)
-            except _json.JSONDecodeError:
-                pass
-        try:
-            raw_bytes = base64.b64decode(binary_b64)
-        except Exception:
-            return {"error": "文件解码失败"}
-
-        # MIME 类型映射
-        mime_map = {
-            "archive": "application/gzip",
-            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "pdf": "application/pdf",
-        }
-        mime = mime_map.get(language, "application/octet-stream")
-        return Response(
-            content=raw_bytes,
-            media_type=mime,
-            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
-        )
-
-    # 文本类型：直接返回内容
-    return Response(
-        content=content.encode("utf-8"),
-        media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
-    )
-
-
-# ── 执行计划接口 ───────────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/plan")
-async def get_conversation_plan(conv_id: str):
-    """获取对话最新的执行计划（供前端刷新后恢复认知面板）。"""
-    from db.plan_store import get_latest_plan_for_conv
-    plan = await get_latest_plan_for_conv(conv_id)
-    return {"plan": plan}
-
-
-# ── 记忆调试接口 ───────────────────────────────────────────────────────────────
-
-@app.get("/api/conversations/{conv_id}/memory")
-async def get_memory_debug(conv_id: str):
-    conv = memory_store.get(conv_id)
-    if not conv:
-        return {"error": "对话不存在"}
-    lt_count = (
-        await rag_retriever.count_by_conv(conv_id) if LONGTERM_MEMORY_ENABLED else -1
-    )
-    return {
-        "total_messages": len(conv.messages),
-        "summarised_count": conv.mid_term_cursor,
-        "window_count": len(conv.messages) - conv.mid_term_cursor,
-        "mid_term_summary": conv.mid_term_summary or "(空)",
-        "long_term_stored_pairs": lt_count if LONGTERM_MEMORY_ENABLED else "(已禁用)",
-        "active_tools": get_tool_names(),
-    }
-
-
-# ── 沙箱集群状态接口 ─────────────────────────────────────────────────────────
-
-@app.get("/api/sandbox/status")
-async def sandbox_status():
-    """查看沙箱 Worker 集群状态：健康数、session 分布、各节点状态。"""
-    from config import SANDBOX_ENABLED
-    if not SANDBOX_ENABLED:
-        return {"enabled": False}
-    from sandbox.manager import sandbox_manager
-    return {"enabled": True, **sandbox_manager.status()}
-
-
-# ── Embedding 测试接口 ────────────────────────────────────────────────────────
-
-@app.post("/api/embedding")
-async def test_embedding(text: str = "测试文本"):
-    from llm.embeddings import embed_text
-    vec = await embed_text(text)
-    return {
-        "model": EMBEDDING_MODEL,
-        "text": text,
-        "dimensions": len(vec),
-        "vector_preview": vec[:5],
-    }
-
-
-# ── 入口 ──────────────────────────────────────────────────────────────────────
+# 5 个业务 Router 按业务边界分别挂载（内部路由路径保持和旧版完全一致，
+# 前端接口契约不变）
+app.include_router(conversations_router.router)
+app.include_router(chat_router.router)
+app.include_router(artifacts_router.router)
+app.include_router(tools_router.router)
+app.include_router(debug_router.router)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 入口
+# ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     setup_logging(LOG_DIR)

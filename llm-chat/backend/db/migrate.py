@@ -79,6 +79,9 @@ _MIGRATIONS = [
 
     # ── plan_steps 补字段（关联 assistant 消息） ──
     "ALTER TABLE plan_steps ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",
+
+    # ── conversations 流式心跳（DB 驱动的 streaming 活跃检测，替代 Redis register_streaming） ──
+    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0",
 ]
 
 

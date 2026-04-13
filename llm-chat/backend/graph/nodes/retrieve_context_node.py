@@ -52,7 +52,7 @@ class RetrieveContextNode(BaseNode):
         """
         conv_id  = state["conv_id"]
         user_msg = state["user_message"]
-        conv     = memory_store.get(conv_id)
+        conv     = await memory_store.get(conv_id)
 
         long_term: list[str] = []
         forget_mode = False
