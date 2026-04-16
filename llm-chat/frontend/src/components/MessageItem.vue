@@ -415,6 +415,32 @@ function isCollapsed(si: number, ti: number) { return collapsed.value[`${si}-${t
 // 按 displayMode 协议判断是否为终端工具（非 default 的都进终端渲染）
 const TERMINAL_MODES = new Set(['terminal', 'file_write', 'file_read'])
 
+// ─── tool_call_args 流式解码：原始 JSON 转可读代码 ──────────────────────────
+// tool_call_args 流的是原始 JSON 参数片段（如 {"path":"a.html","content":"<!DOCTYPE html>\\n<html>..."}）
+// 其中 \n \t \" 是字面转义字符，需要解码为真正的换行/缩进才能在终端可读
+function decodeStreamOutput(raw: string): string {
+  // 尝试提取 "content": "..." 或 "code": "..." 的值部分
+  const match = raw.match(/"(?:content|code)"\s*:\s*"/)
+  if (match) {
+    const start = raw.indexOf(match[0]) + match[0].length
+    raw = raw.slice(start)
+    // 去掉尾部可能的不完整 JSON（如 "}）
+    if (raw.endsWith('"}')) raw = raw.slice(0, -2)
+    else if (raw.endsWith('"')) raw = raw.slice(0, -1)
+  }
+  return raw
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+}
+
+// ─── 文件内容折叠（cat 写入的大文件） ──────────────────────────────────────
+const fileExpanded = ref<Record<string, boolean>>({})
+function isFileExpanded(si: number, ii: number) { return fileExpanded.value[`${si}-${ii}`] ?? false }
+function toggleFileExpand(si: number, ii: number) { fileExpanded.value[`${si}-${ii}`] = !fileExpanded.value[`${si}-${ii}`] }
+const FILE_COLLAPSE_LINES = 15  // 超过此行数折叠
+
 interface SandboxGroupItem { tc: ToolCallRecord; ti: number }
 type ToolGroup =
   | { type: 'single'; tc: ToolCallRecord; ti: number }
@@ -804,8 +830,8 @@ function cancelEdit() { isEditing.value = false }
                             <span class="term-generating-text">{{ item.tc.name }}</span>
                             <span class="term-generating-dots">...</span>
                           </div>
-                          <!-- tool_call_args 已到达：显示流式代码 -->
-                          <pre v-if="item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          <!-- tool_call_args 已到达：解码 JSON 转义后显示可读代码 -->
+                          <pre v-if="item.tc.output" class="term-stream-output" v-auto-scroll>{{ decodeStreamOutput(item.tc.output) }}</pre>
                           <!-- tool_call_args 未开始，模型在 thinking：显示 thinking 摘要 -->
                           <div v-else-if="sec.thinking" class="term-thinking-preview">
                             <div class="term-thinking-hint">💭 模型正在构思中...</div>
@@ -815,13 +841,20 @@ function cancelEdit() { isEditing.value = false }
 
                         <!-- ═══ 完成后渲染：按 displayMode 协议决定模板 ═══ -->
 
-                        <!-- file_write 模式 -->
+                        <!-- file_write 模式（可折叠） -->
                         <template v-else-if="item.tc.displayMode === 'file_write'">
-                          <div class="term-line term-line--dimmed">
+                          <div class="term-line term-line--dimmed term-file-header" @click="toggleFileExpand(si, ii)">
                             <span class="term-prompt-sign">$</span>
                             <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
+                            <span v-if="(item.tc.input as any).content && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES"
+                              class="term-fold-badge">
+                              {{ isFileExpanded(si, ii) ? '收起' : `${((item.tc.input as any).content as string).split('\n').length} 行 · 展开` }}
+                            </span>
                           </div>
-                          <pre v-if="(item.tc.input as any).content" class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
+                          <div v-if="(item.tc.input as any).content" class="term-file-body" :class="{ collapsed: !isFileExpanded(si, ii) && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES }">
+                            <pre class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
+                            <div v-if="!isFileExpanded(si, ii) && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES" class="term-file-fade" @click="toggleFileExpand(si, ii)"></div>
+                          </div>
                           <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
                           <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
                         </template>
@@ -1718,6 +1751,61 @@ function cancelEdit() { isEditing.value = false }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* ─── 流式输出限高 + 自动滚动 ─── */
+.term-stream-output {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ─── 文件内容折叠 ─── */
+.term-file-header {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.term-fold-badge {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #00AEEC;
+  background: rgba(0, 174, 236, 0.08);
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 174, 236, 0.2);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.term-fold-badge:hover {
+  background: rgba(0, 174, 236, 0.15);
+  border-color: rgba(0, 174, 236, 0.4);
+}
+.term-file-body {
+  position: relative;
+  transition: max-height 0.3s ease;
+}
+.term-file-body.collapsed {
+  max-height: 240px;
+  overflow: hidden;
+}
+.term-file-fade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(transparent, var(--cf-card, #fff));
+  cursor: pointer;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  font-size: 11px;
+  color: #00AEEC;
+}
+.term-file-fade::after { content: '点击展开完整内容'; }
 
 /* thinking 预览（模型构思中，tool_call_args 还没到达时显示） */
 .term-thinking-preview {

@@ -469,6 +469,18 @@ export function useChat() {
     await loadConversations()
   }
 
+  async function batchRemoveConversations(ids: string[]) {
+    if (!ids.length) return
+    await Promise.all(ids.map(id => convStates[id]?.loading ? stopConversation(id) : Promise.resolve()))
+    await api.batchDeleteConversations(ids)
+    ids.forEach(id => delete convStates[id])
+    if (currentConvId.value && ids.includes(currentConvId.value)) {
+      currentConvId.value = null
+      window.location.hash = ''
+    }
+    await loadConversations()
+  }
+
   async function restoreFromHash() {
     const id = window.location.hash.slice(1)
     if (id) {
@@ -1043,7 +1055,7 @@ export function useChat() {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
     canContinue, initialLoading,
     loadConversations, selectConversation, restoreFromHash,
-    newConversation, removeConversation,
+    newConversation, removeConversation, batchRemoveConversations,
     send, cancelStream, stopConversation, applyModifiedPlan, submitClarification, continueLast,
     dismissContinue, regenerate, editMessage,
   }

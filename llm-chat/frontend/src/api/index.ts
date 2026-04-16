@@ -69,6 +69,15 @@ export async function deleteConversation(id: string) {
   })
 }
 
+export async function batchDeleteConversations(ids: string[]): Promise<{ ok: boolean; deleted: number }> {
+  const res = await fetch(`${API_BASE}/api/conversations/batch-delete`, {
+    method: 'POST',
+    headers: commonHeaders(),
+    body: JSON.stringify({ conversation_ids: ids }),
+  })
+  return res.json()
+}
+
 export async function renameConversation(id: string, title: string) {
   await fetch(`${API_BASE}/api/conversations/${id}`, {
     method: 'PATCH',
