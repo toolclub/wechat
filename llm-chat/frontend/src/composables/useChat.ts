@@ -1,7 +1,73 @@
 import { ref, reactive, computed } from 'vue'
-import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep } from '../types'
+import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep, ThinkingEvent, ThinkingSegment } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
+
+/**
+ * 应用一个 thinking SSE 事件到消息/步骤的结构化段列表（spec 协议）。
+ *
+ * 规则（纯字段判定，不解析任何字符串）：
+ *   1. step_index !== null 且 msg.steps[step_index] 存在 → 进入该 step 的 thinkingSegments
+ *   2. 否则 → 进入 msg.thinkingSegments
+ *   3. 目标列表中查找 key=(node,step_index,phase) 的最后一段：
+ *      - 找到 → append delta 到 content
+ *      - 未找到 → push 新段
+ *   4. 同时维护纯文本 thinking 以向后兼容（只用于旧 UI 路径）
+ */
+function applyThinkingEvent(msg: Message, ev: ThinkingEvent): void {
+  let targetList: ThinkingSegment[] | undefined
+  const stepIdx = ev.step_index
+  if (stepIdx !== null && msg.steps && stepIdx >= 0 && stepIdx < msg.steps.length) {
+    const step = msg.steps[stepIdx]
+    if (!step.thinkingSegments) step.thinkingSegments = []
+    targetList = step.thinkingSegments
+    step.thinking = (step.thinking || '') + ev.delta
+  } else {
+    if (!msg.thinkingSegments) msg.thinkingSegments = []
+    targetList = msg.thinkingSegments
+    msg.thinking = (msg.thinking || '') + ev.delta
+  }
+
+  // 在目标列表中找最后一段 key 匹配的段
+  let matchIdx = -1
+  for (let i = targetList.length - 1; i >= 0; i--) {
+    const s = targetList[i]
+    if (s.node === ev.node && s.step_index === ev.step_index && s.phase === ev.phase) {
+      matchIdx = i
+      break
+    }
+  }
+  if (matchIdx >= 0) {
+    targetList[matchIdx].content += ev.delta
+  } else {
+    targetList.push({
+      node: ev.node,
+      step_index: ev.step_index,
+      phase: ev.phase,
+      content: ev.delta,
+    })
+  }
+}
+
+/**
+ * DB 恢复时：把消息级 thinking_segments 按 step_index 分配到 msg 或 step。
+ * 同时重建 step.thinking 纯文本。
+ */
+function hydrateThinkingSegments(msg: Message, segments: ThinkingSegment[]): void {
+  if (!segments?.length) return
+  msg.thinkingSegments = []
+  for (const seg of segments) {
+    const si = seg.step_index
+    if (si !== null && msg.steps && si >= 0 && si < msg.steps.length) {
+      const step = msg.steps[si]
+      if (!step.thinkingSegments) step.thinkingSegments = []
+      step.thinkingSegments.push({ ...seg })
+      step.thinking = (step.thinking || '') + seg.content
+    } else {
+      msg.thinkingSegments.push({ ...seg })
+    }
+  }
+}
 
 /** 读取用户当前选择的 Agent/Chat 模式（从 localStorage 持久化状态读取） */
 function getCurrentAgentMode(): boolean {
@@ -169,8 +235,12 @@ export function useChat() {
           message_id: m.message_id || undefined,  // DB 业务 ID，用于 plan.message_id 精确匹配
         }
 
-        // thinking 直接从 messages 表恢复（不再依赖 message_details）
+        // thinking 直接从 messages 表恢复（向后兼容纯文本字段）
         if (m.thinking) msg.thinking = m.thinking
+        // 结构化思考段：先以扁平列表挂到消息级，若后续恢复了 plan/steps 再重新分发到 step
+        if (m.thinking_segments?.length) {
+          msg.thinkingSegments = (m.thinking_segments as ThinkingSegment[]).map(s => ({ ...s }))
+        }
         if (m.images?.length) msg.images = m.images
 
         // tool_executions 从新表恢复（含 step_index 用于步骤分发）
@@ -255,6 +325,7 @@ export function useChat() {
               status: st.status ?? 'done',
               toolCalls: toolsByStep.get(i) ?? [],
               thinking: '',
+              thinkingSegments: [],
               content: st.result ?? '',
             }))
             // 有 step_index 的工具已分配到步骤，从 message 级别移除避免重复
@@ -262,6 +333,16 @@ export function useChat() {
               lastAssistant.toolCalls = lastAssistant.toolCalls.filter(
                 (tc: any) => tc.step_index == null
               )
+            }
+            // steps 就绪后，把消息级 thinkingSegments 按 step_index 重新分发到对应 step
+            const rawSegs = lastAssistant.thinkingSegments || []
+            if (rawSegs.length && lastAssistant.steps) {
+              lastAssistant.thinkingSegments = []
+              lastAssistant.thinking = ''  // 重置累计，按段重建
+              for (const st of lastAssistant.steps) {
+                st.thinkingSegments = []; st.thinking = ''
+              }
+              hydrateThinkingSegments(lastAssistant, rawSegs)
             }
           }
         }
@@ -300,9 +381,10 @@ export function useChat() {
       s.messages.push({ role: 'assistant', content: '' })
     }
     let assistantIdx = s.messages.length - 1
-    // 清空 content（resume 会从事件重放中重建）
+    // 清空 content / thinking（resume 会从事件重放中重建所有 segments）
     s.messages[assistantIdx].content = ''
     s.messages[assistantIdx].thinking = ''
+    s.messages[assistantIdx].thinkingSegments = []
     s.messages[assistantIdx].toolCalls = undefined
     s.messages[assistantIdx].steps = undefined
 
@@ -375,13 +457,13 @@ export function useChat() {
           const m = msg()
           if (!m.steps) {
             m.steps = planSteps.map((st, i): StepRecord => ({
-              index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '',
+              index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', thinkingSegments: [], content: st.result ?? '',
             }))
             s.activeStepIndex = 0
           } else {
             planSteps.forEach((st, i) => {
               if (m.steps![i]) { m.steps![i].status = st.status; m.steps![i].title = st.title; if (st.result && st.status === 'done' && !m.steps![i].content) m.steps![i].content = st.result }
-              else m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '' })
+              else m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', thinkingSegments: [], content: st.result ?? '' })
             })
             const runningIdx = planSteps.findIndex(st => st.status === 'running')
             if (runningIdx >= 0) s.activeStepIndex = runningIdx
@@ -411,8 +493,8 @@ export function useChat() {
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false
         },
         s.abortController.signal,
-        // onThinking
-        (thinking) => { const step = activeStep(); if (step) step.thinking += thinking; else msg().thinking = (msg().thinking ?? '') + thinking },
+        // onThinking: 结构化事件按 (node, step_index, phase) 分发到 msg/step 的 segments
+        (ev) => { applyThinkingEvent(msg(), ev) },
         // onSandboxOutput：按 toolName 精确匹配，兜底最后一个未完成工具
         (toolName, stream, text) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
@@ -552,14 +634,18 @@ export function useChat() {
           const target = step || msg()
           target.content = (target.content || '') + chunk
 
-          // COMPAT: 模型主动澄清 — 标记前的推理文字转入 thinking
+          // COMPAT: 模型主动澄清 — 标记前的推理文字转入 thinking（作为 clarification 节点的段）
           const tag = '[NEED_CLARIFICATION]'
           const idx = target.content.indexOf(tag)
           if (idx >= 0) {
             const reasoning = target.content.slice(0, idx).trim()
             if (reasoning) {
-              if (step) step.thinking = (step.thinking || '') + reasoning
-              else msg().thinking = (msg().thinking || '') + reasoning
+              applyThinkingEvent(msg(), {
+                node: 'clarification',
+                step_index: step ? step.index : null,
+                phase: 'reasoning',
+                delta: reasoning,
+              })
             }
             target.content = target.content.slice(idx)
           }
@@ -632,7 +718,7 @@ export function useChat() {
             // 首次建立步骤数组
             m.steps = planSteps.map((st, i): StepRecord => ({
               index: i, title: st.title, status: st.status,
-              toolCalls: [], thinking: '', content: st.result ?? '',
+              toolCalls: [], thinking: '', thinkingSegments: [], content: st.result ?? '',
             }))
             s.activeStepIndex = 0
           } else {
@@ -647,7 +733,7 @@ export function useChat() {
                   m.steps![i].content = st.result
                 }
               } else {
-                m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '' })
+                m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', thinkingSegments: [], content: st.result ?? '' })
               }
             })
             const runningIdx = planSteps.findIndex(st => st.status === 'running')
@@ -700,12 +786,8 @@ export function useChat() {
           s.cognitive.isActive = false
         },
         s.abortController.signal,
-        // onThinking
-        (thinking) => {
-          const step = activeStep()
-          if (step) step.thinking += thinking
-          else msg().thinking = (msg().thinking ?? '') + thinking
-        },
+        // onThinking: 结构化事件按 (node, step_index, phase) 分发到 msg/step 的 segments
+        (ev) => { applyThinkingEvent(msg(), ev) },
         // onClarification — 预检澄清从 SSE 事件直接获取。
         // COMPAT: 模型主动澄清时 content 可能含 [NEED_CLARIFICATION] 残留，一并清理。
         (data: ClarificationData) => {
@@ -923,6 +1005,7 @@ export function useChat() {
             // 首次收到计划：已完成步骤保留上次的完整 result 作为内容
             m.steps = planSteps.map((st, i): StepRecord => ({
               index: i, title: st.title, status: st.status, toolCalls: [], thinking: '',
+              thinkingSegments: [],
               content: st.result ?? '',
             }))
             // activeStepIndex 跳到第一个非 done 步骤
@@ -931,7 +1014,7 @@ export function useChat() {
           } else {
             planSteps.forEach((st, i) => {
               if (m.steps![i]) { m.steps![i].status = st.status; m.steps![i].title = st.title; if (st.result && st.status === 'done' && !m.steps![i].content) m.steps![i].content = st.result }
-              else m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', content: st.result ?? '' })
+              else m.steps!.push({ index: i, title: st.title, status: st.status, toolCalls: [], thinking: '', thinkingSegments: [], content: st.result ?? '' })
             })
             const runningIdx = planSteps.findIndex(st => st.status === 'running')
             if (runningIdx >= 0) s.activeStepIndex = runningIdx
@@ -951,7 +1034,7 @@ export function useChat() {
         },
         () => { s.loading = false; s.abortController = null; s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false },
         s.abortController.signal,
-        (thinking) => { const step = activeStep(); if (step) step.thinking += thinking; else msg().thinking = (msg().thinking ?? '') + thinking },
+        (ev) => { applyThinkingEvent(msg(), ev) },
         undefined,  // onClarification (not needed for plan execution)
         () => { s.canContinue = true; s.loading = false; s.abortController = null; s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false },
         (() => {

@@ -22,7 +22,11 @@ from graph.runner.utils import sse
 _LLM_NODES = frozenset({"call_model", "call_model_after_tool"})
 
 # 需要转发流式 thinking/token 事件的节点集合（所有会发出 llm_token/llm_thinking 的节点）
-_STREAMING_NODES = frozenset({"call_model", "call_model_after_tool", "planner", "reflector", "route_model"})
+# vision_node 也通过 emit_thinking 发出 llm_thinking，纳入此集合
+_STREAMING_NODES = frozenset({
+    "call_model", "call_model_after_tool", "planner", "reflector",
+    "route_model", "vision_node",
+})
 
 # COMPAT: MiniMax 等模型在流式模式下可能在 content 中输出工具调用文本残留。
 # 在流式层直接丢弃这些 token，避免污染前端显示和 DB 存储。
@@ -75,22 +79,26 @@ class LLMStreamHandler(EventHandler):
         if not isinstance(data, dict):
             return
 
-        # llm_thinking：推理模型的 thinking token（如 GLM-4.6V reasoning_content），直接推送
+        # llm_thinking：节点通过 BaseNode.emit_thinking 派发的结构化思考事件。
+        # payload = {node, step_index, phase, delta}，此处透传为 SSE。
         if event.get("name") == "llm_thinking":
-            thinking = data.get("content", "")
-            if thinking:
-                yield sse({"thinking": thinking})
+            delta = data.get("delta", "")
+            if delta:
+                yield sse({"thinking": {
+                    "node": data.get("node", ""),
+                    "step_index": data.get("step_index"),
+                    "phase": data.get("phase", "reasoning"),
+                    "delta": delta,
+                }})
             return
 
         content = data.get("content", "")
         if not content:
             return
 
-        # COMPAT: legacy think block parsing — 用状态机分离 <think> 标签。
-        # 支持 <think> 的模型（qwen3 等）在文本中输出推理块，需要跨 chunk 维持状态。
-        # 待模型 API 统一支持 enable_thinking / reasoning_content 结构化字段后，
-        # 可移除此状态机，直接使用 llm_thinking 事件通道。
-        # 不支持 <think> 的模型此逻辑空转，无副作用。
+        # COMPAT: legacy <think> 标签剥离 — 支持 <think> 的模型（qwen3 等）
+        # 在 content 中内嵌推理块。待全量支持 reasoning_content 字段后可移除。
+        # 剥离出的推理块以结构化 thinking 协议（phase=reasoning）推送。
         think_parts:  list[str] = []
         output_parts: list[str] = []
         pos = 0
@@ -122,9 +130,15 @@ class LLMStreamHandler(EventHandler):
             filtered = ""
 
         node = event.get("metadata", {}).get("langgraph_node", "")
+        step_index = data.get("step_index")
 
         if thinking:
-            yield sse({"thinking": thinking})
+            yield sse({"thinking": {
+                "node": data.get("node") or node,
+                "step_index": step_index,
+                "phase": "reasoning",
+                "delta": thinking,
+            }})
 
         if filtered:
             # 标记已流式发送，CallModelEnd/AfterToolEndHandler 检测到后跳过重复推送
@@ -178,10 +192,14 @@ class CallModelEndHandler(EventHandler):
         if not full_response:
             return
 
-        # COMPAT: legacy think block parsing — 非流式补发时分离 <think> 标签
+        # COMPAT: legacy <think> 标签剥离 — 非流式补发时分离推理块，以结构化 thinking 协议推送
+        node = event.get("metadata", {}).get("langgraph_node", "") or event.get("name", "")
         think_match = re.search(r"<think>([\s\S]*?)</think>", full_response)
         if think_match:
-            yield sse({"thinking": think_match.group(1).strip()})
+            yield sse({"thinking": {
+                "node": node, "step_index": None, "phase": "reasoning",
+                "delta": think_match.group(1).strip(),
+            }})
         content = re.sub(r"<think>[\s\S]*?</think>", "", full_response).strip()
         if content:
             yield sse({"content": content})
@@ -215,10 +233,14 @@ class CallModelAfterToolEndHandler(EventHandler):
         if not full_response:
             return
 
-        # COMPAT: legacy think block parsing — 非流式补发时分离 <think> 标签
+        # COMPAT: legacy <think> 标签剥离 — 非流式补发时分离推理块，以结构化 thinking 协议推送
+        node = event.get("metadata", {}).get("langgraph_node", "") or event.get("name", "")
         think_match = re.search(r"<think>([\s\S]*?)</think>", full_response)
         if think_match:
-            yield sse({"thinking": think_match.group(1).strip()})
+            yield sse({"thinking": {
+                "node": node, "step_index": None, "phase": "reasoning",
+                "delta": think_match.group(1).strip(),
+            }})
         content = re.sub(r"<think>[\s\S]*?</think>", "", full_response).strip()
         if content:
             yield sse({"content": content})

@@ -13,6 +13,9 @@ class Message:
     id: int = 0         # DB 自增主键（0 表示尚未持久化）
     tool_summary: str = ""   # 工具调用记录摘要（独立字段，不混入 content）
     step_summary: str = ""   # 多步执行过程摘要（独立字段，不混入 content）
+    thinking: str = ""       # 思考纯文本（向后兼容，= 所有 segments 拼接）
+    thinking_segments: list = field(default_factory=list)
+    # 结构化思考段：[{"node", "step_index", "phase", "content"}]
 
 
 @dataclass

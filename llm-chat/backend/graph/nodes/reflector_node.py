@@ -245,21 +245,18 @@ class ReflectorNode(BaseNode):
         reflection_text = "评估完成"
         try:
             # 流式调用：逐 token 推送 thinking 事件给前端，避免长时间静默
-            from langchain_core.callbacks.manager import adispatch_custom_event
-
             _THINK_PREFIX = "\x00THINK\x00"
             content_parts: list[str] = []
+            # reflector 在某个步骤上下文里评估，step_index 从 state 读
+            step_idx_for_think = self._active_step_index(state)
             async for delta in llm.astream(messages_for_llm, temperature=0.1):
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
-                    await adispatch_custom_event(
-                        "llm_thinking", {"content": thinking_text, "node": "reflector"},
-                    )
+                    await self.emit_thinking("reflector", "reasoning", thinking_text, step_idx_for_think)
                 else:
                     content_parts.append(delta)
-                    await adispatch_custom_event(
-                        "llm_thinking", {"content": delta, "node": "reflector"},
-                    )
+                    # reflector 的 JSON 生成过程作为 content phase 披露
+                    await self.emit_thinking("reflector", "content", delta, step_idx_for_think)
             raw = "".join(content_parts).strip()
             if not raw:
                 raise ValueError("LLM 返回空内容")

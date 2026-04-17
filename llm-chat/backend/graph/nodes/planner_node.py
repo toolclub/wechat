@@ -364,7 +364,6 @@ class PlannerNode(BaseNode):
         ]
 
         # ── 层 1：流式调用，逐 token 推送 thinking 事件给前端 ──────────────
-        from langchain_core.callbacks.manager import adispatch_custom_event
         from logging_config import log_prompt
         log_prompt(state.get("conv_id", ""), "planner", model, messages)
 
@@ -383,14 +382,11 @@ class PlannerNode(BaseNode):
                 async for delta in llm.astream(messages, temperature=0.1, extra_body=extra):
                     if delta.startswith(_THINK_PREFIX):
                         thinking_text = delta[len(_THINK_PREFIX):]
-                        await adispatch_custom_event(
-                            "llm_thinking", {"content": thinking_text, "node": "planner"},
-                        )
+                        await self.emit_thinking("planner", "reasoning", thinking_text, None)
                     else:
                         content_parts.append(delta)
-                        await adispatch_custom_event(
-                            "llm_thinking", {"content": delta, "node": "planner"},
-                        )
+                        # planner 的 JSON 生成过程作为 content phase 披露（与 reasoning 分段）
+                        await self.emit_thinking("planner", "content", delta, None)
             except Exception as exc:
                 logger.warning(
                     "Planner 流式调用异常 [第%d/3次]%s | error=%s",

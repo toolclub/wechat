@@ -79,6 +79,9 @@ _MIGRATIONS = [
 
     # ── plan_steps 补字段（关联 assistant 消息） ──
     "ALTER TABLE plan_steps ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",
+
+    # ── messages 补字段（结构化思考段：全披露、不覆盖） ──
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS thinking_segments JSONB NOT NULL DEFAULT '[]'",
 ]
 
 

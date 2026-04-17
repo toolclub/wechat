@@ -18,28 +18,55 @@
 
 ---
 
-## 模型思考流程（`llm_thinking` 事件全链路）
+## 模型思考流程（结构化 `thinking` 协议 — 不丢、不覆盖、不正则）
 
-整个会话过程中，模型的思考（thinking/reasoning）通过 `llm_thinking` 自定义事件实时推送到前端，
-前端在消息或步骤的"思考"折叠区展示，用户可随时展开查看。
+所有模型调用（推理/规划/路由/反思/视觉）的思考过程以**结构化 segment**
+形式推送到前端并持久化到 DB，前端按节点 + 步骤上下文分段渲染，
+段与段之间**永不覆盖**。
 
+### SSE 协议
+
+```json
+{
+  "thinking": {
+    "node": "planner | route_model | call_model | call_model_after_tool | reflector | vision",
+    "step_index": null,            // 有计划时为 0-based 步骤索引；planner/route/vision 为 null
+    "phase": "reasoning",          // "reasoning"(推理链 reasoning_content) | "content"(外显正文)
+    "delta": "..."                 // 增量文本，前端 append 到对应 segment
+  }
+}
 ```
-节点              thinking 来源                    前端展示位置            约束
-─────────────────────────────────────────────────────────────────────────────────
-route_model       路由 LLM 的 reasoning_content    message.thinking       无特殊约束
-planner           规划 LLM 的 reasoning + content  message.thinking       ⚠️ 禁止思考中写代码
-call_model        推理 LLM 的 reasoning_content    step.thinking 或       正常推理
-                                                   message.thinking
-call_model_       工具后 LLM 的 reasoning_content  step.thinking 或       正常推理
-after_tool                                         message.thinking
-reflector         评估 LLM 的 reasoning + content  message.thinking       仅边缘场景调用 LLM
-```
 
-**铁律补充**：
-- planner 节点的 prompt 必须明确禁止模型在思考中写代码（`prompts/nodes/planner.md`），
-  否则模型会在 thinking 阶段生成完整 HTML/代码，浪费 10-30 秒，然后在执行阶段再写一遍。
-- 所有节点的 thinking 和 content 都必须推送 `llm_thinking` 事件，保证全流程可观测。
-- 前端通过 `event.node` 字段区分来自哪个节点（`planner`/`call_model`/`reflector` 等）。
+**段 key** = `(node, step_index, phase)` 三元组；同 key 的 delta 追加到同一段，
+不同 key 各自独立段。**顺序**由 SSE 接收次序决定（`event_log.id` 天然有序），
+前端断线重连用 `/resume` 按 id 顺序重放即恢复原序。
+
+### DB 持久化
+
+- `messages.thinking_segments` JSONB：`[{"node":..., "step_index":..., "phase":..., "content":...}]`
+- 写入策略：`_track_sse_for_db` 按 key 追加/累积到当前活跃段；`_flush_to_db` 每 500ms 落盘
+- `messages.thinking` 旧字段保留为所有 segment `content` 拼接（向后兼容，COMPAT）
+
+### 节点覆盖矩阵
+
+| 节点 | reasoning 来源 | content 来源 | step_index | 备注 |
+|------|----------------|--------------|------------|------|
+| route_model | LLM reasoning_content | — | null | 不推 content（路由标签非思考） |
+| planner | LLM reasoning_content | LLM content（JSON 生成过程） | null | ⚠️ 禁止思考中写代码；最终 JSON 解析后由 plan_generated 事件推送 |
+| call_model | LLM reasoning_content | — | state.current_step_index 或 null | content 走 `{content: ...}` 事件，不混入 thinking |
+| call_model_after_tool | 同上 | — | 同上 | 同上 |
+| reflector | LLM reasoning_content | LLM content（JSON 生成过程） | state.current_step_index | 最终决策由 reflection 事件推送 |
+| vision | — | 视觉模型输出 | null | 图像分析描述作为 content phase 落在思考区 |
+
+### 铁律
+
+1. 所有 thinking 推送**必须**走 `BaseNode.emit_thinking(state, node, phase, delta)` 统一入口，
+   禁止散落的 `adispatch_custom_event("llm_thinking", ...)` 裸调用
+2. 节点**不得**解析 thinking 文本内容做决策；思考仅用于展示和持久化
+3. 前端**不得**用字符串/正则判断思考来自哪个节点；只用 `node` / `step_index` / `phase` 字段分发
+4. planner 节点 prompt 必须禁止思考中写代码（`prompts/nodes/planner.md`），
+   否则模型会在 thinking 阶段生成完整 HTML/代码，浪费 10-30 秒
+5. 段内 delta 顺序严格按 SSE 到达顺序追加；**不得**在前端基于内容做重排
 
 ---
 

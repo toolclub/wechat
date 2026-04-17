@@ -94,6 +94,7 @@ class CallModelAfterToolNode(BaseNode):
             len(messages),
         )
 
+        step_idx = self._active_step_index(state)
         vision_desc = state.get("vision_description", "")
         if state.get("images") and not vision_desc:
             return await self._vision_path(state, messages, model, temperature, conv_id, is_last=is_last)
@@ -101,6 +102,7 @@ class CallModelAfterToolNode(BaseNode):
             return await self._llm_path(
                 messages, model, temperature, conv_id,
                 is_last=is_last, tools_schema=tools_schema,
+                step_index=step_idx,
             )
 
     def _inject_boundary(
@@ -265,6 +267,7 @@ class CallModelAfterToolNode(BaseNode):
                 vision_llm, oai_messages, temperature, conv_id,
                 node="call_model_after_tool",
                 timeout=self._VISION_TIMEOUT,
+                step_index=self._active_step_index(state),
             )
             stream_err = result.pop("_stream_error", None)
             if stream_err:
@@ -300,6 +303,7 @@ class CallModelAfterToolNode(BaseNode):
         conv_id: str,
         is_last: bool = True,
         tools_schema: list | None = None,
+        step_index: int | None = None,
     ) -> dict:
         """
         主 LLM 路径。
@@ -326,6 +330,7 @@ class CallModelAfterToolNode(BaseNode):
                 result = await self._stream_tokens_with_tools(
                     llm, oai_messages, tools_schema, temperature,
                     conv_id, "call_model_after_tool",
+                    step_index=step_index,
                 )
                 stream_err = result.pop("_stream_error", None)
                 if stream_err:
@@ -335,7 +340,8 @@ class CallModelAfterToolNode(BaseNode):
 
             # ── 不绑工具时：流式输出 ──
             result = await self._stream_tokens(
-                llm, oai_messages, temperature, conv_id, node="call_model_after_tool"
+                llm, oai_messages, temperature, conv_id, node="call_model_after_tool",
+                step_index=step_index,
             )
             # _stream_tokens 中途异常时返回 partial content + _stream_error 标记
             stream_err = result.pop("_stream_error", None)

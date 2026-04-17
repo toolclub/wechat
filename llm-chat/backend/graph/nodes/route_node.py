@@ -74,16 +74,14 @@ class RouteNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(state.get("conv_id", ""), "route_model", ROUTER_MODEL, messages)
 
-        from langchain_core.callbacks.manager import adispatch_custom_event
         _THINK_PREFIX = "\x00THINK\x00"
         content_parts: list[str] = []
         try:
             async for delta in llm.astream(messages, temperature=0.0, timeout=30.0):
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
-                    await adispatch_custom_event(
-                        "llm_thinking", {"content": thinking_text, "node": "route_model"},
-                    )
+                    # route_model 的路由标签 content 不作为思考推送；只披露 reasoning。
+                    await self.emit_thinking("route_model", "reasoning", thinking_text, None)
                 else:
                     content_parts.append(delta)
             raw = "".join(content_parts).strip().lower()

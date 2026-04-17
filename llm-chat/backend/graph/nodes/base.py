@@ -198,6 +198,58 @@ class BaseNode(ABC):
         return updated
 
     # ══════════════════════════════════════════════════════════════════════════
+    # 思考事件统一入口（spec.md「模型思考流程」协议）
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def emit_thinking(
+        node: str,
+        phase: str,
+        delta: str,
+        step_index: int | None = None,
+    ) -> None:
+        """
+        统一推送 llm_thinking 事件（结构化 payload）。
+
+        协议：{node, step_index, phase, delta}，所有节点调用此方法，
+        禁止散落 adispatch_custom_event("llm_thinking", ...) 裸调用（spec 铁律 #1）。
+
+        参数：
+            node:        节点名（planner / route_model / call_model /
+                         call_model_after_tool / reflector / vision）
+            phase:       "reasoning"（推理链）| "content"（外显文本）
+            delta:       增量文本，空串直接跳过
+            step_index:  有计划时为 0-based 步骤索引；否则 None
+        """
+        if not delta:
+            return
+        from langchain_core.callbacks.manager import adispatch_custom_event
+        await adispatch_custom_event(
+            "llm_thinking",
+            {
+                "node": node,
+                "step_index": step_index,
+                "phase": phase,
+                "delta": delta,
+            },
+        )
+
+    @staticmethod
+    def _active_step_index(state: dict | None) -> int | None:
+        """从 GraphState 读当前步骤索引，无计划或未初始化时返回 None。"""
+        if not state:
+            return None
+        plan = state.get("plan") or []
+        if not plan:
+            return None
+        idx = state.get("current_step_index")
+        if idx is None:
+            return None
+        if 0 <= idx < len(plan):
+            return int(idx)
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════════
     # 流式 LLM 调用工具（供 CallModel 系节点共享）
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -215,6 +267,7 @@ class BaseNode(ABC):
         conv_id: str,
         node: str,
         timeout: float = 180.0,
+        step_index: int | None = None,
     ) -> dict:
         """
         流式 LLM 调用：逐 token yield，通过 adispatch_custom_event 发出事件。
@@ -244,10 +297,11 @@ class BaseNode(ABC):
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
                     thinking_parts.append(thinking_text)
-                    await adispatch_custom_event("llm_thinking", {"content": thinking_text, "node": node})
+                    await BaseNode.emit_thinking(node, "reasoning", thinking_text, step_index)
                 else:
                     content_parts.append(delta)
-                    await adispatch_custom_event("llm_token", {"content": delta, "node": node})
+                    # content 通过 llm_token 走常规 content SSE（llm_handlers.py 内部剥离 <think> 后转发）
+                    await adispatch_custom_event("llm_token", {"content": delta, "node": node, "step_index": step_index})
         except Exception as exc:
             # ── 流式中途异常（审核 1027 / 网络断开等）────────────────────────
             # 已累积的 token 不能丢！将 partial content 作为 full_response 返回，
@@ -292,6 +346,7 @@ class BaseNode(ABC):
         conv_id: str,
         node: str,
         timeout: float = 180.0,
+        step_index: int | None = None,
     ) -> dict:
         """
         流式工具调用：thinking/content 实时推送给前端，同时收集 tool_calls。
@@ -309,9 +364,9 @@ class BaseNode(ABC):
                 oai_messages, tools=tools_schema, temperature=temperature, timeout=timeout,
             ):
                 if kind == "content" and text:
-                    await adispatch_custom_event("llm_token", {"content": text, "node": node})
+                    await adispatch_custom_event("llm_token", {"content": text, "node": node, "step_index": step_index})
                 elif kind == "thinking" and text:
-                    await adispatch_custom_event("llm_thinking", {"content": text, "node": node})
+                    await BaseNode.emit_thinking(node, "reasoning", text, step_index)
                 elif kind == "tool_call_start" and text:
                     await adispatch_custom_event("tool_call_start", {"name": text, "node": node})
                 elif kind == "tool_call_args" and text:

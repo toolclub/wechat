@@ -59,6 +59,8 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
                 role=mr.role, content=mr.content, timestamp=mr.created_at, id=mr.id,
                 tool_summary=getattr(mr, "tool_summary", "") or "",
                 step_summary=getattr(mr, "step_summary", "") or "",
+                thinking=getattr(mr, "thinking", "") or "",
+                thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
             )
             for mr in msg_rows
         ]
@@ -80,6 +82,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
                     "role": mr.role,
                     "content": mr.content,
                     "thinking": getattr(mr, "thinking", "") or "",
+                    "thinking_segments": list(getattr(mr, "thinking_segments", []) or []),
                     "message_id": getattr(mr, "message_id", "") or "",
                     "stream_completed": getattr(mr, "stream_completed", True),
                     "stream_buffer": getattr(mr, "stream_buffer", "") or "",
@@ -137,6 +140,8 @@ async def init() -> None:
                     id=mr.id,
                     tool_summary=getattr(mr, "tool_summary", "") or "",
                     step_summary=getattr(mr, "step_summary", "") or "",
+                    thinking=getattr(mr, "thinking", "") or "",
+                    thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
                 )
                 for mr in msg_rows
             ]
@@ -396,11 +401,13 @@ async def update_message_streaming(
     thinking: str | None = None,
     stream_buffer: str | None = None,
     stream_completed: bool | None = None,
+    thinking_segments: list | None = None,
 ) -> None:
     """
-    更新正在流式生成的消息（定期刷新 thinking/buffer）。
+    更新正在流式生成的消息（定期刷新 thinking/buffer/segments）。
 
-    参数语义：None = 不更新该字段；"" = 显式清空。
+    参数语义：None = 不更新该字段；"" / [] = 显式清空。
+    thinking_segments 传入时为当前完整段列表（全量覆盖，调用方维护累积）。
     """
     values: dict = {}
     if stream_completed is not None:
@@ -409,6 +416,8 @@ async def update_message_streaming(
         values["thinking"] = thinking
     if stream_buffer is not None:
         values["stream_buffer"] = stream_buffer
+    if thinking_segments is not None:
+        values["thinking_segments"] = thinking_segments
     if not values:
         return
     async with AsyncSessionLocal() as session:
@@ -422,18 +431,22 @@ async def update_message_streaming(
 
 async def finalize_message(
     msg_db_id: int, content: str, thinking: str = "",
+    thinking_segments: list | None = None,
 ) -> None:
     """消息生成完成：写入最终 content，标记 stream_completed=True，清空 buffer。"""
+    values: dict = {
+        "content": content,
+        "thinking": thinking,
+        "stream_buffer": "",
+        "stream_completed": True,
+    }
+    if thinking_segments is not None:
+        values["thinking_segments"] = thinking_segments
     async with AsyncSessionLocal() as session:
         await session.execute(
             sa_update(MessageModel)
             .where(MessageModel.id == msg_db_id)
-            .values(
-                content=content,
-                thinking=thinking,
-                stream_buffer="",
-                stream_completed=True,
-            )
+            .values(**values)
         )
         await session.commit()
 
