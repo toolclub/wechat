@@ -335,12 +335,14 @@ class CallModelNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(conv_id, "call_model_vision", vision_model, oai_messages)
 
+        step_idx = self._active_step_index(state)
         try:
             if use_tools:
                 # 工具调用也流式：thinking 实时可见 + tool_calls 收集
                 result = await self._stream_tokens_with_tools(
                     vision_llm, oai_messages, tools_schema, temperature,
                     conv_id, "call_model_vision", timeout=self._VISION_TIMEOUT,
+                    step_index=step_idx,
                 )
                 stream_err = result.pop("_stream_error", None)
                 if stream_err and self._is_audit_error(stream_err):
@@ -352,6 +354,7 @@ class CallModelNode(BaseNode):
                     vision_llm, oai_messages, temperature, conv_id,
                     node="call_model_vision",
                     timeout=self._VISION_TIMEOUT,
+                    step_index=step_idx,
                 )
                 stream_err = result.pop("_stream_error", None)
                 if stream_err:
@@ -401,11 +404,13 @@ class CallModelNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(conv_id, "call_model", model, oai_messages)
 
+        step_idx = self._active_step_index(state)
         try:
             if use_tools:
                 # 绑定工具时也走流式：thinking/content 实时推送，tool_calls 同步收集
                 result = await self._stream_tokens_with_tools(
                     llm, oai_messages, tools_schema, temperature, conv_id, "call_model",
+                    step_index=step_idx,
                 )
                 stream_err = result.pop("_stream_error", None)
                 if stream_err:
@@ -414,7 +419,10 @@ class CallModelNode(BaseNode):
                 return result
             else:
                 # 无工具时流式，逐 token 通过 adispatch_custom_event 推送给前端
-                result = await self._stream_tokens(llm, oai_messages, temperature, conv_id, "call_model")
+                result = await self._stream_tokens(
+                    llm, oai_messages, temperature, conv_id, "call_model",
+                    step_index=step_idx,
+                )
                 # _stream_tokens 中途异常时返回 partial content + _stream_error 标记
                 # 审核错误：用优雅降级替换部分内容；其他错误：保留部分内容供断点续传
                 stream_err = result.pop("_stream_error", None)

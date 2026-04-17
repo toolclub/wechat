@@ -4,7 +4,7 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
-import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState } from '../types'
+import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState, ThinkingSegment } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, Close } from '@element-plus/icons-vue'
 import CodePreview from './CodePreview.vue'
@@ -205,16 +205,18 @@ const emptyCognitive = makeEmptyCognitiveState()
 interface Section {
   step: StepRecord | null   // null = 普通无步骤消息
   toolCalls: ToolCallRecord[]
-  thinking: string
+  thinking: string                       // 向后兼容纯文本
+  thinkingSegments: ThinkingSegment[]    // 结构化段（权威数据源）
   content: string
 }
 const sections = computed<Section[]>(() => {
   if (props.message.role !== 'assistant') return []
   if (props.message.steps?.length) {
-    const result = props.message.steps.map(step => ({
+    const result: Section[] = props.message.steps.map(step => ({
       step,
       toolCalls: step.toolCalls,
       thinking: step.thinking,
+      thinkingSegments: step.thinkingSegments ?? [],
       content: step.content,
     }))
     // DB 恢复兜底：如果所有 step 的 toolCalls 都空但 message 级别有（旧数据无 step_index），
@@ -223,15 +225,75 @@ const sections = computed<Section[]>(() => {
     if (totalStepTools === 0 && props.message.toolCalls?.length) {
       result[result.length - 1].toolCalls = props.message.toolCalls
     }
+    // 消息级段（step_index=null，如 planner/route_model/vision）挂在第一段前展示
+    const msgSegs = (props.message.thinkingSegments ?? []).filter(s => s.step_index === null)
+    if (msgSegs.length && result.length) {
+      result[0] = {
+        ...result[0],
+        thinkingSegments: [...msgSegs, ...result[0].thinkingSegments],
+      }
+    }
     return result
   }
   return [{
     step: null,
     toolCalls: props.message.toolCalls ?? [],
     thinking: props.message.thinking ?? '',
+    thinkingSegments: props.message.thinkingSegments ?? [],
     content: props.message.content ?? '',
   }]
 })
+
+/**
+ * 节点 → 展示标签（纯映射，无字符串解析）。
+ * 对应 spec「模型思考流程」协议的 node 字段。
+ */
+const NODE_LABEL: Record<string, string> = {
+  route_model: '路由判断',
+  planner: '规划',
+  call_model: '推理',
+  call_model_after_tool: '综合推理',
+  call_model_vision: '视觉推理',
+  reflector: '反思',
+  vision: '图像分析',
+  clarification: '澄清',
+  '': '思考',
+}
+function nodeLabel(node: string): string {
+  return NODE_LABEL[node] ?? node ?? '思考'
+}
+
+/**
+ * 同一段内 reasoning/content 用不同标记区分但同属一段。
+ * 这里提供按 (node, step_index) 分组的展示结构：
+ * 同 node 的 reasoning 和 content 合并到一个 group，
+ * phase 在段内作为分隔（前端按顺序直接渲染即可）。
+ */
+interface ThinkingGroup {
+  node: string
+  label: string
+  parts: { phase: 'reasoning' | 'content'; content: string }[]
+  totalLen: number
+}
+function groupSegments(segs: ThinkingSegment[]): ThinkingGroup[] {
+  const groups: ThinkingGroup[] = []
+  for (const s of segs) {
+    // 相邻 + 同 node 合并到一个 group；不相邻的同 node 段自然分开（保留时间顺序）
+    const last = groups[groups.length - 1]
+    if (last && last.node === s.node) {
+      last.parts.push({ phase: s.phase, content: s.content })
+      last.totalLen += s.content.length
+    } else {
+      groups.push({
+        node: s.node,
+        label: nodeLabel(s.node),
+        parts: [{ phase: s.phase, content: s.content }],
+        totalLen: s.content.length,
+      })
+    }
+  }
+  return groups
+}
 
 // ─── Markdown 内容渲染（去除 think 块残留） ─────────────────────────────────
 // streaming=true：流式模式，大内容（>3000字）跳过 hljs，避免主线程阻塞
@@ -399,6 +461,22 @@ function isThinkExpanded(si: number) {
   // 未手动操作：还在思考（无 content）时自动展开，有 content 后自动折叠
   const sec = sections.value[si]
   return sec ? !sec.content : false
+}
+
+// ─── 结构化思考段折叠（key = "sectionIndex-groupIndex"） ─────────────────
+const thinkGroupExpanded = ref<Record<string, boolean>>({})
+const thinkGroupManual   = ref<Record<string, boolean>>({})
+function toggleThinkGroup(si: number, gi: number) {
+  const k = `${si}-${gi}`
+  thinkGroupManual.value[k] = true
+  thinkGroupExpanded.value[k] = !thinkGroupExpanded.value[k]
+}
+function isThinkGroupExpanded(si: number, gi: number, streaming: boolean) {
+  const k = `${si}-${gi}`
+  // 用户手动操作过 → 尊重用户选择
+  if (thinkGroupManual.value[k]) return thinkGroupExpanded.value[k] ?? false
+  // 未手动操作：正在生成（无最终 content）时自动展开，有 content 后自动折叠
+  return streaming
 }
 
 // ─── 工具折叠（key = "sectionIndex-toolIndex"） ─────────────────────────────
@@ -927,19 +1005,48 @@ function cancelEdit() { isEditing.value = false }
             </template>
           </div>
 
-          <!-- 推理过程（可折叠白卡） -->
-          <div v-if="sec.thinking" class="think-block">
+          <!-- 推理过程（结构化：每个节点/步骤一段独立折叠，顺序披露，永不覆盖） -->
+          <template v-if="sec.thinkingSegments.length">
+            <div
+              v-for="(g, gi) in groupSegments(sec.thinkingSegments)"
+              :key="`${si}-${gi}-${g.node}`"
+              class="think-block"
+            >
+              <button class="think-toggle" @click="toggleThinkGroup(si, gi)">
+                <span class="think-hd-left">
+                  <svg v-if="!sec.content" class="think-spin-icon" width="13" height="13" viewBox="0 0 24 24" fill="none">
+                    <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC"/>
+                    <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#00AEEC" opacity="0.4"/>
+                  </svg>
+                  <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none">
+                    <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC" opacity="0.6"/>
+                  </svg>
+                  <span class="think-title">{{ g.label }}</span>
+                </span>
+                <span class="think-hd-right">
+                  <span class="think-len">{{ g.totalLen > 50 ? (g.totalLen / 1000).toFixed(1) + 'k 字' : '' }}</span>
+                  <svg class="think-chevron" :class="{ expanded: isThinkGroupExpanded(si, gi, !sec.content) }" width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                  </svg>
+                </span>
+              </button>
+              <Transition name="think-slide">
+                <div v-if="isThinkGroupExpanded(si, gi, !sec.content)" v-auto-scroll class="think-body">
+                  <template v-for="p in g.parts" :key="p.phase + p.content.length">
+                    <span :class="['think-part', `think-phase-${p.phase}`]">{{ p.content }}</span>
+                  </template>
+                </div>
+              </Transition>
+            </div>
+          </template>
+          <!-- 无结构化段但有纯文本 thinking（COMPAT：旧数据） -->
+          <div v-else-if="sec.thinking" class="think-block">
             <button class="think-toggle" @click="toggleThink(si)">
               <span class="think-hd-left">
-                <!-- 旋转星星图标（内容生成中）或静态图标（已完成） -->
-                <svg v-if="!sec.content" class="think-spin-icon" width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC"/>
-                  <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#00AEEC" opacity="0.4"/>
-                </svg>
-                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
                   <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC" opacity="0.6"/>
                 </svg>
-                <span class="think-title">{{ sec.content ? '推理过程' : '思考中...' }}</span>
+                <span class="think-title">思考</span>
               </span>
               <span class="think-hd-right">
                 <span class="think-len">{{ sec.thinking.length > 50 ? (sec.thinking.length / 1000).toFixed(1) + 'k 字' : '' }}</span>
@@ -1574,6 +1681,11 @@ function cancelEdit() { isEditing.value = false }
 .think-slide-leave-to { max-height: 0 !important; opacity: 0; }
 .think-slide-enter-to,
 .think-slide-leave-from { max-height: 320px; opacity: 1; }
+
+/* 结构化思考段内 phase 区分：reasoning（推理链）默认色，content（外显正文）稍深 */
+.think-part { white-space: pre-wrap; display: inline; }
+.think-part.think-phase-content { color: #3f4651; font-family: inherit; }
+.think-part.think-phase-reasoning { color: #61666D; }
 
 /* ── 沙箱终端样式（Bilibili 浅色风格） ── */
 .sandbox-block {

@@ -34,7 +34,6 @@ from graph.runner.handlers import (
     ToolEndHandler,
     ToolStartHandler,
     VisionStartHandler,
-    VisionStreamHandler,
 )
 from graph.runner.handlers.sandbox_handler import SandboxOutputHandler
 from graph.runner.handlers.artifact_handler import FileArtifactHandler
@@ -51,7 +50,7 @@ _HANDLERS: list[EventHandler] = [
     SandboxOutputHandler(),          # 沙箱实时输出（on_custom_event sandbox_output）→ 终端流
     FileArtifactHandler(),           # 文件产物（on_custom_event file_artifact）→ 文件卡片
     VisionStartHandler(),            # 视觉分析开始（on_custom_event vision_analyze）→ 状态标签
-    VisionStreamHandler(),           # 视觉分析 token 流（on_custom_event vision_token）→ thinking
+    # 视觉流式 token 已改走 emit_thinking（llm_thinking 事件），由 LLMStreamHandler 统一处理
     CacheHitEndHandler(),
     RouteStartHandler(),
     RouteEndHandler(),

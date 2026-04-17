@@ -102,6 +102,13 @@ class StreamSession:
         self._last_flush = time.time()
         self._tool_seq = 0
 
+        # 思考段累积（spec「模型思考流程」协议）：
+        # segments 按 (node, step_index, phase) 唯一键累积；同 key delta 追加到同段，
+        # 不同 key 各自独立段，顺序 = SSE 到达顺序。
+        self._thinking_segments: list[dict] = []
+        self._thinking_key_to_idx: dict[tuple, int] = {}
+        self._thinking_dirty = False  # 累积后标记，_flush_to_db 检查是否需要写 DB
+
         # 工具调用 DB 持久化（支持多工具并行，按 seq 追踪每个工具的状态）
         self._tool_exec_map: dict[int, int] = {}   # tool_seq → tool_execution DB id
         self._tool_output_map: dict[int, str] = {}  # tool_seq → 累积的 sandbox 输出
@@ -360,8 +367,42 @@ class StreamSession:
         except (json.JSONDecodeError, ValueError):
             return
 
-        if data.get("thinking"):
-            self._thinking_buf += data["thinking"]
+        # thinking：结构化 payload（spec 协议），按 (node, step_index, phase) 累积成段
+        thinking_payload = data.get("thinking")
+        if isinstance(thinking_payload, dict):
+            delta = thinking_payload.get("delta", "")
+            if delta:
+                node = thinking_payload.get("node", "")
+                step_index = thinking_payload.get("step_index")
+                phase = thinking_payload.get("phase", "reasoning")
+                key = (node, step_index, phase)
+                idx = self._thinking_key_to_idx.get(key)
+                if idx is None:
+                    self._thinking_segments.append({
+                        "node": node,
+                        "step_index": step_index,
+                        "phase": phase,
+                        "content": delta,
+                    })
+                    self._thinking_key_to_idx[key] = len(self._thinking_segments) - 1
+                else:
+                    self._thinking_segments[idx]["content"] += delta
+                self._thinking_buf += delta  # 向后兼容：拼接纯文本
+                self._thinking_dirty = True
+        elif isinstance(thinking_payload, str) and thinking_payload:
+            # COMPAT: 裸字符串 thinking（legacy/异常路径），归入未知节点段
+            self._thinking_buf += thinking_payload
+            key = ("", None, "reasoning")
+            idx = self._thinking_key_to_idx.get(key)
+            if idx is None:
+                self._thinking_segments.append({
+                    "node": "", "step_index": None,
+                    "phase": "reasoning", "content": thinking_payload,
+                })
+                self._thinking_key_to_idx[key] = len(self._thinking_segments) - 1
+            else:
+                self._thinking_segments[idx]["content"] += thinking_payload
+            self._thinking_dirty = True
         if data.get("content"):
             self._content_buf += data["content"]
 
@@ -495,14 +536,16 @@ class StreamSession:
             if self._finalized:
                 return
 
-            if (self._thinking_buf or self._content_buf) and self.assistant_db_id:
+            if (self._thinking_buf or self._content_buf or self._thinking_dirty) and self.assistant_db_id:
                 try:
                     from memory import store as memory_store
                     await memory_store.update_message_streaming(
                         self.assistant_db_id,
                         thinking=self._thinking_buf if self._thinking_buf else None,
                         stream_buffer=self._content_buf if self._content_buf else None,
+                        thinking_segments=list(self._thinking_segments) if self._thinking_dirty else None,
                     )
+                    self._thinking_dirty = False
                 except Exception as exc:
                     logger.warning("消息流式更新失败: %s", exc)
 
@@ -522,6 +565,7 @@ class StreamSession:
                 await memory_store.update_message_streaming(
                     self.assistant_db_id,
                     thinking=self._thinking_buf or None,
+                    thinking_segments=list(self._thinking_segments) if self._thinking_segments else None,
                     stream_buffer="",  # 显式清空
                     stream_completed=True,
                 )
@@ -544,6 +588,7 @@ class StreamSession:
                 self.assistant_db_id,
                 content=stripped + tag,
                 thinking=self._thinking_buf,
+                thinking_segments=list(self._thinking_segments) if self._thinking_segments else None,
             )
         except Exception as exc:
             logger.warning("保存部分响应失败: %s", exc)

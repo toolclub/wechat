@@ -132,19 +132,11 @@ class VisionNode(BaseNode):
     @staticmethod
     async def _stream_vision(client, vision_content: list, conv_id: str) -> str:
         """
-        流式调用 GLM-4.6V，逐 token 派发 vision_token 事件推向前端（thinking 块）。
-
-        派发顺序：
-          1. 标题头部："📷 图像分析\\n\\n"
-          2. 每个内容 token
-          3. 分隔符："\\n\\n---\\n\\n"（与后续主模型思考内容分隔）
-
-        返回完整描述文字（供下游节点作为文字上下文使用）。
+        流式调用视觉模型，逐 token 通过统一 emit_thinking 推给前端。
+        视觉输出作为 node=vision / phase=content 的 segment，
+        落在消息级思考区（step_index=None），与主模型思考段自然隔离。
         """
         parts: list[str] = []
-
-        # 推送分析块标题（让用户看到这是图像分析阶段）
-        await adispatch_custom_event("vision_token", {"content": "📷 图像分析\n\n"})
 
         vision_messages = [{"role": "user", "content": vision_content}]
         from logging_config import log_prompt
@@ -164,7 +156,7 @@ class VisionNode(BaseNode):
                     delta = chunk.choices[0].delta.content or ""
                 if delta:
                     parts.append(delta)
-                    await adispatch_custom_event("vision_token", {"content": delta})
+                    await BaseNode.emit_thinking("vision", "content", delta, None)
         except Exception as exc:
             # 视觉分析中断时保留已生成的部分描述（不丢弃已有信息）
             partial = "".join(parts)
@@ -173,13 +165,12 @@ class VisionNode(BaseNode):
                     "VisionNode 流式中断，保留部分描述 | conv=%s | partial_len=%d | error=%s",
                     conv_id, len(partial), exc,
                 )
-                await adispatch_custom_event("vision_token", {"content": "\n[图像分析中断，以上为部分结果]\n\n---\n\n"})
+                await BaseNode.emit_thinking(
+                    "vision", "content", "\n[图像分析中断，以上为部分结果]", None,
+                )
                 return partial
             logger.error("VisionNode 流式失败且无部分结果 | conv=%s | %s", conv_id, exc)
             return ""
-
-        # 分析结束后加分隔符，与后续主模型 thinking 内容区分
-        await adispatch_custom_event("vision_token", {"content": "\n\n---\n\n"})
 
         description = "".join(parts)
         logger.info(

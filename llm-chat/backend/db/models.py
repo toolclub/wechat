@@ -55,7 +55,11 @@ class MessageModel(Base):
     )
     role = Column(String(20), nullable=False, comment="user / assistant / system / tool")
     content = Column(Text, nullable=False, default="", comment="最终完整内容")
-    thinking = Column(Text, nullable=False, default="", comment="推理过程（模型 thinking）")
+    thinking = Column(Text, nullable=False, default="", comment="推理过程纯文本（所有 segments 拼接，向后兼容）")
+    thinking_segments = Column(
+        JSONB, nullable=False, default=list,
+        comment="结构化思考段 [{node, step_index, phase, content}]，按接收顺序追加",
+    )
     stream_buffer = Column(
         Text, nullable=False, default="",
         comment="流式输出中间缓冲（未完成时暂存，完成后清空并写入 content）",

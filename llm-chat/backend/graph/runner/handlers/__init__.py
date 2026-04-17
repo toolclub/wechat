@@ -18,7 +18,7 @@ from graph.runner.handlers.reflector_handler import ReflectorEndHandler
 from graph.runner.handlers.route_handler import RouteEndHandler, RouteStartHandler
 from graph.runner.handlers.save_handler import SaveResponseEndHandler
 from graph.runner.handlers.tool_handlers import ToolEndHandler, ToolStartHandler
-from graph.runner.handlers.vision_handler import VisionStartHandler, VisionStreamHandler
+from graph.runner.handlers.vision_handler import VisionStartHandler
 from graph.runner.handlers.artifact_handler import FileArtifactHandler
 from graph.runner.handlers.tool_call_start_handler import ToolCallStartHandler
 from graph.runner.handlers.tool_call_progress_handler import ToolCallArgsHandler
@@ -28,7 +28,6 @@ __all__ = [
     "CacheHitEndHandler",
     "ClarificationHandler",
     "VisionStartHandler",
-    "VisionStreamHandler",
     "RouteStartHandler",
     "RouteEndHandler",
     "PlannerStartHandler",

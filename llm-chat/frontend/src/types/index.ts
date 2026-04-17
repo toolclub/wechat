@@ -34,12 +34,34 @@ export interface PlanStep {
   result?: string
 }
 
+/**
+ * 结构化思考段（spec「模型思考流程」协议）
+ *
+ * 后端按 (node, step_index, phase) 三元组作为唯一 key 累积 delta。
+ * 前端按相同规则分发到 message.thinkingSegments 或 step.thinkingSegments。
+ */
+export interface ThinkingSegment {
+  node: string              // 来源节点：planner/route_model/call_model/call_model_after_tool/reflector/vision
+  step_index: number | null // 有计划时的步骤索引；消息级段为 null
+  phase: 'reasoning' | 'content'  // 推理链 vs 模型外显文本
+  content: string           // 累积内容（不是 delta）
+}
+
+/** SSE 协议的 thinking 事件 payload（仅含增量 delta） */
+export interface ThinkingEvent {
+  node: string
+  step_index: number | null
+  phase: 'reasoning' | 'content'
+  delta: string
+}
+
 export interface StepRecord {
   index: number
   title: string
   status: 'pending' | 'running' | 'done' | 'failed'
   toolCalls: ToolCallRecord[]
-  thinking: string
+  thinking: string                        // 拼接纯文本（向后兼容，= thinkingSegments 内容拼接）
+  thinkingSegments: ThinkingSegment[]     // 结构化段，按到达顺序
   content: string
 }
 
@@ -61,7 +83,8 @@ export interface ClarificationData {
 export interface Message {
   role: 'user' | 'assistant'
   content: string
-  thinking?: string
+  thinking?: string                         // 拼接纯文本（向后兼容）
+  thinkingSegments?: ThinkingSegment[]      // 结构化段（权威数据源，优先渲染）
   steps?: StepRecord[]
   images?: string[]
   timestamp?: number

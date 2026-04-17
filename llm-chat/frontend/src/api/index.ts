@@ -1,4 +1,22 @@
-import type { ClarificationData, FileArtifact, PlanStep, ToolHistoryEvent } from '../types'
+import type { ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent } from '../types'
+
+/** 归一化 SSE thinking 字段：协议要求 dict，COMPAT 降级到裸字符串。 */
+function normalizeThinking(raw: unknown): ThinkingEvent | null {
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    // COMPAT: legacy 裸字符串（旧后端/异常路径）→ 归入未知节点
+    return { node: '', step_index: null, phase: 'reasoning', delta: raw }
+  }
+  if (typeof raw === 'object' && 'delta' in (raw as Record<string, unknown>)) {
+    const r = raw as Record<string, unknown>
+    const delta = String(r.delta ?? '')
+    if (!delta) return null
+    const phase = r.phase === 'content' ? 'content' : 'reasoning'
+    const stepIdx = typeof r.step_index === 'number' ? r.step_index : null
+    return { node: String(r.node ?? ''), step_index: stepIdx, phase, delta }
+  }
+  return null
+}
 
 const API_BASE = ''
 
@@ -157,7 +175,7 @@ export async function resumeStream(
   onDone: () => void,
   onStopped: () => void,
   signal?: AbortSignal,
-  onThinking?: (text: string) => void,
+  onThinking?: (ev: ThinkingEvent) => void,
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
   onToolCallStart?: (name: string, displayMode?: string) => void,
@@ -186,7 +204,10 @@ export async function resumeStream(
     if (!line.startsWith('data: ')) return
     try {
       const data = JSON.parse(line.slice(6))
-      if (data.thinking)        onThinking?.(data.thinking)
+      if (data.thinking) {
+        const ev = normalizeThinking(data.thinking)
+        if (ev) onThinking?.(ev)
+      }
       if (data.clarification)   onClarification?.(data.clarification)
       if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
@@ -250,7 +271,7 @@ export async function sendMessage(
   onDone: () => void,
   onStopped: () => void,
   signal?: AbortSignal,
-  onThinking?: (text: string) => void,
+  onThinking?: (ev: ThinkingEvent) => void,
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
@@ -303,7 +324,10 @@ export async function sendMessage(
       // ── 诊断：追踪 tool_call 和 sandbox_output 的处理 ──
       if (data.tool_call) console.log('[SSE诊断] tool_call 到达', data.tool_call.name)
       if (data.sandbox_output) console.log('[SSE诊断] sandbox_output 到达', data.sandbox_output.tool_name, data.sandbox_output.text?.slice(0, 50))
-      if (data.thinking)        onThinking?.(data.thinking)
+      if (data.thinking) {
+        const ev = normalizeThinking(data.thinking)
+        if (ev) onThinking?.(ev)
+      }
       if (data.clarification)  onClarification?.(data.clarification)
       if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)    onFileArtifact?.(data.file_artifact as FileArtifact)
