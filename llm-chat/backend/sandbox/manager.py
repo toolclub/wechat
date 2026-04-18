@@ -14,8 +14,11 @@ SandboxManager：沙箱 Worker 集群管理器
   - 定时清理：12h 未使用的 session 目录自动删除
 """
 import asyncio
+import fcntl
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from sandbox.worker import SSHWorker, ExecuteResult
@@ -24,6 +27,26 @@ logger = logging.getLogger("sandbox.manager")
 
 SANDBOX_ROOT = "/sandbox"
 _HEALTH_CHECK_INTERVAL = 30  # 秒
+
+# Gunicorn 多 worker 下，只让持有此文件锁的那一个进程跑后台循环
+# （健康检查 / 会话清理），避免 N 份循环重复日志 + 浪费 CPU。
+_BG_LOCK_PATH = Path(os.environ.get("LOG_DIR", "/var/log/chatflow")) / ".sandbox-bg.lock"
+_bg_lock_fd: int | None = None
+
+
+def _try_acquire_bg_lock() -> bool:
+    """文件独占锁：只有第一个 fork 出来的 worker 能拿到，其余立即返回 False。"""
+    global _bg_lock_fd
+    try:
+        _BG_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(_BG_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        _bg_lock_fd = fd  # 保持句柄打开 = 一直持锁，进程退出自动释放
+        return True
+    except (BlockingIOError, OSError):
+        return False
 
 
 class SandboxManager:
@@ -77,12 +100,21 @@ class SandboxManager:
             logger.warning("无可用 Sandbox Worker，代码执行功能不可用")
             return
 
+        # 健康检查 = 每个 gunicorn worker 各自维护自己的 SSH 连接（断线重连），
+        # 必须每个进程都跑。清理 = 删远端过期 session 目录（幂等的文件系统操作），
+        # 只需要一个进程跑就够，用文件独占锁抢到的那个负责。
         self._health_task = asyncio.create_task(self._health_check_loop())
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-        logger.info(
-            "SandboxManager 初始化完成 | total=%d | healthy=%d | timeout=%ds | cleanup=%dh",
-            len(self._all_workers), len(self._healthy), timeout, cleanup_hours,
-        )
+        if _try_acquire_bg_lock():
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            logger.info(
+                "SandboxManager 初始化完成（清理主进程）| pid=%d | total=%d | healthy=%d | timeout=%ds | cleanup=%dh",
+                os.getpid(), len(self._all_workers), len(self._healthy), timeout, cleanup_hours,
+            )
+        else:
+            logger.info(
+                "SandboxManager 初始化完成（从进程，跳过清理循环）| pid=%d | total=%d | healthy=%d",
+                os.getpid(), len(self._all_workers), len(self._healthy),
+            )
 
     async def shutdown(self) -> None:
         for task in (self._health_task, self._cleanup_task):
