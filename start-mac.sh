@@ -62,7 +62,10 @@ fi
 # 策略：把公共镜像重 tag 成 chatflow-base-*:local，再让 Dockerfile 用这个名字
 # 构建。本地名在 registry 不存在 → BuildKit 查都不查 → 完全离线构建。
 ensure_local_base() {
-    local src="$1" dst="$2"
+    local src
+    local dst
+    src="$1"
+    dst="$2"
     if docker image inspect "$dst" &>/dev/null; then
         return 0
     fi

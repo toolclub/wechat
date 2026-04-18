@@ -1,5 +1,8 @@
-# ── Stage 1: Build ───────────────────────────────────────────────────────────
+# 全局 ARG（声明在所有 FROM 之前，所有 stage 的 FROM 都能引用）
 ARG NODE_IMAGE=node:20-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
+
+# ── Stage 1: Build ───────────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
@@ -13,7 +16,6 @@ COPY . .
 RUN npx vite build
 
 # ── Stage 2: Serve with Nginx ─────────────────────────────────────────────────
-ARG NGINX_IMAGE=nginx:1.27-alpine
 FROM ${NGINX_IMAGE}
 
 # 复制构建产物
