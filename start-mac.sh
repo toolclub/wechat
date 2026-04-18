@@ -73,6 +73,7 @@ for dir in \
 done
 
 # ── 启动 Sandbox ─────────────────────────────────────────────
+# 应用镜像每次 --build（确保代码最新），FROM 的基础镜像本地有就不重拉
 info "[1/2] 启动 Sandbox..."
 cd "$SANDBOX_DIR"
 if docker compose --profile cluster up -d --build 2>/dev/null; then
@@ -87,7 +88,7 @@ else
 fi
 echo ""
 
-# ── 拉取 / 构建镜像 ──────────────────────────────────────────
+# ── 构建并启动主服务 ────────────────────────────────────────
 info "[2/2] 构建并启动生产服务..."
 cd "$COMPOSE_DIR"
 
