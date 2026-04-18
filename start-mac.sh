@@ -66,18 +66,20 @@ ensure_local_base() {
     local dst
     src="$1"
     dst="$2"
-    if docker image inspect "$dst" &>/dev/null; then
+    # 注意：必须用 ${var} 而不是 $var，否则 bash 3.2 (macOS 自带) 在 UTF-8 locale
+    # 下会把后面中文字符的首字节误当作变量名一部分，报 "unbound variable"。
+    if docker image inspect "${dst}" &>/dev/null; then
         return 0
     fi
-    if docker image inspect "$src" &>/dev/null; then
-        docker tag "$src" "$dst"
-        info "已打本地 tag: $src → $dst"
+    if docker image inspect "${src}" &>/dev/null; then
+        docker tag "${src}" "${dst}"
+        info "已打本地 tag: ${src} -> ${dst}"
     else
-        info "本地无 $src，首次拉取（仅此一次，网络失败可手动 docker pull 后重跑）..."
-        if ! docker pull "$src"; then
-            error "$src 拉取失败；请在有网环境 docker pull 后 docker save/load 过来"
+        info "本地无 ${src}, 首次拉取 (仅此一次, 网络失败可手动 docker pull 后重跑)..."
+        if ! docker pull "${src}"; then
+            error "${src} 拉取失败; 请在有网环境 docker pull 后 docker save/load 过来"
         fi
-        docker tag "$src" "$dst"
+        docker tag "${src}" "${dst}"
     fi
 }
 
