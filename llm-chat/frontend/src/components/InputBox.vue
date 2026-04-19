@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import type { SendPayload, UploadedFile } from '../types'
+import { detectLanguage } from '../types'
 import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile as apiUploadFile } from '../api'
+import UploadedFilePreview from './UploadedFilePreview.vue'
 
 const props = defineProps<{
   loading: boolean
@@ -692,6 +694,19 @@ function fmtFileSize(n: number): string {
   if (n >= 1024) return (n / 1024).toFixed(1) + 'KB'
   return n + 'B'
 }
+
+// ── 上传文件预览模态（input 阶段，发送前/后都可点 chip 预览） ────────────────
+const previewVisible = ref(false)
+const previewFile = ref<{ id: number; name: string; size: number; language: string; path?: string } | null>(null)
+function openPendingPreview(f: PendingFile) {
+  if (f.uploading || f.error || !f.id) return  // 仅就绪后可预览
+  previewFile.value = {
+    id: f.id, name: f.name, size: f.size || 0,
+    language: f.language || detectLanguage(f.path || f.name),
+    path: f.path,
+  }
+  previewVisible.value = true
+}
 </script>
 
 <template>
@@ -718,8 +733,13 @@ function fmtFileSize(n: number): string {
         <div
           v-for="f in pendingFiles" :key="f._localId"
           class="file-chip"
-          :class="{ 'file-chip--uploading': f.uploading, 'file-chip--error': !!f.error }"
-          :title="f.error ? f.error : (f.path || f.name)"
+          :class="{
+            'file-chip--uploading': f.uploading,
+            'file-chip--error': !!f.error,
+            'file-chip--clickable': !f.uploading && !f.error && !!f.id,
+          }"
+          :title="f.error ? f.error : (f.uploading ? '上传中...' : `预览 ${f.name}`)"
+          @click="openPendingPreview(f)"
         >
           <el-icon v-if="f.uploading" class="file-chip-ico spin"><Loading /></el-icon>
           <svg v-else class="file-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -728,11 +748,14 @@ function fmtFileSize(n: number): string {
           </svg>
           <span class="file-chip-name">{{ f.name }}</span>
           <span class="file-chip-size">{{ fmtFileSize(f.size) }}</span>
-          <button class="file-chip-close" @click="removePendingFile(f._localId)" title="移除">
+          <button class="file-chip-close" @click.stop="removePendingFile(f._localId)" title="移除">
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
       </div>
+
+      <!-- 上传文件预览模态：发送前可点 chip 预览自己上传的内容 -->
+      <UploadedFilePreview v-model="previewVisible" :file="previewFile" />
 
       <div class="textarea-area">
         <textarea
@@ -914,6 +937,8 @@ function fmtFileSize(n: number): string {
 .file-chip--uploading .file-chip-ico { color: #FB7299; }
 .file-chip--error { border-color: #F25D59; background: #FFF4F3; color: #F25D59; }
 .file-chip--error .file-chip-ico { color: #F25D59; }
+.file-chip--clickable { cursor: pointer; }
+.file-chip--clickable:hover { border-color: #00AEEC; background: #E3F6FD; }
 
 .textarea-area { padding: 14px 18px 6px; }
 .the-textarea {
