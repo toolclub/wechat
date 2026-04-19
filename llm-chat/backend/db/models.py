@@ -20,6 +20,10 @@ class ConversationModel(Base):
     id = Column(String(36), primary_key=True)
     title = Column(Text, nullable=False, default="新对话")
     system_prompt = Column(Text, nullable=False, default="")
+    core_memory = Column(
+        JSONB, nullable=False, default=dict,
+        comment="核心记忆块：用户偏好/项目规则/当前任务/学习到的长期偏好",
+    )
     mid_term_summary = Column(Text, nullable=False, default="")
     mid_term_cursor = Column(Integer, nullable=False, default=0)
     client_id = Column(String(36), nullable=False, default="", index=True)

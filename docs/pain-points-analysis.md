@@ -342,19 +342,31 @@ _STYLE_KEYWORDS = re.compile(r"(风格|色调|主题色|配色|设计风格|...)
 
 **目标**：让 prompt 层和记忆层的**边界清晰起来**。
 
-1. **建 prompt 优先级表**
-   - 显式分层：Platform / Project / Node / Tool / Session
-   - `build_messages` 按层拼接，不再是一坨 `system_parts`
+_进度：2026-04-20 第一阶段全部完成。_
 
-2. **工具 guidance 按 route 筛选**
-   - `chat` 路由不注入任何 guidance
-   - `search` / `search_code` 只注入 `search` / `fetch_webpage` 相关
-   - 代码级改动：`memory/context_builder.py:45` 那个 `get_tools_guidance()` 改成接受 `route` 参数
+1. **建 prompt 优先级表** — ✅ **已做**
+   - `memory/context_builder.py` `build_messages` 改成显式 8 层 `layers: list[str]`，从上到下：
+     1. 平台身份 + 全局规则（`DEFAULT_SYSTEM_PROMPT` + 当前日期）
+     2. 项目规则（`core_memory.project_rules`，硬约束）
+     3. 用户画像（`core_memory.user_profile`）
+     4. 已确认偏好（`core_memory.learned_preferences`）
+     5. 当前任务（`core_memory.current_task`）
+     6. 对话背景摘要（`mid_term_summary`）
+     7. 长期记忆（RAG 检索）
+     8. 可用工具指南（放最底层，避免与规则层争抢注意力）
+   - `core_memory` 不再作为单一块注入，而是按字段拆到对应层。
+   - 删除了 `memory/core_memory.py` 的 `render_core_memory` / `_render_list`（渲染职责下沉到 `context_builder`）。
 
-3. **引入 `core_memory` 字段**
-   - `Conversation` 加 `core_memory: dict`（`user_profile` / `project_rules` / `current_task` / `learned_preferences`）
-   - `build_messages` 把它作为独立段注入，优先级在 mid_term_summary 之上
-   - 先手动写入（用户说"记住我喜欢深色主题" → 写入 `learned_preferences`）
+2. **工具 guidance 按 route 筛选** — ✅ **已做（简化版）**
+   - 最初尝试"按 tag 字典做细粒度 route→tools 映射"，引入了 `_route_guidance_tags` 和工具 `TAGS` 的隐式耦合，已回退。
+   - 当前实现（`tools/skill.py` `build_guidance`）：`chat` 路由不注入任何 guidance；其他路由全注入。
+   - 精细可见性如有需要，改到工具绑定层做（决定哪些工具进 LLM），而不是在 guidance 层做 tag 字典。
+
+3. **引入 `core_memory` 字段** — ✅ **已做（显式写入，非自动抽取）**
+   - DB/Schema：`conversations.core_memory JSONB NOT NULL DEFAULT '{}'`（`db/migrate.py` + `db/models.py` + `memory/schema.py`）
+   - 写入方式：**不做隐式抽取**。最初尝试用 regex 关键词（"我喜欢/我偏好/请默认/我是..."）自动抽，发现是把分析里批评过的 `_WEBPAGE_KEYWORDS` 反模式搬到了记忆层；已全部删除。
+   - 改为 LLM 显式调用 `remember_preference(category, content)`（`tools/builtin/remember.py`），通过 `sandbox.context.current_conv_id` 拿到会话后 `memory_store.save(conv)` 持久化。
+   - **缓存一致性已修**：`memory/store.py` `save()` 末尾加了 `await _notify_cache_invalidation(conv.id)`，`title` / `system_prompt` / `mid_term_summary` / `core_memory` 的跨 worker 失效一并解决。
 
 ### 阶段 2（结构性，3~4 周）
 
