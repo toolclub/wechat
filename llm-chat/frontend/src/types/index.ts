@@ -178,7 +178,11 @@ export interface FileArtifact {
   created_at?: number
 }
 
-/** 从文件路径推断语言 */
+/**
+ * 从文件路径推断"语言"——这是 sandbox 工具产出物的协议标识，
+ * 用于认知面板（CognitivePanel）渲染策略。**不是**用户上传预览的派发依据；
+ * 上传预览走 src/preview/ 模块，按文件名后缀独立决策。
+ */
 export function detectLanguage(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? ''
   const map: Record<string, string> = {
@@ -198,19 +202,12 @@ export function detectLanguage(path: string): string {
   return map[ext] || 'text'
 }
 
-/** 仅下载、不走侧栏预览的文件（二进制打包/归档/用户上传） */
-export function isDownloadOnly(file: { language: string; binary?: boolean }): boolean {
-  if (file.language === 'archive') return true
-  // PPTX 和 PDF 仍走预览面板（有专门的幻灯片/iframe 展示）
-  return false
-}
-
-/** 该语言是否可在 iframe 中预览 */
+/** 该语言是否可在 iframe 中预览（认知面板用） */
 export function isPreviewable(lang: string): boolean {
   return ['html', 'svg'].includes(lang)
 }
 
-/** 该文件是否可下载（二进制文件） */
+/** 该文件是否可下载（二进制文件，认知面板用） */
 export function isDownloadable(lang: string): boolean {
   return ['pptx', 'pdf'].includes(lang)
 }

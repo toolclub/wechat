@@ -131,6 +131,7 @@ function downloadFile(e?: Event) {
     <!-- 操作按钮 -->
     <el-button
       text
+
       :icon="isDownloadable && !previewable && !isPpt ? Download : (isPpt ? View : undefined)"
       class="action-btn"
       @click.stop="isDownloadable && !previewable && !isPpt ? downloadFile($event) : emit('select', file)"
