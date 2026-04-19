@@ -22,7 +22,7 @@ class FileArtifactHandler(EventHandler):
         data = event.get("data", {})
         if not isinstance(data, dict):
             return
-        # 透传所有字段（PPT 需要 slides_html/binary/size/slide_count 等）
+        # 透传文件产物协议字段，避免前端再从工具输出文本猜测下载/关联状态。
         artifact: dict = {
             "name": data.get("name", ""),
             "path": data.get("path", ""),
@@ -30,7 +30,10 @@ class FileArtifactHandler(EventHandler):
             "language": data.get("language", "text"),
         }
         # 可选字段：有则透传
-        for key in ("binary", "size", "slide_count", "theme", "slides_html", "message_id"):
+        for key in (
+            "id", "binary", "size", "slide_count", "theme", "slides_html",
+            "message_id", "downloadable", "source", "created_at",
+        ):
             if key in data:
                 artifact[key] = data[key]
         yield sse({"file_artifact": artifact})

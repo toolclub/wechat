@@ -44,7 +44,7 @@ const langTagType = LANG_TAG_TYPE[props.file.language] || 'info'
 const previewable = isPreviewable(props.file.language)
 const isPpt = props.file.language === 'pptx'
 const isArchive = props.file.language === 'archive'
-const isDownloadable = isArchive || (props.file as any).downloadable
+const isDownloadable = isArchive || !!props.file.downloadable || !!props.file.binary
 
 // 文件大小：二进制文件用 size 字段，文本用 content.length
 const sizeKb = props.file.size
@@ -114,11 +114,14 @@ function downloadFile(e?: Event) {
         <el-tag v-if="isArchive" size="small" type="success" effect="light" class="preview-badge">
           可下载
         </el-tag>
+        <el-tag v-else-if="isDownloadable && !previewable && !isPpt" size="small" type="success" effect="light" class="preview-badge">
+          可下载
+        </el-tag>
       </div>
     </div>
     <!-- 下载按钮 -->
     <el-button
-      v-if="file.id"
+      v-if="isDownloadable"
       text
       :icon="Download"
       class="dl-btn"
@@ -128,11 +131,11 @@ function downloadFile(e?: Event) {
     <!-- 操作按钮 -->
     <el-button
       text
-      :icon="isArchive ? Download : (isPpt ? View : undefined)"
+      :icon="isDownloadable && !previewable && !isPpt ? Download : (isPpt ? View : undefined)"
       class="action-btn"
-      @click.stop="isArchive ? downloadFile($event) : emit('select', file)"
+      @click.stop="isDownloadable && !previewable && !isPpt ? downloadFile($event) : emit('select', file)"
     >
-      <svg v-if="!isArchive && !isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <svg v-if="!isDownloadable && !isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <path d="M9 18l6-6-6-6"/>
       </svg>
     </el-button>
