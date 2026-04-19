@@ -204,8 +204,19 @@ class SkillRegistry:
 
     # ── Prompt 收集 ──────────────────────────────────────────────────────────
 
-    def build_guidance(self) -> str:
-        """收集所有工具的 GUIDANCE，拼接为 system prompt 片段。"""
+    def build_guidance(self, route: str = "") -> str:
+        """
+        收集工具 GUIDANCE，拼接为 system prompt 片段。
+
+        路由策略（保持简单，避免隐式 tag 耦合）：
+          - route == "chat"：不注入任何 guidance（纯聊天不需要工具提示）
+          - 其他 route（含空值）：注入全部带 guidance 的工具
+
+        若日后要做精细可见性控制，应在工具绑定层决定哪些工具进入模型，
+        而不是在 guidance 层用 tag 字典维护路由到工具的隐式映射。
+        """
+        if route == "chat":
+            return ""
         parts: list[str] = []
         for tool, meta in self._tools.values():
             if meta.guidance:

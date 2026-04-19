@@ -169,10 +169,13 @@ export interface FileArtifact {
   language: string    // 语言标记 e.g. "html", "python", "pptx"
   message_id?: string // 关联的 assistant 消息 ID
   binary?: boolean    // 是否为二进制文件（PPTX 等）
+  downloadable?: boolean // 是否应显示下载入口（如 sandbox_download 产物）
+  source?: string     // generated | uploaded
   size?: number       // 文件大小（字节）
   slide_count?: number // PPT 页数
   theme?: string      // PPT 主题名
   slides_html?: string[] // PPT 每页的 HTML 预览
+  created_at?: number
 }
 
 /**

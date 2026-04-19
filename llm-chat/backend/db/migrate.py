@@ -13,6 +13,7 @@ _MIGRATIONS = [
     "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'",
     "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'agent'",
     "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_name VARCHAR(100) NOT NULL DEFAULT ''",
+    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS core_memory JSONB NOT NULL DEFAULT '{}'",
 
     # ── messages 补字段 ──
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id VARCHAR(36) NOT NULL DEFAULT ''",

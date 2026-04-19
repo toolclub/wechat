@@ -23,6 +23,7 @@ class Conversation:
     id: str
     title: str = "新对话"
     system_prompt: str = ""
+    core_memory: dict = field(default_factory=dict)           # 用户偏好/项目规则/当前任务等常驻记忆
     messages: list[Message] = field(default_factory=list)  # 完整历史，永不删除
     mid_term_summary: str = ""                              # 语义记忆（中期摘要）
     mid_term_cursor: int = 0                                # messages[:cursor] 已完成摘要

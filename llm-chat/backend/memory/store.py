@@ -66,6 +66,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
         ]
         conv = Conversation(
             id=row.id, title=row.title, system_prompt=row.system_prompt,
+            core_memory=dict(getattr(row, "core_memory", {}) or {}),
             messages=messages, mid_term_summary=row.mid_term_summary,
             mid_term_cursor=row.mid_term_cursor, created_at=row.created_at,
             updated_at=row.updated_at, client_id=row.client_id,
@@ -77,6 +78,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
             "id": row.id,
             "title": row.title,
             "system_prompt": row.system_prompt,
+            "core_memory": dict(getattr(row, "core_memory", {}) or {}),
             "messages": [
                 {
                     "role": mr.role,
@@ -149,6 +151,7 @@ async def init() -> None:
                 id=row.id,
                 title=row.title,
                 system_prompt=row.system_prompt,
+                core_memory=dict(getattr(row, "core_memory", {}) or {}),
                 messages=messages,
                 mid_term_summary=row.mid_term_summary,
                 mid_term_cursor=row.mid_term_cursor,
@@ -205,6 +208,7 @@ async def create(
             id=conv.id,
             title=conv.title,
             system_prompt=conv.system_prompt,
+            core_memory=conv.core_memory,
             mid_term_summary="",
             mid_term_cursor=0,
             client_id=conv.client_id,
@@ -218,8 +222,9 @@ async def create(
 
 
 async def save(conv: Conversation) -> None:
-    """更新对话元数据（title / system_prompt / mid_term_summary / mid_term_cursor）。
-    注意：不负责 messages，messages 通过 add_message 单独写入。"""
+    """更新对话元数据（title / system_prompt / core_memory / mid_term_summary / mid_term_cursor）。
+    注意：不负责 messages，messages 通过 add_message 单独写入。
+    写完通过 Redis pub/sub 通知其他 worker 失效本地缓存，保证跨 worker 一致性。"""
     conv.updated_at = time.time()
     async with AsyncSessionLocal() as session:
         await session.execute(
@@ -228,12 +233,14 @@ async def save(conv: Conversation) -> None:
             .values(
                 title=conv.title,
                 system_prompt=conv.system_prompt,
+                core_memory=conv.core_memory,
                 mid_term_summary=conv.mid_term_summary,
                 mid_term_cursor=conv.mid_term_cursor,
                 updated_at=conv.updated_at,
             )
         )
         await session.commit()
+    await _notify_cache_invalidation(conv.id)
 
 
 async def delete(conv_id: str) -> None:

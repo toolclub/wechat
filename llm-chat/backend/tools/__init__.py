@@ -62,5 +62,5 @@ def get_tools_info() -> list[dict]:
     return _registry.get_tools_info()
 
 
-def get_tools_guidance() -> str:
-    return _registry.build_guidance()
+def get_tools_guidance(route: str = "") -> str:
+    return _registry.build_guidance(route=route)

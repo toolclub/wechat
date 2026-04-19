@@ -1,10 +1,25 @@
 """
 上下文构建器：将对话历史组装为发送给 LLM 的 LangChain 消息列表
 
-改进点（相比原版）：
+分层系统提示（按优先级从高到低排列，LLM 从上到下读取）：
+  1. 平台身份 + 全局规则（来自 DEFAULT_SYSTEM_PROMPT + 当前日期）
+  2. 项目规则（core_memory.project_rules —— 硬约束）
+  3. 用户画像（core_memory.user_profile —— 长期属性）
+  4. 已确认偏好（core_memory.learned_preferences —— 表达方式 / 默认选择）
+  5. 当前任务（core_memory.current_task —— 会话级临时目标）
+  6. 对话背景摘要（mid_term_summary —— 远期对话的语义压缩）
+  7. 长期记忆（RAG 检索 —— 相似历史对话片段）
+  8. 可用工具指南（放在最底层，避免与规则层争抢注意力）
+
+设计理由：
+  - 把"规则 / 偏好 / 任务"从运行时对话历史中解耦，在规则层就能看到，
+    不必靠工具来检索；forget_mode 下也始终保留。
+  - 分层清晰后，调试时能一眼看出"模型拿到什么信息",便于追查不服从指令的原因。
+
+改进点（相比早先版本）：
   1. 长期记忆去重：过滤与近期对话高度重叠的记忆，减少噪音
   2. 渐进式 forget_mode：不是二元的"全要/只要几条"，而是梯度截断
-  3. 结构化系统提示：记忆内容用明确标签区分，LLM 更容易理解层次
+  3. 结构化系统提示：明确分层，LLM 更容易建立指令优先级
 """
 from __future__ import annotations
 
@@ -13,14 +28,18 @@ from datetime import date
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from config import SHORT_TERM_FORGET_TURNS, SHORT_TERM_MAX_TURNS, DEFAULT_SYSTEM_PROMPT
+from memory.core_memory import ensure_core_memory
 from memory.schema import Conversation, Message
+
+_MAX_CORE_ITEMS_RENDER = 8  # 每个 core_memory list 字段最多渲染多少条
 
 
 def build_messages(
     conv: Conversation | None,
     long_term_memories: list[str] | None = None,
     forget_mode: bool = False,
-    tool_names: list[str] | None = None,
+    tool_names: list[str] | None = None,  # 保留参数兼容旧调用；当前由 get_tools_guidance 内部决定
+    route: str = "",
 ) -> list[BaseMessage]:
     """
     构建发送给 LLM 的完整消息列表。
@@ -28,54 +47,76 @@ def build_messages(
     Args:
         conv:               当前对话对象（为 None 时使用默认提示词）
         long_term_memories: 从 Qdrant 检索到的相关历史记录
-        forget_mode:        True 时缩短历史窗口，且不注入远期记忆（降低干扰）
-        tool_names:         可用工具名称列表，注入到系统提示中
+        forget_mode:        True 时缩短历史窗口，且不注入中期摘要 / 长期记忆（降低干扰），
+                            但 core_memory 中的规则/偏好/画像仍然保留（这些是显式写入的长期事实）
+        tool_names:         兼容保留，未使用
+        route:              当前路由，用于裁剪无关工具 guidance
 
     Returns:
         list[BaseMessage]，可直接传给 LLM.ainvoke()
     """
+    del tool_names  # 参数保留是为了不破坏旧调用位置，实际已由 guidance 层自行决定
+
     today = date.today().strftime("%Y年%m月%d日")
     base_prompt = (conv.system_prompt if conv and conv.system_prompt else DEFAULT_SYSTEM_PROMPT)
+    core = ensure_core_memory(getattr(conv, "core_memory", {}) if conv else {})
 
-    # ── 1. 系统提示（结构化分段，LLM 更易解析） ─────────────────────────────────
-    system_parts: list[str] = [
+    layers: list[str] = []
+
+    # Layer 1: 平台身份 + 全局规则
+    layers.append(
         f"{base_prompt}\n\n当前日期：{today}。搜索时直接用核心关键词，不要手动添加年份。"
-    ]
+    )
 
-    # 注入工具使用指南（从 SkillRegistry 自动收集各工具的 GUIDANCE）
-    try:
-        from tools import get_tools_guidance
-        guidance = get_tools_guidance()
-        if guidance:
-            system_parts.append(f"\n{guidance}")
-    except Exception:
-        pass
+    # Layer 2: 项目规则（硬约束 —— 用户显式声明的项目级约束）
+    if core["project_rules"]:
+        layers.append(_format_list("项目规则（硬约束，优先遵守）", core["project_rules"]))
 
+    # Layer 3: 用户画像（长期属性）
+    if core["user_profile"]:
+        layers.append(_format_list("用户画像", core["user_profile"]))
+
+    # Layer 4: 已确认偏好（表达 / 风格 / 默认选择）
+    if core["learned_preferences"]:
+        layers.append(_format_list("已确认偏好", core["learned_preferences"]))
+
+    # Layer 5: 当前任务（会话级临时目标）
+    if core["current_task"]:
+        layers.append(f"【当前任务】\n- {core['current_task']}")
+
+    # Layer 6 + 7: 背景摘要 + 长期记忆（forget_mode 下跳过）
     if not forget_mode:
-        # 中期摘要：远期对话的语义压缩
         if conv and conv.mid_term_summary:
-            system_parts.append(
-                "\n【对话背景摘要】\n"
+            layers.append(
+                "【对话背景摘要】\n"
                 "以下是之前对话的压缩摘要，请结合这些背景来回答：\n"
                 f"{conv.mid_term_summary}"
             )
 
-        # 长期记忆：RAG 检索结果（去重后注入）
         cleaned_memories = _deduplicate_memories(
             long_term_memories or [],
             conv.messages if conv else [],
         )
         if cleaned_memories:
             memories_text = "\n\n".join(cleaned_memories)
-            system_parts.append(
-                "\n【长期记忆】\n"
+            layers.append(
+                "【长期记忆】\n"
                 "以下是与当前问题高度相关的历史对话记录，请参考这些内容来回答：\n"
                 f"{memories_text}"
             )
 
-    messages: list[BaseMessage] = [SystemMessage(content="\n".join(system_parts))]
+    # Layer 8: 可用工具指南（放最底层，规则优先级不被工具提示抢走）
+    try:
+        from tools import get_tools_guidance
+        guidance = get_tools_guidance(route=route)
+        if guidance:
+            layers.append(guidance)
+    except Exception:
+        pass
 
-    # ── 2. 滑动窗口历史 ───────────────────────────────────────────────────────
+    messages: list[BaseMessage] = [SystemMessage(content="\n\n".join(layers))]
+
+    # ── 滑动窗口历史 ───────────────────────────────────────────────────────────
     if conv and conv.messages:
         window = _select_history_window(conv.messages, forget_mode)
         for msg in window:
@@ -91,6 +132,13 @@ def build_messages(
                 messages.append(AIMessage(content=content))
 
     return messages
+
+
+def _format_list(title: str, items: list[str]) -> str:
+    """把 core_memory list 字段渲染成带标题的要点列表。"""
+    shown = items[-_MAX_CORE_ITEMS_RENDER:]
+    body = "\n".join(f"- {item}" for item in shown)
+    return f"【{title}】\n{body}"
 
 
 def _select_history_window(messages: list[Message], forget_mode: bool) -> list[Message]:

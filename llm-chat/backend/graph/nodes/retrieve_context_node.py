@@ -102,7 +102,13 @@ class RetrieveContextNode(BaseNode):
                 logger.warning("长期记忆检索失败（已降级为无记忆）| conv=%s | error=%s", conv_id, exc)
 
         # ── 组装历史消息 ────────────────────────────────────────────────────
-        history_messages = build_messages(conv, long_term, forget_mode, self._tool_names)
+        history_messages = build_messages(
+            conv,
+            long_term,
+            forget_mode,
+            self._tool_names,
+            route=state.get("route", ""),
+        )
 
         # ── 构建用户消息 ────────────────────────────────────────────────────
         # 优先使用 VisionNode 产出的文字描述（vision_description）。
