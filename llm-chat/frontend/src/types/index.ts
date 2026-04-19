@@ -187,10 +187,35 @@ export function detectLanguage(path: string): string {
     sh: 'shell', bash: 'shell', zsh: 'shell',
     json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
     xml: 'xml', md: 'markdown', sql: 'sql', vue: 'vue',
-    txt: 'text', csv: 'text', log: 'text',
-    pptx: 'pptx', ppt: 'pptx', pdf: 'pdf',
+    txt: 'text', log: 'text',
+    csv: 'spreadsheet', xlsx: 'spreadsheet', xls: 'spreadsheet',
+    pdf: 'pdf',
+    png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
+    webp: 'image', bmp: 'image', ico: 'image',
+    // 浏览器原生可放
+    mp4: 'video', webm: 'video', ogv: 'video', m4v: 'video',
+    mp3: 'audio', wav: 'audio', ogg: 'audio', flac: 'audio',
+    m4a: 'audio', aac: 'audio', opus: 'audio',
+    // 仅 sandbox PPT 走预览，上传 PPT 走 office 桶
+    pptx: 'pptx', ppt: 'pptx',
+    // Office 文档（除 Excel 外，浏览器都不行）
+    doc: 'office', docx: 'office', odt: 'office', rtf: 'office',
+    pages: 'office', key: 'office', odp: 'office',
+    ods: 'office', numbers: 'office',
+    // 归档/打包
     tar: 'archive', gz: 'archive', tgz: 'archive', zip: 'archive',
     jar: 'archive', war: 'archive', ear: 'archive',
+    '7z': 'archive', rar: 'archive', bz2: 'archive', xz: 'archive', zst: 'archive',
+    deb: 'archive', rpm: 'archive', apk: 'archive', ipa: 'archive',
+    dmg: 'archive', iso: 'archive', msi: 'archive', whl: 'archive', pkg: 'archive',
+    // 可执行 / 编译产物
+    exe: 'binary', dll: 'binary', sys: 'binary',
+    so: 'binary', dylib: 'binary', wasm: 'binary',
+    class: 'binary', pyc: 'binary', pyo: 'binary', dex: 'binary',
+    bin: 'binary', elf: 'binary',
+    // 设计稿
+    psd: 'design', psb: 'design', ai: 'design', sketch: 'design',
+    fig: 'design', xd: 'design', indd: 'design', cdr: 'design',
   }
   return map[ext] || 'text'
 }
@@ -203,6 +228,21 @@ export function isPreviewable(lang: string): boolean {
 /** 该文件是否可下载（二进制文件） */
 export function isDownloadable(lang: string): boolean {
   return ['pptx', 'pdf'].includes(lang)
+}
+
+/** 该文件是否为图片 */
+export function isImageFile(lang: string): boolean {
+  return lang === 'image'
+}
+
+/** 该文件是否为表格（csv/xlsx/xls） */
+export function isSpreadsheetFile(lang: string): boolean {
+  return lang === 'spreadsheet'
+}
+
+/** 用户上传文件能否走预览模态（archive 仅下载，其余皆可预览） */
+export function canPreviewUpload(lang: string): boolean {
+  return lang !== 'archive'
 }
 
 export function makeEmptyCognitiveState(): CognitiveState {

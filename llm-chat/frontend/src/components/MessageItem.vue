@@ -10,6 +10,7 @@ import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, 
 import CodePreview from './CodePreview.vue'
 import AgentStatusBubble from './AgentStatusBubble.vue'
 import FileArtifactCard from './FileArtifactCard.vue'
+import UploadedFilePreview from './UploadedFilePreview.vue'
 import type { FileArtifact } from '../types'
 import { detectLanguage } from '../types'
 
@@ -353,6 +354,18 @@ const previewVisible = ref(false)
 const previewCode = ref('')
 const previewLang = ref('html')
 
+// ─── 用户上传文件预览模态 ────────────────────────────────────────────────────
+const uploadPreviewVisible = ref(false)
+const uploadPreviewFile = ref<{ id: number; name: string; size: number; language: string; path?: string } | null>(null)
+function openUploadPreview(f: any) {
+  // 一律走模态：能预览就渲染，不能就显示颜文字提示（archive/pptx 在模态里 0 请求）
+  uploadPreviewFile.value = {
+    id: f.id, name: f.name, size: f.size || 0,
+    language: f.language || 'text', path: f.path,
+  }
+  uploadPreviewVisible.value = true
+}
+
 function handleContentClick(e: MouseEvent) {
   const copyBtn = (e.target as Element).closest<HTMLElement>('.cb-copy')
   const previewBtn = (e.target as Element).closest<HTMLElement>('.cb-preview')
@@ -688,12 +701,11 @@ function fmtFileSize(n: number): string {
           />
         </div>
         <div v-if="message.files?.length" class="user-files">
-          <a
+          <div
             v-for="f in message.files" :key="f.id"
             class="user-file-card"
-            :href="`/api/artifacts/${f.id}/download`"
-            :download="f.name"
-            :title="f.path || f.name"
+            :title="`预览 ${f.name}`"
+            @click="openUploadPreview(f)"
           >
             <svg class="user-file-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
@@ -701,8 +713,11 @@ function fmtFileSize(n: number): string {
             </svg>
             <span class="user-file-name">{{ f.name }}</span>
             <span class="user-file-size">{{ fmtFileSize(f.size) }}</span>
-          </a>
+          </div>
         </div>
+
+        <!-- 用户上传文件预览模态 -->
+        <UploadedFilePreview v-model="uploadPreviewVisible" :file="uploadPreviewFile" />
 
         <!-- Workflow plan card -->
         <div v-if="message.workflowPlan?.length" class="wf-card">
@@ -1178,6 +1193,7 @@ function fmtFileSize(n: number): string {
   text-decoration: none;
   max-width: 260px;
   transition: all 0.15s;
+  cursor: pointer;
 }
 .user-file-card:hover { background: #EBECEF; border-color: #00AEEC; }
 .user-file-ico { color: #00AEEC; flex-shrink: 0; }

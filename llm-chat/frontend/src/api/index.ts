@@ -162,6 +162,15 @@ export async function fetchArtifactContent(artifactId: number): Promise<FileArti
   return data.error ? null : data
 }
 
+/** 用产物下载 URL 拉原始字节（供 PDF/Excel/图片 模态预览使用，避免传 base64 经状态层） */
+export async function fetchArtifactBlob(artifactId: number): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/download`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) throw new Error(`下载失败: ${res.status}`)
+  return res.blob()
+}
+
 /** 获取对话的完整状态（含消息详情、计划、产物等，供刷新后恢复） */
 export async function fetchFullState(convId: string) {
   const res = await fetch(`${API_BASE}/api/conversations/${convId}/full-state`, {
