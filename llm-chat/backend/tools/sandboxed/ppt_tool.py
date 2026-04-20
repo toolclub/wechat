@@ -10,7 +10,11 @@ PPT 生成工具 — HTML-first 方案
 """
 
 # ── Skill 元数据（SkillRegistry 自动收集） ──
-GUIDANCE = "用户需要制作 PPT/演示文稿时调用。slides 参数为 HTML 数组，每个元素是一张幻灯片的完整 HTML（960×720，含内联 CSS）。"
+GUIDANCE = (
+    "把幻灯片当作「可预览的 HTML 页面」来制作，然后转成 .pptx 交付。"
+    "用户说「做个 PPT / 演示文稿」时召唤。"
+    "你负责写每张幻灯片的 HTML（含内联 CSS，960×720px），后端负责渲染截图转 PPT。HTML 同时作为前端实时预览。"
+)
 ERROR_HINT = "PPT 生成失败请检查 slides JSON 格式和 HTML 语法，确保每张幻灯片是完整的 HTML 文档。"
 TAGS = ["sandbox", "ppt"]
 DISPLAY_MODE = "terminal"
@@ -36,41 +40,16 @@ def _get_message_id() -> str:
 @tool
 async def create_ppt(ppt_json: str) -> str:
     """
-    根据描述创建 PowerPoint 演示文稿。你需要为每张幻灯片编写完整的 HTML 页面。
+    把幻灯片当作「可预览的 HTML 页面」来写，后端转成 .pptx 交付——HTML 同时作为前端实时预览。
 
-    ppt_json 必须是一个 JSON 字符串，格式如下：
-    {
-      "title": "演示文稿标题",
-      "slides": [
-        {
-          "title": "幻灯片标题（用于索引）",
-          "html": "<!DOCTYPE html><html><head><style>完整CSS样式</style></head><body>完整HTML内容</body></html>"
-        }
-      ]
-    }
-
-    HTML 编写要求：
-    1. 每页 HTML 是一个完整的页面，宽 960px 高 720px（16:9 宽高比）
-    2. 必须内联所有 CSS（不能引用外部资源）
-    3. 使用 body { width:960px; height:720px; margin:0; overflow:hidden; } 固定尺寸
-    4. 字体使用 'Microsoft YaHei','PingFang SC','Helvetica Neue',sans-serif
-    5. 设计要精美：合理使用渐变背景、圆角卡片、阴影、图标符号(emoji)、色块装饰等
-    6. 标题页要大气，内容页要清晰易读，结束页要简洁
-    7. 可以使用 CSS Grid / Flexbox 进行复杂布局
-    8. 配色要统一协调，建议选定一个主色调贯穿所有页面
-
-    设计风格参考：
-    - 封面页：大标题居中 + 副标题 + 装饰元素（渐变色块、几何图形等）
-    - 内容页：左侧标题区 + 右侧要点列表，或上下分区布局
-    - 数据页：用 CSS 绘制简单柱形图 / 进度条 / 数据卡片
-    - 对比页：左右双栏对比布局
-    - 引用页：大号引号装饰 + 引文 + 作者
-    - 结束页：居中感谢语 + 联系方式
-
-    重要：每页的 html 字段必须是完整的 HTML 文档（包含 <!DOCTYPE html>）。
+    你负责为每张幻灯片编写完整的 HTML（含内联 CSS，960×720px）。
+    每页必须是完整的 <!DOCTYPE html> 文档；字体用 'Microsoft YaHei'/'PingFang SC'，配色统一。
+    设计风格参考：封面页（大气居中+装饰）/ 内容页（分区清晰）/ 数据页（CSS图表）/ 对比页（双栏）/ 引用页 / 结束页。
+    后端负责截图转 .pptx，HTML 同时实时推送给前端预览。
 
     Args:
-        ppt_json: PPT 描述的 JSON 字符串
+        ppt_json: JSON 字符串，格式：
+          {"title": "演示文稿标题", "slides": [{"title": "索引名", "html": "<!DOCTYPE html>..."}]}
 
     Returns:
         创建结果

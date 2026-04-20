@@ -13,10 +13,11 @@
 
 # ── Skill 元数据（SkillRegistry 自动收集） ──
 GUIDANCE = (
-    "沙箱代码执行工具集（execute_code/run_shell/sandbox_write/sandbox_read/sandbox_download）。\n"
-    "写了非平凡代码必须验证：sandbox_write 写文件 → execute_code/run_shell 执行验证。\n"
-    "缺 Python 库先 run_shell pip install。HTML/SVG/CSS 文件写入后前端自动预览，无需启动服务器。\n"
-    "禁止前台启动长驻服务（uvicorn/flask/node 等），必须 nohup 后台化。沙箱有 120s 超时。"
+    "沙箱是你的工作台——有独立的 session 目录、可写文件、可执行代码、可安装依赖。"
+    "工具集分两层：\n"
+    "① 写完代码必须验证——sandbox_write 后紧接 execute_code 或 run_shell；\n"
+    "② 禁止在前台启动任何长驻服务（uvicorn / flask / node / java 等）——必须 nohup 后台化，否则 120s 超时卡死。\n"
+    "缺依赖先用 run_shell pip install。HTML/SVG/CSS 文件写入后前端自动预览，无需额外启动。"
 )
 ERROR_HINT = (
     "代码执行失败请检查语法和依赖，可 run_shell 查看错误日志后修复重试。"
@@ -187,30 +188,12 @@ def _get_conv_id() -> str:
 @tool
 async def execute_code(language: str, code: str) -> str:
     """
-    在安全沙箱环境中执行代码。支持 Python、JavaScript、Java、Shell。
-    每个对话有独立的工作目录，可以读写文件、安装包。
-    执行过程中输出会实时显示在终端中。
+    在沙箱中执行代码——这里有独立的 session 目录、文件系统、可安装依赖。
 
-    ⚠️ 沙箱有 120 秒执行超时限制，必须遵守以下规则：
-
-    【禁止前台启动任何服务或长时间进程】
-    包括但不限于：uvicorn/flask/gunicorn/django、node/npm start/next dev、
-    java -jar/mvn spring-boot:run/gradle bootRun、go run、cargo run、
-    rails server、php artisan serve、dotnet run 等。
-
-    正确模式（适用于所有语言）：
-    1. 后台启动 + 日志重定向：
-       nohup <启动命令> > /tmp/server.log 2>&1 &
-       sleep 2
-    2. 验证：
-       ss -tlnp | grep <端口>
-       curl -s http://localhost:<端口>/
-    3. 查日志：tail -20 /tmp/server.log
-    4. 验证完清理：pkill -f <进程关键词>
-
-    同理，任何可能超过 10 秒的命令都应后台化：
-       <command> > /tmp/output.log 2>&1 &
-       然后 tail / head 读取日志。
+    写完代码必须执行验证，缺依赖先 pip install。
+    禁止在前台启动任何长驻服务（uvicorn / flask / node / java / go / rails 等），
+    必须 nohup 后台化，否则 120s 超时卡死。
+    同理，任何可能超过 10s 的命令都应后台化：command > /tmp/out.log 2>&1 & 然后 tail 查看日志。
 
     Args:
         language: 编程语言，可选值: python, javascript, java, shell
@@ -250,15 +233,8 @@ async def execute_code(language: str, code: str) -> str:
 @tool
 async def run_shell(command: str) -> str:
     """
-    在沙箱环境中执行 shell 命令。工作目录为当前对话的专属 session 目录。
-    执行过程中输出会实时显示在终端中。
-
-    系统会自动检测服务类命令（uvicorn、flask、http.server 等），
-    自动后台运行并验证服务状态。
-
-    ⚠️ 沙箱有 120 秒超时限制。对于可能长时间运行的命令，请：
-    - 后台化：command > /tmp/output.log 2>&1 &
-    - 然后用 tail -n 20 /tmp/output.log 查看结果
+    在沙箱 session 目录里跑 shell 命令——安装依赖、查看日志、检查进程、跑构建命令。
+    系统自动检测长驻服务命令并后台化；120s 超时，超时的改用 nohup 后台执行。
 
     Args:
         command: 要执行的 shell 命令
@@ -433,7 +409,9 @@ async def _run_service_command(conv_id, command, manager, dispatch_event):
 @tool
 async def sandbox_write(path: str, content: str) -> str:
     """
-    在沙箱工作目录中创建或写入文件。路径相对于当前 session 目录。
+    把内容写入沙箱 session 目录——这一步产出一个文件，它是后续步骤的输入。
+    写入后自动推送 artifact 事件，前端可直接预览（HTML/CSS/SVG）或显示文件卡片。
+    写完非平凡代码紧接着用 execute_code / run_shell 验证，不要只写不验。
 
     Args:
         path: 文件路径（相对于 session 目录）
@@ -469,7 +447,8 @@ async def sandbox_write(path: str, content: str) -> str:
 @tool
 async def sandbox_read(path: str) -> str:
     """
-    读取沙箱工作目录中的文件内容。路径相对于当前 session 目录。
+    读取沙箱 session 目录中的文件——在你需要引用或复用已有文件内容时召唤。
+    路径相对于当前 session 目录。
 
     Args:
         path: 文件路径（相对于 session 目录）
@@ -491,11 +470,9 @@ _MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024
 @tool
 async def sandbox_download(path: str = ".") -> str:
     """
-    将沙箱中的文件或目录打包供用户下载。
-
-    - 如果 path 是目录（或 "."），自动 tar.gz 打包整个目录
-    - 如果 path 是单个文件，直接提供下载
-    - 打包后前端会显示下载按钮，用户点击即可保存到本地
+    把沙箱里的文件或目录打包交给用户——这一步是交付，不是探索。
+    path 为目录或 "." 时自动 tar.gz 打包整个 session 目录；为单文件时直接提供下载。
+    调用后告诉用户「文件已可下载」和文件名即可，不要在聊天里粘贴内容。
 
     Args:
         path: 文件或目录路径（相对于 session 目录），默认 "." 表示整个工作目录

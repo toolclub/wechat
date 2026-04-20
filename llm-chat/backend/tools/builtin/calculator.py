@@ -4,7 +4,10 @@
 """
 
 # ── Skill 元数据（SkillRegistry 自动收集） ──
-GUIDANCE = "需要精确数学计算时使用（加减乘除、幂、取余）。不支持函数调用（sin/cos/log 等），复杂数学请用 execute_code。"
+GUIDANCE = (
+    "为「精确、可验证的算术」而生，不代替心算。"
+    "支持加减乘除、整除、幂、取模；不支持函数调用（sin / cos / log 等）——复杂数学请改用 execute_code。"
+)
 ERROR_HINT = "表达式格式错误，请简化为基础算术运算（+、-、*、/、**、%）。"
 TAGS = ["utility"]
 DISPLAY_MODE = "default"  # 非终端工具，用默认渲染
@@ -52,7 +55,10 @@ def _safe_eval(expr: str) -> float:
 @tool
 def calculator(expression: str) -> str:
     """
-    计算数学表达式，支持加(+)、减(-)、乘(*)、除(/)、整除(//)、乘方(**)、取模(%)。
+    计算数学表达式——为"精确、可验证的算术"而生，不代替心算。
+
+    支持：加 (+) / 减 (-) / 乘 (*) / 除 (/) / 整除 (//) / 乘方 (**) / 取模 (%)。
+    不支持函数调用（sin / cos / log 等）；复杂数学请改用 execute_code。
 
     Args:
         expression: 数学表达式，例如 "2 + 3 * 4" 或 "100 / 7" 或 "2 ** 10"
