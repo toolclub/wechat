@@ -71,6 +71,20 @@ def _normalize_items(items: list) -> list[dict]:
                 continue
             options: list[str] = []
             for opt in raw_options[:_MAX_OPTIONS]:
+                # 防御：模型偶尔会把选项写成 {"label": "...", "value": "..."} 而不是纯字符串，
+                # 直接 str(dict) 会把 {'label': ...} 这种字面量渲染到前端卡片上。
+                # 这里主动抽取显示文本字段，没有则跳过。
+                if isinstance(opt, dict):
+                    opt = (
+                        opt.get("label")
+                        or opt.get("text")
+                        or opt.get("name")
+                        or opt.get("value")
+                        or ""
+                    )
+                elif not isinstance(opt, (str, int, float, bool)):
+                    # list / None / 其他类型 → 当作无效
+                    opt = ""
                 text = str(opt).strip()[:_MAX_OPTION_LEN]
                 if text:
                     options.append(text)

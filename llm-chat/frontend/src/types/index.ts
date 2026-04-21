@@ -126,6 +126,7 @@ export interface SendPayload {
   agentMode: boolean
   forcePlan?: PlanStep[]    // 用户编辑后的强制计划（跳过 planner LLM 规划）
   files?: UploadedFile[]    // 用户已上传的文件（在发送前调用 /api/files/upload 得到 id）
+  intent?: string           // 意图前缀（如 [PPT:corp_blue]），仅传给 API，用户气泡不显示
 }
 
 export interface AgentStatus {

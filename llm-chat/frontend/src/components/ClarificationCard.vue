@@ -41,6 +41,29 @@ effectiveItems.value.forEach((item: ClarificationItem) => {
   otherText.value[item.id] = ''
 })
 
+/** 兜底：若后端漏过一个对象选项（如 {label, value}），这里仍然抽出显示文本，
+ *  而不是把 "[object Object]" 或 "{\"label\": ...}" 字面量渲染到按钮上。*/
+function optionLabel(opt: unknown): string {
+  if (opt == null) return ''
+  if (typeof opt === 'string') {
+    const trimmed = opt.trim()
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed === 'object') {
+          return String(parsed.label ?? parsed.text ?? parsed.name ?? parsed.value ?? trimmed)
+        }
+      } catch { /* 不是合法 JSON，原样显示 */ }
+    }
+    return trimmed
+  }
+  if (typeof opt === 'object') {
+    const o = opt as Record<string, unknown>
+    return String(o.label ?? o.text ?? o.name ?? o.value ?? '')
+  }
+  return String(opt)
+}
+
 /** 判断某个选项是否属于"其他"类（需要追加文本输入） */
 function isOtherOption(opt: string): boolean {
   return /其他|other|补充说明/i.test(opt)
@@ -122,11 +145,11 @@ function handleSubmit() {
           >
             <el-radio-button
               v-for="opt in item.options"
-              :key="opt"
-              :value="opt"
+              :key="optionLabel(opt)"
+              :value="optionLabel(opt)"
               class="opt-radio-btn"
             >
-              {{ opt }}
+              {{ optionLabel(opt) }}
             </el-radio-button>
           </el-radio-group>
           <!-- 选了"其他"时显示补充输入框 -->
@@ -147,12 +170,12 @@ function handleSubmit() {
           >
             <el-checkbox
               v-for="opt in item.options"
-              :key="opt"
-              :label="opt"
-              :value="opt"
-              :checked="isSelected(item.id, opt)"
+              :key="optionLabel(opt)"
+              :label="optionLabel(opt)"
+              :value="optionLabel(opt)"
+              :checked="isSelected(item.id, optionLabel(opt))"
               class="opt-checkbox"
-              @change="toggleMulti(item.id, opt)"
+              @change="toggleMulti(item.id, optionLabel(opt))"
             />
           </el-checkbox-group>
 

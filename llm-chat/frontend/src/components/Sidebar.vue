@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
-  Plus, Search, ChatDotRound, Delete, Connection, Check, Close, Select,
+  Plus, Search, ChatDotRound, Delete, Check, Close, Select,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -308,11 +308,6 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
         </svg>
         <span>{{ isDark ? '亮色模式' : '暗色模式' }}</span>
       </button>
-      <div class="model-status">
-        <span class="status-dot pulse"></span>
-        <span class="status-text">智能路由 · 自动选模型</span>
-        <el-icon class="status-icon"><Connection /></el-icon>
-      </div>
     </div>
 
   </div>
@@ -671,30 +666,6 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   padding: 12px;
   border-top: 1px solid var(--cf-border-soft);
 }
-.model-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 13px;
-  background: linear-gradient(135deg, #E3F6FD, #D5F5E8);
-  border: 1px solid #B8E6D6;
-  border-radius: 12px;
-  box-shadow: var(--cf-shadow-xs);
-}
-.status-dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: #00B578;
-  flex-shrink: 0;
-  animation: pulse-green 2s ease-in-out infinite;
-}
-@keyframes pulse-green {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(0,181,120,0.4); }
-  50%       { box-shadow: 0 0 0 5px rgba(0,181,120,0); }
-}
-.status-text { font-size: 11.5px; color: #00875A; font-weight: 500; flex: 1; }
-.status-icon { font-size: 12px; color: #00875A; opacity: 0.55; }
-
 /* ── Dark toggle ── */
 .dark-toggle {
   display: flex;
@@ -702,7 +673,6 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   gap: 8px;
   width: 100%;
   padding: 8px 13px;
-  margin-bottom: 8px;
   background: none;
   border: 1px solid var(--cf-border-soft);
   border-radius: 12px;

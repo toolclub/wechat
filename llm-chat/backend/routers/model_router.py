@@ -27,11 +27,17 @@ async def get_models():
 
 @router.post("/embedding")
 async def test_embedding(text: str = "测试文本"):
-    from llm.embeddings import embed_text
-    vec = await embed_text(text)
-    return {
-        "model": EMBEDDING_MODEL,
-        "text": text,
-        "dimensions": len(vec),
-        "vector_preview": vec[:5],
-    }
+    from llm.embeddings import embed_text, EmbeddingError
+    try:
+        vec = await embed_text(text)
+        return {
+            "model": EMBEDDING_MODEL,
+            "text": text,
+            "dimensions": len(vec),
+            "vector_preview": vec[:5],
+        }
+    except EmbeddingError as e:
+        return {
+            "error": str(e),
+            "code": "EMBEDDING_FAILED",
+        }

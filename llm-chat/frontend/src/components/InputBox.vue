@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import type { SendPayload, UploadedFile } from '../types'
 import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -15,6 +15,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   send: [payload: SendPayload]
   ensureConv: []   // 请求父组件先创建对话（上传需要 conv_id）
+  'agent-change': [mode: boolean]   // Agent ⇄ Chat 切换时广播，供外层联动（比如空状态胶囊只在 Agent 显示）
 }>()
 
 const input = ref('')
@@ -44,6 +45,20 @@ let tipTimer: ReturnType<typeof setTimeout> | null = null
 onMounted(() => {
   const saved = localStorage.getItem(AGENT_MODE_KEY)
   if (saved !== null) agentMode.value = saved === 'true'
+  emit('agent-change', agentMode.value)
+
+  // 主题缩略图解码预热：让浏览器在空闲时把 12 张 SVG 先解码好，
+  // 首次打开 PPT 面板时只做挂载，不再同帧解码 → 无感顺滑。
+  const warmup = () => {
+    for (const t of pptThemesWithUri) {
+      const img = new Image()
+      img.decoding = 'async'
+      img.src = t.svgUri
+    }
+  }
+  const idle = (window as any).requestIdleCallback as ((fn: () => void) => void) | undefined
+  if (idle) idle(warmup)
+  else setTimeout(warmup, 120)
 })
 
 function toggleAgent() {
@@ -53,6 +68,7 @@ function toggleAgent() {
   setTimeout(() => {
     agentMode.value = !agentMode.value
     localStorage.setItem(AGENT_MODE_KEY, String(agentMode.value))
+    emit('agent-change', agentMode.value)
   }, 160)
   setTimeout(() => { flipping.value = false }, 320)
 
@@ -64,9 +80,78 @@ function toggleAgent() {
   tipTimer = setTimeout(() => { tipVisible.value = false }, 2000)
 }
 
-// ── PPT 主题选择器（图片缩略图版） ──
-const pptPanelOpen = ref(false)
+// ── 意图胶囊（PPT / 深研 / 造物 / 书写）──
+// 四种胶囊共享一个选配面板槽位；PPT 用主题画廊，其余三种用"档位网格"
+type PickerKind = 'ppt' | 'research' | 'code' | 'writing'
+const activePicker = ref<PickerKind | null>(null)
 const selectedPptTheme = ref<{ id: string; label: string } | null>(null)
+
+interface ModeProfile {
+  id: string
+  label: string
+  desc: string
+  accent: string  // 用于胶囊环配色
+}
+
+const MODE_META: Record<Exclude<PickerKind, 'ppt'>, { title: string; accent: string; profiles: ModeProfile[] }> = {
+  research: {
+    title: '选择研究配方',
+    accent: '#8B5CF6',
+    profiles: [
+      { id: 'brief',    label: '简报', desc: '300 字内 · 结构化要点 · 直给结论', accent: '#8B5CF6' },
+      { id: 'standard', label: '深解', desc: '多源交叉 · 正反对比 · 可追溯引用', accent: '#6D28D9' },
+      { id: 'academic', label: '学者', desc: '文献级严谨 · 定义/方法/局限/展望', accent: '#4C1D95' },
+    ],
+  },
+  code: {
+    title: '选择代码脚手架',
+    accent: '#10B981',
+    profiles: [
+      { id: 'cli',   label: '命令行', desc: '单文件脚本 · 带参数解析 · 自含依赖', accent: '#059669' },
+      { id: 'web',   label: 'Web 全栈', desc: '前后端最小闭环 · 本地即跑',      accent: '#0D9488' },
+      { id: 'algo',  label: '算法题',   desc: '推导 · 多解法 · 复杂度 · 边界',   accent: '#047857' },
+      { id: 'lib',   label: '库/模块',  desc: '抽象 API · 单测示例 · 可复用',    accent: '#065F46' },
+    ],
+  },
+  writing: {
+    title: '选择书写体裁',
+    accent: '#FB7299',
+    profiles: [
+      { id: 'weixin', label: '公众号',  desc: '长文 · 有节奏的小标题',            accent: '#FB7299' },
+      { id: 'xhs',    label: '小红书',  desc: '短段 · emoji 点缀 · 标签后缀',     accent: '#EF4444' },
+      { id: 'email',  label: '邮件',    desc: '简洁 · 语气考究 · 结尾有 CTA',     accent: '#DC2626' },
+      { id: 'story',  label: '短篇故事', desc: '场景+对白+余韵 · 1500 字内',      accent: '#B91C1C' },
+    ],
+  },
+}
+
+const selectedMode = ref<{ kind: 'research' | 'code' | 'writing'; profile: ModeProfile } | null>(null)
+
+// 当前活动的"档位"面板（PPT 不走这条） — 给模板一个已窄化的句柄
+const activeModeKind = computed<'research' | 'code' | 'writing' | null>(() => {
+  const k = activePicker.value
+  return k && k !== 'ppt' ? k : null
+})
+
+function openCapsule(kind: PickerKind) {
+  activePicker.value = activePicker.value === kind ? null : kind
+}
+
+function selectModeProfile(kind: 'research' | 'code' | 'writing', profile: ModeProfile) {
+  selectedMode.value = { kind, profile }
+  activePicker.value = null
+  setTimeout(() => textareaRef.value?.focus(), 80)
+}
+
+function clearSelectedMode() {
+  selectedMode.value = null
+}
+
+function modeKindLabel(kind: 'research' | 'code' | 'writing'): string {
+  return kind === 'research' ? '深研' : kind === 'code' ? '造物' : '书写'
+}
+
+defineExpose({ openCapsule })
 
 interface PptTheme {
   id: string
@@ -507,10 +592,18 @@ function getThemeSvgDataUri(t: PptTheme): string {
   return 'data:image/svg+xml,' + encodeURIComponent(buildThemeSvg(t))
 }
 
+/** 预计算所有主题缩略图 URI —— 在 setup 期同步一次性合成，
+ *  不走 computed 的懒求值路径（首次打开面板会一帧内生成 12 张 SVG，肉眼可见卡顿）。
+ *  注：虽然在 setup 里同步执行，但 InputBox 只在空状态+对话底部最多挂一次，代价可以忽略。 */
+const pptThemesWithUri: (PptTheme & { svgUri: string })[] = PPT_THEMES.map(t => ({
+  ...t,
+  svgUri: getThemeSvgDataUri(t),
+}))
+
 /** 选中主题 → 将缩略图转为 PNG 加入 pendingImages */
 function selectPptTheme(theme: PptTheme) {
   selectedPptTheme.value = { id: theme.id, label: theme.label }
-  pptPanelOpen.value = false
+  activePicker.value = null
 
   // SVG → Canvas → PNG base64 → 加入图片附件
   const svg = buildThemeSvg(theme)
@@ -538,9 +631,6 @@ function clearPptTheme() {
   pendingImages.value = pendingImages.value.filter(i => !i.startsWith('data:image/png;base64,iVBOR'))
 }
 
-function togglePptPanel() {
-  pptPanelOpen.value = !pptPanelOpen.value
-}
 
 const hasAttachments = () =>
   pendingImages.value.length > 0 ||
@@ -552,8 +642,12 @@ const canSend = () =>
 function handleSend() {
   if (!canSend()) return
   let text = input.value
+  // 意图前缀只给 API（辅助路由），不出现在用户气泡里
+  let intent = ''
   if (selectedPptTheme.value) {
-    text = `[PPT模式 | 主题: ${selectedPptTheme.value.id} (${selectedPptTheme.value.label})]\n${text}\n请使用 create_ppt 工具，参考附带的主题风格图片生成 PPT。`
+    intent = `[PPT:${selectedPptTheme.value.id}]`
+  } else if (selectedMode.value) {
+    intent = `[${selectedMode.value.profile.id}]`
   }
   // 只发送"已上传成功"的文件（有 id，且未标记 error/uploading）
   const readyFiles: UploadedFile[] = pendingFiles.value
@@ -567,11 +661,13 @@ function handleSend() {
     images: [...pendingImages.value],
     agentMode: agentMode.value,
     files: readyFiles,
+    intent,
   })
   input.value = ''
   pendingImages.value = []
   pendingFiles.value = []
   selectedPptTheme.value = null
+  selectedMode.value = null
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
 }
 
@@ -711,12 +807,25 @@ function openPendingPreview(f: PendingFile) {
   <div class="input-root" :class="{ centered }" @dragover.prevent @drop="handleDrop">
     <div class="input-card" :class="{ 'is-loading': loading }">
 
-      <!-- 已选主题标签 + 图片预览 + 附件文件 -->
-      <div v-if="selectedPptTheme || pendingImages.length > 0 || pendingFiles.length > 0" class="attachments-bar">
+      <!-- 已选主题标签 + 意图模式标签 + 图片预览 + 附件文件 -->
+      <div v-if="selectedPptTheme || selectedMode || pendingImages.length > 0 || pendingFiles.length > 0" class="attachments-bar">
         <!-- PPT 主题标签 -->
         <div v-if="selectedPptTheme" class="ppt-tag">
           <span class="ppt-tag-label">📊 {{ selectedPptTheme.label }}</span>
           <button class="ppt-tag-close" @click="clearPptTheme" title="取消PPT模式">
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <!-- 意图模式标签（深研 / 造物 / 书写） -->
+        <div
+          v-if="selectedMode"
+          class="mode-tag"
+          :style="{ '--tag-accent': selectedMode.profile.accent }"
+        >
+          <span class="mode-tag-kind">{{ modeKindLabel(selectedMode.kind) }}</span>
+          <span class="mode-tag-sep">·</span>
+          <span class="mode-tag-label">{{ selectedMode.profile.label }}</span>
+          <button class="mode-tag-close" @click="clearSelectedMode" title="取消此意图">
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
@@ -812,22 +921,6 @@ function openPendingPreview(f: PendingFile) {
             </span>
           </button>
 
-          <!-- ═══ PPT 按钮 ═══ -->
-          <el-tooltip content="创建 PPT" placement="top" :show-after="400">
-            <button
-              class="tool-btn ppt-btn"
-              :class="{ 'ppt-btn--active': pptPanelOpen || selectedPptTheme }"
-              @click="togglePptPanel"
-              :disabled="loading"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2"/>
-                <line x1="8" y1="21" x2="16" y2="21"/>
-                <line x1="12" y1="17" x2="12" y2="21"/>
-              </svg>
-            </button>
-          </el-tooltip>
-
           <span v-if="pendingImages.length > 0" class="img-badge">{{ pendingImages.length }} 张图片</span>
         </div>
 
@@ -852,27 +945,55 @@ function openPendingPreview(f: PendingFile) {
       </Transition>
     </div>
 
-    <!-- ═══ PPT 主题画廊（在输入框下方展开） ═══ -->
+    <!-- ═══ PPT 主题画廊（在输入框下方展开，URI 预计算避免卡顿） ═══ -->
     <Transition name="ppt-panel">
-      <div v-if="pptPanelOpen" class="ppt-gallery">
+      <div v-if="activePicker === 'ppt'" class="ppt-gallery">
         <div class="ppt-gallery-header">
           <span class="ppt-gallery-title">选择 PPT 主题风格</span>
-          <button class="ppt-gallery-close" @click="pptPanelOpen = false">
+          <button class="ppt-gallery-close" @click="activePicker = null">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
         <div class="ppt-gallery-grid">
           <button
-            v-for="t in PPT_THEMES" :key="t.id"
+            v-for="t in pptThemesWithUri" :key="t.id"
             class="ppt-gallery-card"
             :class="{ 'ppt-gallery-card--selected': selectedPptTheme?.id === t.id }"
             @click="selectPptTheme(t)"
           >
-            <img class="ppt-gallery-img" :src="getThemeSvgDataUri(t)" :alt="t.label" />
+            <img class="ppt-gallery-img" :src="t.svgUri" :alt="t.label" loading="lazy" decoding="async" />
             <div class="ppt-gallery-info">
               <span class="ppt-gallery-name">{{ t.label }}</span>
               <span class="ppt-gallery-desc">{{ t.desc }}</span>
             </div>
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- ═══ 其他意图胶囊（深研 / 造物 / 书写）的档位面板 ═══ -->
+    <Transition name="ppt-panel">
+      <div
+        v-if="activeModeKind"
+        class="mode-picker"
+        :style="{ '--picker-accent': MODE_META[activeModeKind].accent }"
+      >
+        <div class="mode-picker-header">
+          <span class="mode-picker-title">{{ MODE_META[activeModeKind].title }}</span>
+          <button class="mode-picker-close" @click="activePicker = null">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="mode-picker-grid">
+          <button
+            v-for="p in MODE_META[activeModeKind].profiles" :key="p.id"
+            class="mode-picker-card"
+            :class="{ 'mode-picker-card--selected': selectedMode?.kind === activeModeKind && selectedMode?.profile.id === p.id }"
+            :style="{ '--card-accent': p.accent }"
+            @click="selectModeProfile(activeModeKind, p)"
+          >
+            <span class="mode-picker-name">{{ p.label }}</span>
+            <span class="mode-picker-desc">{{ p.desc }}</span>
           </button>
         </div>
       </div>
@@ -1154,6 +1275,9 @@ function openPendingPreview(f: PendingFile) {
   transition: all 0.22s cubic-bezier(0.34,1.56,0.64,1);
   overflow: hidden;
   position: relative;
+  /* 跳过不在视口内的卡片的绘制/布局，首次打开画廊不会一帧渲染 12 张复杂 SVG */
+  content-visibility: auto;
+  contain-intrinsic-size: 160px 160px;
 }
 /* 卡片悬浮内光 */
 .ppt-gallery-card::before {
@@ -1221,4 +1345,141 @@ function openPendingPreview(f: PendingFile) {
 .ppt-panel-enter-from { opacity: 0; max-height: 0; }
 .ppt-panel-leave-to { opacity: 0; max-height: 0; }
 .ppt-panel-enter-to, .ppt-panel-leave-from { max-height: 400px; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   意图芯片（深研 / 造物 / 书写）
+   ═══════════════════════════════════════════════════════════════════ */
+.mode-tag {
+  --tag-accent: #8B5CF6;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 32px; padding: 0 10px 0 12px;
+  background: color-mix(in srgb, var(--tag-accent) 8%, #fff);
+  border: 1.5px solid color-mix(in srgb, var(--tag-accent) 45%, #fff);
+  border-radius: 10px;
+  font-size: 12px; font-weight: 600;
+  color: var(--tag-accent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--tag-accent) 20%, transparent);
+  transition: all 0.15s;
+}
+.mode-tag:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--tag-accent) 30%, transparent);
+}
+.mode-tag-kind { font-weight: 700; letter-spacing: 0.3px; }
+.mode-tag-sep { opacity: 0.5; margin: 0 2px; }
+.mode-tag-label { font-weight: 500; }
+.mode-tag-close {
+  width: 18px; height: 18px; border-radius: 50%; border: none; background: transparent;
+  color: var(--tag-accent); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  margin-left: 2px; transition: all 0.1s;
+}
+.mode-tag-close:hover {
+  background: color-mix(in srgb, var(--tag-accent) 15%, transparent);
+  transform: scale(1.1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   意图档位面板（复用 ppt-panel 过渡动画）
+   ═══════════════════════════════════════════════════════════════════ */
+.mode-picker {
+  --picker-accent: #8B5CF6;
+  margin-top: 12px;
+  background: linear-gradient(145deg,
+    #ffffff,
+    color-mix(in srgb, var(--picker-accent) 4%, #fafbfd)
+  );
+  border: 1.5px solid color-mix(in srgb, var(--picker-accent) 25%, #E3E5E7);
+  border-radius: 16px;
+  box-shadow:
+    0 8px 32px color-mix(in srgb, var(--picker-accent) 12%, rgba(0,0,0,0.06)),
+    0 2px 8px rgba(0,0,0,0.04);
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.mode-picker-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px; padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--picker-accent) 15%, #F1F2F3);
+}
+.mode-picker-title {
+  font-size: 14px; font-weight: 700; color: #18191C;
+  display: flex; align-items: center; gap: 8px;
+}
+.mode-picker-title::before {
+  content: '';
+  display: inline-block;
+  width: 4px; height: 16px;
+  background: linear-gradient(180deg,
+    var(--picker-accent),
+    color-mix(in srgb, var(--picker-accent) 60%, #FB7299)
+  );
+  border-radius: 2px;
+}
+.mode-picker-close {
+  width: 28px; height: 28px; border-radius: 8px; border: none; background: transparent;
+  color: #9499A0; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.mode-picker-close:hover { background: #F1F2F3; color: #18191C; }
+
+.mode-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+.mode-picker-card {
+  --card-accent: #8B5CF6;
+  position: relative;
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1.5px solid #E3E5E7;
+  border-radius: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+  overflow: hidden;
+}
+.mode-picker-card::after {
+  /* 左边缘微光带 —— 颜色即档位身份 */
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--card-accent);
+  opacity: 0.55;
+  transition: opacity 0.2s, width 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.mode-picker-card:hover {
+  border-color: var(--card-accent);
+  transform: translateY(-3px);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--card-accent) 22%, transparent);
+}
+.mode-picker-card:hover::after { width: 5px; opacity: 1; }
+.mode-picker-card:active { transform: translateY(-1px) scale(0.98); }
+
+.mode-picker-card--selected {
+  border-color: var(--card-accent) !important;
+  background: color-mix(in srgb, var(--card-accent) 6%, #fff);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--card-accent) 25%, transparent) !important;
+}
+.mode-picker-card--selected::after { width: 5px; opacity: 1; }
+
+.mode-picker-name {
+  font-size: 13.5px; font-weight: 700; color: #18191C;
+  letter-spacing: 0.2px;
+  transition: color 0.15s;
+}
+.mode-picker-card:hover .mode-picker-name,
+.mode-picker-card--selected .mode-picker-name {
+  color: var(--card-accent);
+}
+.mode-picker-desc {
+  font-size: 11.5px; color: #61666D;
+  line-height: 1.4;
+  font-weight: 400;
+}
 </style>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { nextTick, watch, ref, computed, onMounted, onUnmounted } from 'vue'
+import { nextTick, watch, ref, computed } from 'vue'
 import type { Message, SendPayload, AgentStatus, CognitiveState, FileArtifact } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
-import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
+import { Check, Loading } from '@element-plus/icons-vue'
 import ClarificationCard from './ClarificationCard.vue'
 
 const props = defineProps<{
@@ -94,17 +94,25 @@ watch(
   }
 )
 
-const suggestions = [
-  { icon: EditPen, label: '撰写文章', prompt: '帮我写一篇关于AI发展趋势的文章' },
-  { icon: Lightning, label: '代码生成', prompt: '用 Python 实现一个 REST API 服务器' },
-  { icon: DataAnalysis, label: '数据分析', prompt: '分析一份销售数据并给出可视化建议' },
-  { icon: TrendCharts, label: '方案策划', prompt: '帮我制定一个产品上线推广方案' },
-  { icon: Grid, label: '更多功能', prompt: '你都能做什么？列出你的所有能力' },
+// ── 意图胶囊：点击不自动发送，改为打开输入框上的选配面板，
+//    选中后附上"意图芯片"；发送时会追加「澄清协议」指令，促使模型先问再做 ──
+type CapsuleKind = 'ppt' | 'research' | 'code' | 'writing'
+const capsules: { kind: CapsuleKind; label: string; desc: string; accent: string }[] = [
+  { kind: 'ppt',      label: '做 PPT',  desc: '一键出片 · 选主题',     accent: '#00AEEC' },
+  { kind: 'research', label: '做研究',  desc: '多档位 · 刨根问底',     accent: '#FB7299' },
+  { kind: 'code',     label: '写代码',  desc: '挑一套工程骨架',        accent: '#00AEEC' },
+  { kind: 'writing',  label: '搞创作',  desc: '切一种书写体裁',        accent: '#FB7299' },
 ]
 
-function sendSuggestion(prompt: string) {
-  const agentMode = localStorage.getItem('cf_agent_mode') !== 'false'
-  emit('send', { text: prompt, images: [], agentMode })
+const inputBoxRef = ref<InstanceType<typeof InputBox>>()
+function tapCapsule(kind: CapsuleKind) {
+  inputBoxRef.value?.openCapsule(kind)
+}
+
+// ── 只在 Agent 模式下露出胶囊（Chat 模式保留纯粹输入体验）──
+const agentMode = ref(localStorage.getItem('cf_agent_mode') !== 'false')
+function onAgentChange(mode: boolean) {
+  agentMode.value = mode
 }
 
 const showProgress = computed(() => progress.value > 0 && progress.value < 100)
@@ -161,16 +169,10 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           <span>{{ panelOpen ? '收起' : '计划' }}</span>
         </button>
 
-        <!-- 统一状态标签 — Bilibili 风格圆角胶囊 -->
+        <!-- 统一状态标签 — Bilibili 风格圆角胶囊（idle 时不显示） -->
         <transition name="tag-swap" mode="out-in">
           <el-tag
-            v-if="agentStatus.state === 'idle'"
-            key="idle"
-            type="success" effect="plain" round :closable="false" class="s-tag"
-          ><span class="s-dot s-dot--green"></span>就绪</el-tag>
-
-          <el-tag
-            v-else-if="agentStatus.state === 'done'"
+            v-if="agentStatus.state === 'done'"
             key="done"
             type="success" effect="plain" round :closable="false" class="s-tag"
           ><el-icon style="margin-right:3px"><Check /></el-icon>完成</el-tag>
@@ -194,7 +196,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           ><el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>{{ agentStatus.tool || '工具' }}</el-tag>
 
           <el-tag
-            v-else
+            v-else-if="agentStatus.state !== 'idle'"
             :key="agentStatus.state"
             type="info" effect="plain" round :closable="false" class="s-tag"
             :style="agentStatus.state === 'planning'       ? 'color:#FB7299;border-color:#FDD4E0'
@@ -244,20 +246,63 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         </template>
       </el-empty>
 
-      <InputBox :loading="loading" :centered="true" :currentConvId="currentConvId" @send="emit('send', $event)" @ensureConv="emit('ensureConv')" />
+      <InputBox
+        ref="inputBoxRef"
+        :loading="loading"
+        :centered="true"
+        :currentConvId="currentConvId"
+        @send="emit('send', $event)"
+        @ensureConv="emit('ensureConv')"
+        @agent-change="onAgentChange"
+      />
 
-      <div class="suggestions">
-        <el-button
-          v-for="s in suggestions"
-          :key="s.label"
-          class="sug-card"
-          round
-          @click="sendSuggestion(s.prompt)"
-        >
-          <el-icon class="sug-icon"><component :is="s.icon" /></el-icon>
-          <span class="sug-label">{{ s.label }}</span>
-        </el-button>
-      </div>
+      <!-- 意图胶囊：只在 Agent 模式下露出 —— Chat 模式的快直接体验不掺合 -->
+      <Transition name="capsule-tray">
+        <div v-if="agentMode" class="capsules">
+          <button
+            v-for="c in capsules"
+            :key="c.kind"
+            class="capsule"
+            :style="{ '--capsule-accent': c.accent }"
+            @click="tapCapsule(c.kind)"
+          >
+            <span class="capsule-ico" aria-hidden="true">
+              <!-- 做 PPT：幻灯片 + 角落亮点 -->
+              <svg v-if="c.kind === 'ppt'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="13" rx="2.5"/>
+                <path d="M9 20h6M12 17v3"/>
+                <path d="M7.5 13.5l3-3 2.5 2.5 3.5-4" stroke="#FB7299"/>
+                <circle cx="18.5" cy="6" r="1" fill="#FB7299" stroke="none"/>
+              </svg>
+              <!-- 做研究：放大镜 + 星芒 -->
+              <svg v-else-if="c.kind === 'research'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="10.5" cy="10.5" r="5.5"/>
+                <path d="M15 15l5 5"/>
+                <path d="M10.5 8.2v4.6M8.2 10.5h4.6" stroke="#00AEEC"/>
+                <path d="M19 4l.7 1.3L21 6l-1.3.7L19 8l-.7-1.3L17 6l1.3-.7z" fill="#00AEEC" stroke="none"/>
+              </svg>
+              <!-- 写代码：<> 斜杠 + 光标 -->
+              <svg v-else-if="c.kind === 'code'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 7l-5 5 5 5"/>
+                <path d="M16 7l5 5-5 5"/>
+                <path d="M14 5l-4 14" stroke="#FB7299"/>
+              </svg>
+              <!-- 搞创作：羽毛笔 + 墨点 -->
+              <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 20l3-1 10.5-10.5a2.5 2.5 0 00-3.5-3.5L3.5 15.5 4 20z"/>
+                <path d="M13 7l4 4"/>
+                <circle cx="6" cy="19" r="1.1" fill="#00AEEC" stroke="none"/>
+              </svg>
+            </span>
+            <span class="capsule-text">
+              <span class="capsule-label">{{ c.label }}</span>
+              <span class="capsule-desc">{{ c.desc }}</span>
+            </span>
+            <span class="capsule-ring"></span>
+            <span class="capsule-sparkle" aria-hidden="true"></span>
+          </button>
+        </div>
+      </Transition>
     </div>
 
     <!-- ── 对话视图 ── -->
@@ -567,37 +612,117 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   letter-spacing: 0.2px;
 }
 
-/* ── 快捷操作 — Bilibili 圆角胶囊 ── */
-.suggestions {
+/* ── 意图胶囊 — Bilibili 蓝粉线条风 ── */
+.capsules {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   justify-content: center;
   max-width: 680px;
 }
-:deep(.sug-card) {
-  padding: 10px 20px !important;
-  height: auto !important;
-  background: #fff !important;
-  border: 1.5px solid #E3E5E7 !important;
-  border-radius: 20px !important;
-  font-size: 13.5px !important;
-  font-weight: 500 !important;
-  color: #18191C !important;
-  font-family: inherit !important;
-  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+.capsule {
+  --capsule-accent: #00AEEC;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 8px 10px;
+  background: #fff;
+  border: 1.5px solid #E3E5E7;
+  border-radius: 24px;
+  font-family: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
-:deep(.sug-card:hover) {
-  border-color: #00AEEC !important;
-  color: #00AEEC !important;
-  transform: translateY(-2px) !important;
-  box-shadow: 0 4px 14px rgba(0,174,236,0.12) !important;
-  background: linear-gradient(135deg, rgba(0,174,236,0.03), rgba(251,114,153,0.02)) !important;
+.capsule:hover {
+  border-color: var(--capsule-accent);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow:
+    0 6px 20px color-mix(in srgb, var(--capsule-accent) 25%, transparent),
+    0 2px 8px rgba(0,0,0,0.04);
 }
-:deep(.sug-card:nth-child(2):hover) { border-color: #FB7299 !important; color: #FB7299 !important; box-shadow: 0 4px 14px rgba(251,114,153,0.12) !important; }
-:deep(.sug-card:nth-child(4):hover) { border-color: #FB7299 !important; color: #FB7299 !important; box-shadow: 0 4px 14px rgba(251,114,153,0.12) !important; }
-.sug-icon { font-size: 15px; }
-.sug-label { font-weight: 500; }
+.capsule:active { transform: scale(0.97); }
+
+/* 左侧图标圆角底板 */
+.capsule-ico {
+  width: 32px; height: 32px;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--capsule-accent) 8%, #f0f9ff),
+    color-mix(in srgb, var(--capsule-accent) 4%, #fff)
+  );
+  color: var(--capsule-accent);
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background 0.2s;
+}
+.capsule:hover .capsule-ico {
+  transform: rotate(-6deg) scale(1.08);
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--capsule-accent) 16%, #f0f9ff),
+    color-mix(in srgb, var(--capsule-accent) 8%, #fff)
+  );
+}
+
+/* 文字区 */
+.capsule-text {
+  display: flex; flex-direction: column; gap: 1px;
+}
+.capsule-label {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #18191C;
+  letter-spacing: 0.3px;
+  line-height: 1.2;
+  transition: color 0.18s;
+}
+.capsule-desc {
+  font-size: 11px;
+  color: #9499A0;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.capsule:hover .capsule-label { color: var(--capsule-accent); }
+.capsule:hover .capsule-desc  { color: var(--capsule-accent); opacity: 0.75; }
+
+/* 悬浮内光 */
+.capsule-ring {
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(65% 85% at 100% 100%,
+    color-mix(in srgb, var(--capsule-accent) 12%, transparent),
+    transparent 60%);
+  opacity: 0; transition: opacity 0.25s;
+}
+.capsule:hover .capsule-ring { opacity: 1; }
+
+/* 右上角微光点 */
+.capsule-sparkle {
+  position: absolute; top: 5px; right: 8px;
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--capsule-accent);
+  opacity: 0;
+  transition: opacity 0.25s, transform 0.25s;
+  transform: scale(0);
+}
+.capsule:hover .capsule-sparkle {
+  opacity: 0.7; transform: scale(1);
+}
+
+/* 胶囊组滑入/滑出过渡 */
+.capsule-tray-enter-active { transition: opacity 0.25s, transform 0.25s cubic-bezier(0.34,1.56,0.64,1); }
+.capsule-tray-leave-active { transition: opacity 0.18s, transform 0.18s; }
+.capsule-tray-enter-from   { opacity: 0; transform: translateY(8px) scale(0.96); }
+.capsule-tray-leave-to    { opacity: 0; transform: translateY(-4px) scale(0.98); }
 
 /* ── 对话区 ── */
 .chat-body {

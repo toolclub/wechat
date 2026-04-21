@@ -580,7 +580,7 @@ export function useChat() {
   // 下一次 send 附加的 force_plan（由 applyModifiedPlan 设置，send 消费后清空）
   const _nextForcePlan = ref<PlanStep[] | null>(null)
 
-  async function send({ text, images, agentMode, forcePlan, files }: SendPayload) {
+  async function send({ text, images, agentMode, forcePlan, files, intent }: SendPayload) {
     // forcePlan 参数优先，其次用 _nextForcePlan（兼容两种调用方式）
     const activeForcePlan = forcePlan || _nextForcePlan.value
     _nextForcePlan.value = null
@@ -627,8 +627,10 @@ export function useChat() {
     }
 
     try {
+      // intent 前缀（如 [PPT:corp_blue]）随 API 消息走，帮助模型路由，用户气泡不存
+      const apiText = intent ? `${intent}\n${text}` : text
       await api.sendMessage(
-        convId, text, '', images, agentMode,
+        convId, apiText, '', images, agentMode,
         activeForcePlan as any,
         // onChunk — 预检澄清通过 onClarification SSE 事件处理。
         // COMPAT: 模型主动输出 [NEED_CLARIFICATION] 时，标记前的文本转入 thinking。
@@ -881,20 +883,12 @@ export function useChat() {
     const s = convStates[currentConvId.value]
     if (!s) return
 
-    // 取出触发澄清的那条 assistant 消息，清除其 clarification 字段
     const lastMsg = s.messages[s.messages.length - 1]
     if (lastMsg?.role === 'assistant' && lastMsg.clarification) {
       const { items } = lastMsg.clarification
       lastMsg.clarification = undefined
 
-      // 找到触发本次澄清的原始用户消息（assistantIdx-1）
-      // 将原始意图与补充答案合并，确保路由模型能正确识别任务类型
-      const originalUserMsg = s.messages[s.messages.length - 2]
-      const originalIntent = originalUserMsg?.role === 'user'
-        ? originalUserMsg.content
-        : ''
-
-      // 格式化用户答案
+      // 只把用户选的内容发出去——模型有记忆，用户不需要看上下文前缀
       const lines: string[] = []
       items.forEach(item => {
         const val = answers[item.id]
@@ -903,24 +897,8 @@ export function useChat() {
         if (display.trim()) lines.push(`${item.label}：${display}`)
       })
 
-      // 组合：原始意图 + 补充说明，路由器能看到原始任务
-      const supplement = lines.join('，')
-
-      // 若上一轮已有执行计划，将其附加到消息中，供 planner 参考继续/调整
-      const activePlan = s.cognitive.plan
-      let planContext = ''
-      if (activePlan.length > 0) {
-        const planLines = activePlan
-          .map((step, i) => `${i + 1}. ${step.title}${step.description ? '：' + step.description : ''}`)
-          .join('\n')
-        planContext = `\n\n[原有执行计划]\n${planLines}\n请基于上述补充信息继续执行或调整计划。`
-      }
-
-      const formatted = originalIntent
-        ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}${planContext}`
-        : (supplement || '继续')
-
-      await send({ text: formatted, images: [], agentMode: getCurrentAgentMode() })
+      const text = lines.join('，') || '继续'
+      await send({ text, images: [], agentMode: getCurrentAgentMode() })
     }
   }
 

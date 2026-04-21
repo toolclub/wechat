@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     chat_model: str
     summary_model: str
     embedding_model: str
+    # Embedding 兜底模型列表（主模型失败时依次尝试，全 JSON 数组字符串格式）
+    # 示例：EMBEDDING_FALLBACK_MODELS=["Qwen3-Embedding-8B","Qwen3-Embedding-0.6B"]
+    embedding_fallback_models: list[str] = []
     # 视觉模型：专门处理含图片的请求，可指向不同提供商（如本地 Ollama）
     # 留空则回退到 ROUTE_MODEL_MAP["chat"]
     vision_model: str = ""
@@ -166,6 +169,7 @@ API_BASE_URL              = settings.api_base_url
 CHAT_MODEL                = settings.chat_model
 SUMMARY_MODEL             = settings.summary_model
 EMBEDDING_MODEL           = settings.embedding_model
+EMBEDDING_FALLBACK_MODELS = settings.embedding_fallback_models
 VISION_MODEL              = settings.vision_model
 # 视觉接口：未配置时回退到主 LLM 接口
 VISION_BASE_URL           = settings.vision_base_url or settings.llm_base_url
