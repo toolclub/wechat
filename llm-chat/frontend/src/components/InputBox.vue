@@ -642,12 +642,15 @@ const canSend = () =>
 function handleSend() {
   if (!canSend()) return
   let text = input.value
-  // 意图前缀只给 API（辅助路由），不出现在用户气泡里
+  // intent：API 路由前缀 | intentLabel：气泡里显示的意图标签
   let intent = ''
+  let intentLabel = ''
   if (selectedPptTheme.value) {
     intent = `[PPT:${selectedPptTheme.value.id}]`
+    intentLabel = `做 PPT · ${selectedPptTheme.value.label}`
   } else if (selectedMode.value) {
     intent = `[${selectedMode.value.profile.id}]`
+    intentLabel = `${modeKindLabel(selectedMode.value.kind)} · ${selectedMode.value.profile.label}`
   }
   // 只发送"已上传成功"的文件（有 id，且未标记 error/uploading）
   const readyFiles: UploadedFile[] = pendingFiles.value
@@ -662,6 +665,7 @@ function handleSend() {
     agentMode: agentMode.value,
     files: readyFiles,
     intent,
+    intentLabel,
   })
   input.value = ''
   pendingImages.value = []

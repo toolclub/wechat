@@ -580,7 +580,7 @@ export function useChat() {
   // 下一次 send 附加的 force_plan（由 applyModifiedPlan 设置，send 消费后清空）
   const _nextForcePlan = ref<PlanStep[] | null>(null)
 
-  async function send({ text, images, agentMode, forcePlan, files, intent }: SendPayload) {
+  async function send({ text, images, agentMode, forcePlan, files, intent, intentLabel }: SendPayload) {
     // forcePlan 参数优先，其次用 _nextForcePlan（兼容两种调用方式）
     const activeForcePlan = forcePlan || _nextForcePlan.value
     _nextForcePlan.value = null
@@ -599,6 +599,7 @@ export function useChat() {
       content: text,
       images: images.length > 0 ? images : undefined,
       files: files && files.length > 0 ? files : undefined,
+      intent: intentLabel || undefined,
     }
     if (_nextWorkflowPlan.value) {
       userMsg.workflowPlan = _nextWorkflowPlan.value

@@ -750,7 +750,8 @@ function fmtFileSize(n: number): string {
           </div>
         </div>
         <!-- Plain text bubble -->
-        <div v-else-if="message.content" class="user-bubble" @dblclick="startEdit">{{ message.content }}</div>
+        <div v-if="message.intent" class="intent-tag">{{ message.intent }}</div>
+        <div v-if="message.content" class="user-bubble" @dblclick="startEdit">{{ message.content }}</div>
         <!-- User message hover actions -->
         <div v-if="message.content && !isEditing" class="user-actions">
           <button class="action-btn-sm" @click="startEdit" title="编辑消息">
@@ -1201,6 +1202,17 @@ function fmtFileSize(n: number): string {
   font-weight: 500;
 }
 .user-file-size { color: var(--cf-text-4, #9499A0); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.intent-tag {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 10px;
+  background: rgba(0, 174, 236, 0.12);
+  color: #00AEEC;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
 .user-bubble {
   background: #E3F6FD;
   color: #18191C;

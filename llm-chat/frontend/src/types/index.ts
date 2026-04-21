@@ -92,6 +92,7 @@ export interface UploadedFile {
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  intent?: string            // 胶囊意图标签（显示在气泡里），如"写代码 · 算法题"
   thinking?: string                         // 拼接纯文本（向后兼容）
   thinkingSegments?: ThinkingSegment[]      // 结构化段（权威数据源，优先渲染）
   steps?: StepRecord[]
@@ -126,7 +127,8 @@ export interface SendPayload {
   agentMode: boolean
   forcePlan?: PlanStep[]    // 用户编辑后的强制计划（跳过 planner LLM 规划）
   files?: UploadedFile[]    // 用户已上传的文件（在发送前调用 /api/files/upload 得到 id）
-  intent?: string           // 意图前缀（如 [PPT:corp_blue]），仅传给 API，用户气泡不显示
+  intent?: string           // API 前缀（如 [PPT:corp_blue] / [algo]），不出现在气泡
+  intentLabel?: string      // 气泡里显示的意图标签（如"做 PPT · 企业蓝" / "写代码 · 算法题"）
 }
 
 export interface AgentStatus {
