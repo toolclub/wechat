@@ -93,6 +93,7 @@ export function useChat() {
   const currentConvId = ref<string | null>(null)
   const convStates = reactive<Record<string, ConvState>>({})
   const initialLoading = ref(false)  // 页面刷新时从 DB 恢复数据的全局 loading
+  const creatingConv = ref(false)    // 新建对话请求进行中（防抖 + 右侧 loading 占位）
 
   // ── 防抖：快速切换对话时 last-wins，丢弃过时的 full-state 响应 ──
   let _selectVersion = 0                       // 递增版本号，标记最新一次 select
@@ -538,11 +539,20 @@ export function useChat() {
   }
 
   async function newConversation() {
-    const data = await api.createConversation()
-    currentConvId.value = data.id
-    window.location.hash = data.id
-    convStates[data.id] = makeConvState()
-    await loadConversations()
+    if (creatingConv.value) return  // 防多点：网络有延迟时避免创建出多个空对话
+    creatingConv.value = true
+    // 立即清空当前对话 id，让右侧切到 loading 占位（由 creatingConv 驱动）
+    currentConvId.value = null
+    window.location.hash = ''
+    try {
+      const data = await api.createConversation()
+      currentConvId.value = data.id
+      window.location.hash = data.id
+      convStates[data.id] = makeConvState()
+      await loadConversations()
+    } finally {
+      creatingConv.value = false
+    }
   }
 
   async function removeConversation(id: string) {
@@ -1120,7 +1130,7 @@ export function useChat() {
 
   return {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
-    canContinue, initialLoading,
+    canContinue, initialLoading, creatingConv,
     loadConversations, selectConversation, restoreFromHash,
     newConversation, removeConversation, batchRemoveConversations,
     send, cancelStream, stopConversation, applyModifiedPlan, submitClarification, continueLast,

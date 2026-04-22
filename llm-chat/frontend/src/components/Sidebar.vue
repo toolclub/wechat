@@ -9,6 +9,7 @@ const props = defineProps<{
   conversations: ConversationInfo[]
   currentConvId: string | null
   activeConvIds?: Set<string>
+  creating?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -158,11 +159,17 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
 
     <!-- 新对话 + 管理按钮 -->
     <div class="sidebar-actions">
-      <button class="new-chat-btn" @click="emit('newChat')">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+      <button
+        class="new-chat-btn"
+        :class="{ 'new-chat-btn--loading': props.creating }"
+        :disabled="props.creating"
+        @click="emit('newChat')"
+      >
+        <svg v-if="!props.creating" width="13" height="13" viewBox="0 0 16 16" fill="none">
           <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         </svg>
-        新对话
+        <span v-else class="new-chat-spinner" aria-hidden="true"></span>
+        {{ props.creating ? '创建中' : '新对话' }}
       </button>
       <button
         class="manage-btn"
@@ -402,6 +409,27 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   box-shadow: 0 4px 14px rgba(0,174,236,0.2);
 }
 .new-chat-btn:active { transform: translateY(0) scale(0.98); }
+.new-chat-btn:disabled,
+.new-chat-btn--loading {
+  cursor: wait;
+  opacity: 0.78;
+  transform: none !important;
+  box-shadow: none !important;
+}
+.new-chat-btn:disabled:hover,
+.new-chat-btn--loading:hover {
+  background: linear-gradient(135deg, rgba(0,174,236,0.1) 0%, rgba(251,114,153,0.08) 100%);
+  border-color: rgba(0,174,236,0.3);
+  transform: none;
+}
+.new-chat-spinner {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 1.6px solid rgba(0,174,236,0.25);
+  border-top-color: #00AEEC;
+  animation: new-chat-spin 0.7s linear infinite;
+}
+@keyframes new-chat-spin { to { transform: rotate(360deg); } }
 
 .manage-btn {
   width: 38px; height: 38px;

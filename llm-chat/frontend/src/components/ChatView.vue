@@ -16,6 +16,7 @@ const props = defineProps<{
   convTitle?: string
   canContinue?: boolean
   currentConvId?: string | null
+  creating?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -229,8 +230,21 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
       </div>
     </div>
 
+    <!-- ── 新建对话加载占位（立即反馈，避免网络延迟下用户多点） ── -->
+    <div v-if="creating" class="creating-view">
+      <div class="creating-icon-wrap">
+        <svg width="42" height="42" viewBox="0 0 32 32" fill="none">
+          <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#00AEEC"/>
+          <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#FB7299" opacity="0.6"/>
+        </svg>
+      </div>
+      <div class="creating-text">
+        ChatFlow<span class="creating-dots"></span>
+      </div>
+    </div>
+
     <!-- ── 空状态 — Bilibili 可爱风 ── -->
-    <div v-if="messages.length === 0" class="empty-view">
+    <div v-else-if="messages.length === 0" class="empty-view">
       <el-empty :image-size="0" description="" class="hero-empty">
         <template #image>
           <div class="hero-icon-wrap">
@@ -574,12 +588,22 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 }
 :deep(.hero-empty) {
   padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
+/* image-size=0 会把 .el-empty__image 宽度设为 0，导致自定义 80px 图标左对齐偏移。
+   这里显式撑开为 auto + 居中，保证图标与下方文字视觉对齐。 */
 :deep(.hero-empty .el-empty__image) {
-  margin-bottom: 8px;
+  width: auto !important;
+  height: auto !important;
+  margin: 0 auto 8px !important;
+  display: flex;
+  justify-content: center;
 }
 :deep(.hero-empty .el-empty__description) {
   margin-top: 0;
+  text-align: center;
 }
 .hero-icon-wrap {
   width: 80px; height: 80px;
@@ -807,4 +831,59 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   color: var(--cf-text-2) !important;
   border-color: var(--cf-border) !important;
 }
+
+/* ── 新对话加载占位 ── */
+.creating-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 32px;
+  animation: creating-fade-in 0.15s ease-out;
+}
+@keyframes creating-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.creating-icon-wrap {
+  width: 80px; height: 80px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 2px solid #D0EEF9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 20px rgba(0,174,236,0.12), 0 2px 8px rgba(251,114,153,0.08);
+  animation: creating-pulse 1.4s ease-in-out infinite;
+}
+@keyframes creating-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 4px 20px rgba(0,174,236,0.12), 0 2px 8px rgba(251,114,153,0.08); }
+  50%      { transform: scale(1.06); box-shadow: 0 6px 24px rgba(0,174,236,0.22), 0 3px 12px rgba(251,114,153,0.14); }
+}
+.creating-text {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--cf-text-2);
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: baseline;
+}
+.creating-dots::after {
+  content: '';
+  display: inline-block;
+  width: 1.6em;
+  text-align: left;
+  animation: creating-dots-anim 1.2s steps(4, end) infinite;
+}
+@keyframes creating-dots-anim {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+body.dark .creating-icon-wrap { background: #1F2023; border-color: #323335; }
+body.dark .creating-text { color: var(--cf-text-2); }
 </style>
