@@ -110,8 +110,8 @@ class WarmerState:
         except asyncio.TimeoutError:
             pass
 
-        logger.info("warmer 循环开始运行 worker_id=%s", _WORKER_ID)
-        
+        logger.debug("warmer 循环开始运行 worker_id=%s", _WORKER_ID)
+
         # 初始等待：给 Provider 注册留出 45 秒
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=45.0)
@@ -119,22 +119,37 @@ class WarmerState:
         except asyncio.TimeoutError:
             pass
 
+        # 抢 master 锁：抢到就干，抢不到直接退出
+        if not await self._try_acquire_master_lock():
+            logger.info("非 master worker，退出 warmer worker_id=%s", _WORKER_ID)
+            return
+
+        logger.info("获得 master 锁，开始定时预热 worker_id=%s", _WORKER_ID)
         while not self._stop.is_set():
-            # 核心原则：真正分布式单活计算。
-            is_master = await self._try_acquire_master_lock()
-            
-            if is_master:
-                # 只有 Master 才会在空闲时执行自动 tick
-                try:
-                    await self._tick()
-                except Exception as exc:
-                    logger.exception("warmer tick 异常: %s", exc)
-            
+            try:
+                await self._tick()
+            except Exception as exc:
+                logger.exception("warmer tick 异常: %s", exc)
+
+            # 续期 master 锁（_tick 可能阻塞数分钟，返回后立即续）
+            await self._renew_master_lock()
+
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=60.0)
                 break
             except asyncio.TimeoutError:
                 continue
+
+    async def _renew_master_lock(self) -> None:
+        """续期 master 锁，防止长耗时 _tick 导致锁过期。"""
+        try:
+            from db.redis_state import _get_redis  # type: ignore
+            r = _get_redis()
+            cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
+            if cur == _WORKER_ID:
+                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
+        except Exception:
+            pass
 
     async def _try_acquire_master_lock(self) -> bool:
         """尝试成为 master worker（Redis SETNX，TTL 120s）。
@@ -318,8 +333,10 @@ class WarmerState:
                 "bars_last_day": end_d.isoformat(),
                 "bars_universe_size": int(sym_count),
             })
-            logger.info("    ∟ Bars 抓取写入成功 | 数据量: %d | 覆盖: %d 只 | 耗时: %.1fs",
-                        len(df), sym_count, time.perf_counter() - t1)
+            missing = len(syms) - sym_count
+            logger.info("    ∟ Bars 抓取写入成功 | 数据行: %d | 标的: %d/%d (缺失 %d) | 耗时: %.1fs",
+                        len(df), sym_count, len(syms), missing,
+                        time.perf_counter() - t1)
 
     async def _do_index(self) -> None:
         adapter = get_adapter()

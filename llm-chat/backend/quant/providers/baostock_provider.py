@@ -94,19 +94,25 @@ class BaoStockProvider:
         all_results: list[pd.DataFrame] = []
         sym_list = list(symbols)
         total_batches = (len(sym_list) + BATCH_SIZE - 1) // BATCH_SIZE
+        done_count = 0
+        fail_count = 0
 
         for i in range(0, len(sym_list), BATCH_SIZE):
             batch = sym_list[i : i + BATCH_SIZE]
             batch_no = i // BATCH_SIZE + 1
-            if batch_no % 50 == 1 or batch_no == total_batches:
-                logger.info("baostock 批次进度 %d/%d (%d 只)",
-                            batch_no, total_batches, len(batch))
             # 对每一个小批次独立加锁
             df_batch = await self._call_sync(
                 self._fetch_bars_batch, batch, start, end, adjust_flag,
             )
+            batch_done = df_batch["symbol"].nunique() if not df_batch.empty and "symbol" in df_batch.columns else 0
+            done_count += batch_done
+            fail_count += len(batch) - batch_done
             if not df_batch.empty:
                 all_results.append(df_batch)
+
+            if batch_no % 50 == 1 or batch_no == total_batches:
+                logger.info("baostock 进度 %d/%d 只 (批次 %d/%d, 失败 %d)",
+                            done_count, len(sym_list), batch_no, total_batches, fail_count)
 
             # 在批次之间主动让出 CPU / 事件循环，给其他请求插队机会
             if i + BATCH_SIZE < len(sym_list):

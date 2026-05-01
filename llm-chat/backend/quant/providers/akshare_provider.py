@@ -325,20 +325,38 @@ class AKShareProvider:
         if not symbols:
             return pd.DataFrame()
 
+        total = len(symbols)
+        done = 0
+        failed = 0
+        lock = asyncio.Lock()
+
         async def _one(sym: str) -> pd.DataFrame:
+            nonlocal done, failed
             async with self._sem:
                 try:
                     df = await asyncio.to_thread(self._fetch_hist, sym, start, end, adjust)
+                    async with lock:
+                        done += 1
                     if df.empty:
+                        async with lock:
+                            failed += 1
                         return df
                     df = df.copy()
                     df["symbol"] = sym
+                    async with lock:
+                        if done % 200 == 0 or done == total:
+                            logger.info("akshare 进度 %d/%d 只 (失败 %d)", done, total, failed)
                     return df
                 except Exception as exc:
-                    logger.warning("AKShare 拉取 %s 日线失败: %s", sym, exc)
+                    async with lock:
+                        done += 1
+                        failed += 1
+                    logger.debug("AKShare 拉取 %s 日线失败: %s", sym, exc)
                     return pd.DataFrame()
 
         results = await asyncio.gather(*[_one(s) for s in symbols])
+        if failed:
+            logger.info("akshare 完成 %d/%d 只 (成功 %d, 失败 %d)", total, total, total - failed, failed)
         non_empty = [r for r in results if not r.empty]
         if not non_empty:
             return pd.DataFrame()
