@@ -144,21 +144,28 @@ async def is_spot_fresh(
 
 
 async def write_bars(market: str, df: pd.DataFrame) -> int:
-    """按 date 列拆分写入每日文件（一只股票多日的 long 格式 → 按日分桶）。"""
+    """按 date 列拆分写入每日文件（合并已有数据，按 symbol 去重）。"""
     if df is None or df.empty or "date" not in df.columns:
         return 0
 
-    def _split_and_write() -> int:
+    def _split_and_merge() -> int:
         total = 0
         days = pd.to_datetime(df["date"]).dt.date.unique()
         for d in days:
             sub = df[pd.to_datetime(df["date"]).dt.date == d]
             if sub.empty:
                 continue
+            # 合并已有数据，按 (symbol, date) 去重，保留最新
+            existing = _sync_read_df(bars_path(market, d))
+            if existing is not None and not existing.empty:
+                merged = pd.concat([existing, sub], ignore_index=True)
+                if "symbol" in merged.columns and "date" in merged.columns:
+                    merged = merged.drop_duplicates(subset=["symbol", "date"], keep="last")
+                sub = merged
             total += _sync_write_df(bars_path(market, d), sub.reset_index(drop=True))
         return total
 
-    size = await asyncio.to_thread(_split_and_write)
+    size = await asyncio.to_thread(_split_and_merge)
     logger.info("bars 写盘 market=%s days=%d rows=%d size=%dKB",
                 market, df["date"].nunique(), len(df), size // 1024)
     return size

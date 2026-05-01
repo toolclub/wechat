@@ -109,6 +109,12 @@ class BaoStockProvider:
             fail_count += len(batch) - batch_done
             if not df_batch.empty:
                 all_results.append(df_batch)
+                # 增量写盘：每批完成立刻落盘，筛选请求在预热中途就能命中缓存
+                try:
+                    from quant import cache_disk as _cd
+                    await _cd.write_bars("cn_a", df_batch)
+                except Exception:
+                    pass
 
             if batch_no % 50 == 1 or batch_no == total_batches:
                 logger.info("baostock 进度 %d/%d 只 (批次 %d/%d, 失败 %d)",
