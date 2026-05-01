@@ -130,6 +130,8 @@ class BaoStockProvider:
     async def _call_sync(self, fn, *args, **kwargs):
         async with self._lock:
             def _run():
+                import socket
+                socket.setdefaulttimeout(15)  # 避免 Mac mini 上 TCP hang
                 if not self._login_if_needed():
                     raise RuntimeError("BaoStock 登录失败")
                 return fn(*args, **kwargs)
