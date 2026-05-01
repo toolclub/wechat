@@ -87,8 +87,13 @@ class WarmerState:
             from db.redis_state import _get_redis
             r = _get_redis()
             last_ts = await r.get("chatflow:quant:last_refresh_ts")
-            if last_ts and (time.time() - float(last_ts)) < 300 and not kinds:
-                 return {"status": "skipped", "reason": "global_cooldown_active", "worker": _WORKER_ID}
+            if last_ts:
+                try:
+                    last_val = float(last_ts)
+                except (ValueError, TypeError):
+                    last_val = 0.0
+                if (time.time() - last_val) < 300 and not kinds:
+                    return {"status": "skipped", "reason": "global_cooldown_active", "worker": _WORKER_ID}
         except Exception:
             pass
 

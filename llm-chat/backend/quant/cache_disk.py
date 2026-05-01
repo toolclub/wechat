@@ -172,17 +172,27 @@ async def read_bars_for_symbol(
 ) -> pd.DataFrame | None:
     """读取单只标的在 [start, end] 区间内的所有缓存 bars（纯读盘，不判断覆盖率）。"""
     def _read() -> pd.DataFrame | None:
+        t0 = time.perf_counter()
         bars_dir = _root() / "bars"
         frames = []
+        scanned = 0
         for p in sorted(bars_dir.glob(f"{market}_*.pkl.gz")):
             d = _parse_file_date(p)
             if d is None or d < start or d > end:
                 continue
+            scanned += 1
             sub = _sync_read_df(p)
             if sub is not None and "symbol" in sub.columns and not sub.empty:
                 match = sub[sub["symbol"].astype(str) == symbol]
                 if not match.empty:
                     frames.append(match)
+        elapsed = (time.perf_counter() - t0) * 1000
+        if elapsed > 500:
+            logger.info("单标扫描 symbol=%s scanned=%d found=%d elapsed=%.0fms",
+                        symbol, scanned, len(frames), elapsed)
+        else:
+            logger.debug("单标扫描 symbol=%s scanned=%d found=%d elapsed=%.0fms",
+                        symbol, scanned, len(frames), elapsed)
         if not frames:
             return None
         return pd.concat(frames, ignore_index=True)

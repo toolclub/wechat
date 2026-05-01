@@ -105,11 +105,25 @@ class AKShareProvider:
 
     @staticmethod
     def _ping() -> None:
-        import akshare as ak
-
-        df = ak.tool_trade_date_hist_sina()
-        if df is None or df.empty:
-            raise RuntimeError("交易日历为空")
+        """用东方财富 HTTP API 探活（与 daily_bars 同源）。"""
+        try:
+            import httpx
+        except ImportError:
+            raise RuntimeError("httpx 未安装")
+        url = "https://82.push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": "1", "pz": "1", "po": "1", "np": "1",
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": "2", "invt": "2", "fid": "f12",
+            "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
+            "fields": "f12",
+        }
+        with httpx.Client(timeout=10.0, http2=False) as c:
+            r = c.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+            if data is None or not isinstance(data.get("data"), dict):
+                raise RuntimeError("EM clist 响应结构异常")
 
     # ── 列表 / 快照 ────────────────────────────────────────────────────────
 
