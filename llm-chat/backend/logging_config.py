@@ -73,9 +73,6 @@ def setup_logging(log_dir: str) -> None:
     _prompt_logger.addHandler(pf)
 
     # ── 量化/定时任务专用日志（独立文件，不传播到 chatflow.log）─────────────────
-    timer_logger = logging.getLogger("quant.timer")
-    timer_logger.propagate = False            # 不写入 chatflow.log
-    timer_logger.setLevel(logging.INFO)
     tf = RotatingFileHandler(
         _log_dir / "chatflow-timer.log",
         maxBytes=20 * 1024 * 1024,
@@ -83,7 +80,14 @@ def setup_logging(log_dir: str) -> None:
         encoding="utf-8",
     )
     tf.setFormatter(fmt)
-    timer_logger.addHandler(tf)
+
+    # quant 父 logger：统一收纳所有量化子模块到 timer.log
+    quant_logger = logging.getLogger("quant")
+    quant_logger.propagate = False          # 不写入 chatflow.log
+    quant_logger.setLevel(logging.INFO)
+    quant_logger.addHandler(tf)
+
+    # quant.timer 传播到 quant（quant.propagate=False 已阻断到 root）
 
 
 def log_prompt(
