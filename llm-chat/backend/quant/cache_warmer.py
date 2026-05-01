@@ -78,6 +78,8 @@ class WarmerState:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+        # 释放 master 锁，避免下次启动被旧锁阻塞
+        await _release_master_lock()
         logger.info("warmer 已停止")
 
     async def trigger_now(self, kinds: list[str] | None = None) -> dict:
@@ -152,9 +154,10 @@ class WarmerState:
             pass
 
     async def _try_acquire_master_lock(self) -> bool:
-        """尝试成为 master worker（Redis SETNX，TTL 120s）。
+        """尝试成为 master worker（Redis SETNX，TTL 600s）。
 
-        每次 tick 调用一次，自动续期。Redis 不可用时直接放行（单机模式）。
+        检测旧容器残留锁：hostname 不匹配时强制接管。
+        Redis 不可用时直接放行（单机模式）。
         """
         try:
             from db.redis_state import _get_redis  # type: ignore
@@ -165,14 +168,20 @@ class WarmerState:
             )
             if ok:
                 return True
-            # 锁已存在 → 检查是否是自己持有（续期）
             cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
             if cur == _WORKER_ID:
                 await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
                 return True
+            # 锁存在但 worker 不同 → 检测是否旧容器残留
+            if cur and ":" in cur:
+                cur_host = cur.rsplit(":", 1)[0]
+                my_host = _WORKER_ID.rsplit(":", 1)[0]
+                if cur_host != my_host:
+                    logger.info("检测到旧容器 master 锁 (%s)，强制接管", cur[:40])
+                    await r.set(f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID, ex=600)
+                    return True
             return False
         except Exception:
-            # Redis 不可用 → 单机模式，每个 worker 都是 master
             return True
 
     async def _tick(self) -> None:
@@ -211,7 +220,7 @@ class WarmerState:
         # 1. 尝试获取全局会话大锁（整个预热过程只能有 1 个 Worker 活跃）
         session_lock_token = await _acquire_lock("global_session")
         if not session_lock_token:
-            logger.debug("⏱️ [%s] 预热跳过：另一个 Worker 正在执行全局任务", mode)
+            logger.info("⏱️ [%s] 预热跳过：另一个 Worker 正在执行全局任务", mode)
             return
 
         logger.info("⏱️ [%s] 🚀 开启全局独占预热任务 | Worker: %s | 计划: %s", mode, _WORKER_ID, kinds)
@@ -313,13 +322,16 @@ class WarmerState:
                     break
                 except asyncio.TimeoutError:
                     cnt += 1
-                    # 续期全局会话锁（防止 30min TTL 不够）
+                    # 续期全局会话锁 + master 锁（防止超长 bars 拉取导致锁过期）
                     try:
                         from db.redis_state import _get_redis
                         r = _get_redis()
                         cur = await r.get(f"{_LOCK_KEY_PREFIX}:global_session")
-                        if cur and cur.startswith(_WORKER_ID.rsplit(":", 1)[0]):
+                        if cur and _WORKER_ID.rsplit(":", 1)[0] in str(cur):
                             await r.expire(f"{_LOCK_KEY_PREFIX}:global_session", 1800)
+                        cur_m = await r.get(f"{_LOCK_KEY_PREFIX}:master")
+                        if cur_m == _WORKER_ID:
+                            await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
                     except Exception:
                         pass
                     logger.info("    ∟ 仍在拉取 K 线… 已耗时 ~%d min", cnt)
@@ -407,6 +419,18 @@ class WarmerState:
 
 
 # ── Redis 锁 ────────────────────────────────────────────────────────────────
+
+async def _release_master_lock() -> None:
+    """释放当前 worker 持有的 master 锁。"""
+    try:
+        from db.redis_state import _get_redis  # type: ignore
+        r = _get_redis()
+        cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
+        if cur == _WORKER_ID:
+            await r.delete(f"{_LOCK_KEY_PREFIX}:master")
+    except Exception:
+        pass
+
 
 async def _acquire_lock(kind: str) -> str | None:
     """成功返回 token，失败返回 None。Redis 不可用时直接放行（单机模式）。"""
