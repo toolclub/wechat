@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
-import { ArrowLeft, TrendCharts, TopRight, Warning, InfoFilled, PieChart, DataAnalysis, List } from '@element-plus/icons-vue'
+import { ArrowLeft, TrendCharts, TopRight, Warning, InfoFilled, PieChart, DataAnalysis, List, Connection, Compass } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
 const props = defineProps<{
@@ -18,13 +18,19 @@ let radarInstance: echarts.ECharts | null = null
 const loading = ref(true)
 const error = ref('')
 
-// 获取涨跌幅颜色
+// ── 工具函数 ──
 function getChangeColor(val: number | string) {
   const n = typeof val === 'number' ? val : parseFloat(val as string)
   if (isNaN(n) || n === 0) return 'var(--cf-text-3)'
   return n > 0 ? '#F25D59' : '#00B578'
 }
 
+function formatNum(val: any, dec = 2) {
+  if (val === undefined || val === null || isNaN(val)) return '-'
+  return Number(val).toFixed(dec)
+}
+
+// ── ECharts 初始化 ──
 async function initChart() {
   if (!chartRef.value) return
   loading.value = true
@@ -34,37 +40,38 @@ async function initChart() {
     const data = await fetchStockChart(props.stock.symbol)
     
     if (!data.dates || data.dates.length === 0) {
-      error.value = '未获取到 K 线数据'
+      error.value = '未获取到 K 线数据，正在后台为您同步，请稍后刷新。'
       return
     }
 
     chartInstance = echarts.init(chartRef.value)
-    
     const upColor = '#F25D59'
     const downColor = '#00B578'
 
     const option = {
       backgroundColor: 'transparent',
-      animation: true,
+      animationDuration: 800,
       legend: {
         top: 0,
-        left: 'center',
+        right: 20,
         data: ['K线', 'MA5', 'MA10', 'MA20'],
-        textStyle: { color: '#9499A0', fontSize: 11 }
+        textStyle: { color: '#9499A0', fontSize: 11 },
+        itemWidth: 10,
+        itemHeight: 2
       },
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'cross', lineStyle: { color: '#00AEEC', width: 1, type: 'dashed' } },
         borderWidth: 0,
-        backgroundColor: 'rgba(255, 255, 255, 0.95)',
-        padding: 10,
+        backgroundColor: 'rgba(255, 255, 255, 0.98)',
+        padding: 12,
         textStyle: { color: '#18191C', fontSize: 12 },
-        extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.1); border-radius: 8px;'
+        extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,0.15); border-radius: 8px;'
       },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
-        { left: '40', right: '10', top: '30', height: '65%' },
-        { left: '40', right: '10', top: '75%', height: '15%' }
+        { left: '20', right: '50', top: '35', height: '65%', containLabel: true },
+        { left: '20', right: '50', top: '78%', height: '15%', containLabel: true }
       ],
       xAxis: [
         {
@@ -72,7 +79,7 @@ async function initChart() {
           data: data.dates,
           boundaryGap: false,
           axisLine: { lineStyle: { color: 'var(--cf-border-soft)' } },
-          axisLabel: { color: '#9499A0', fontSize: 10 },
+          axisLabel: { color: '#9499A0', fontSize: 10, maxInterval: 30 },
           splitLine: { show: false },
           min: 'dataMin', max: 'dataMax'
         },
@@ -91,7 +98,7 @@ async function initChart() {
       yAxis: [
         { 
           scale: true, 
-          position: 'left',
+          position: 'right',
           axisLabel: { color: '#9499A0', fontSize: 10 },
           splitLine: { lineStyle: { color: 'var(--cf-border-soft)', type: 'dashed' } }
         },
@@ -106,8 +113,20 @@ async function initChart() {
         }
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 80, end: 100 },
-        { show: false, xAxisIndex: [0, 1], type: 'slider', start: 80, end: 100 }
+        { type: 'inside', xAxisIndex: [0, 1], start: 85, end: 100 },
+        { 
+          show: true, 
+          xAxisIndex: [0, 1], 
+          type: 'slider', 
+          bottom: '2%', 
+          height: 20,
+          borderColor: 'transparent',
+          fillerColor: 'rgba(0, 174, 236, 0.1)',
+          handleIcon: 'path://M10.7,11.9v-1.3H9.3v1.3c-4.9,0.3-8.8,4.4-8.8,9.4c0,5,3.9,9.1,8.8,9.4v1.3h1.3v-1.3c4.9-0.3,8.8-4.4,8.8-9.4C19.5,16.3,15.6,12.2,10.7,11.9z',
+          handleSize: '100%',
+          handleStyle: { color: '#00AEEC' },
+          textStyle: { color: 'transparent' }
+        }
       ],
       series: [
         {
@@ -119,16 +138,16 @@ async function initChart() {
             borderColor: upColor, borderColor0: downColor
           },
         },
-        { name: 'MA5', type: 'line', data: data.ma5, smooth: true, showSymbol: false, lineStyle: { color: '#FF9736', width: 1, opacity: 0.8 } },
-        { name: 'MA10', type: 'line', data: data.ma10, smooth: true, showSymbol: false, lineStyle: { color: '#00AEEC', width: 1, opacity: 0.8 } },
-        { name: 'MA20', type: 'line', data: data.ma20, smooth: true, showSymbol: false, lineStyle: { color: '#FB7299', width: 1, opacity: 0.8 } },
+        { name: 'MA5', type: 'line', data: data.ma5, smooth: true, showSymbol: false, lineStyle: { color: '#FF9736', width: 1.2 } },
+        { name: 'MA10', type: 'line', data: data.ma10, smooth: true, showSymbol: false, lineStyle: { color: '#00AEEC', width: 1.2 } },
+        { name: 'MA20', type: 'line', data: data.ma20, smooth: true, showSymbol: false, lineStyle: { color: '#FB7299', width: 1.2 } },
         {
           name: '成交量',
           type: 'bar',
           xAxisIndex: 1, yAxisIndex: 1,
           data: data.volumes.map((v: any) => ({
             value: v[1],
-            itemStyle: { color: v[2] === 1 ? upColor : downColor, opacity: 0.7 }
+            itemStyle: { color: v[2] === 1 ? upColor : downColor, opacity: 0.6 }
           }))
         }
       ]
@@ -144,15 +163,12 @@ async function initChart() {
 async function initRadar() {
   if (!radarRef.value) return
   radarInstance = echarts.init(radarRef.value)
-  
   const v = props.stock.raw || {}
   const technical = props.stock.technical || 0
   const fundamental = props.stock.fundamental || 0
   const liquidity = props.stock.liquidity || 0
-  
-  // 模拟一些其他维度的展示逻辑
-  const volatilityScore = Math.max(0, Math.min(100, 100 - (v.volatility || 0) * 20))
-  const momentumScore = Math.max(0, Math.min(100, (v.momentum || 0) + 50))
+  const volScore = Math.max(0, Math.min(100, 100 - (v.volatility || 0) * 15))
+  const momScore = Math.max(0, Math.min(100, (v.momentum || 0) + 50))
 
   const option = {
     radar: {
@@ -160,26 +176,31 @@ async function initRadar() {
         { name: '技术面', max: 100 },
         { name: '基本面', max: 100 },
         { name: '流动性', max: 100 },
-        { name: '稳定性', max: 100 },
-        { name: '动量', max: 100 }
+        { name: '风控度', max: 100 },
+        { name: '成长性', max: 100 }
       ],
       shape: 'circle',
       splitNumber: 4,
-      axisName: { color: '#9499A0', fontSize: 11 },
+      axisName: { color: '#9499A0', fontSize: 11, fontWeight: 600 },
       splitLine: { lineStyle: { color: 'var(--cf-border-soft)' } },
-      splitArea: { show: false },
+      splitArea: { show: true, areaStyle: { color: ['rgba(244,245,247,0.3)', 'rgba(255,255,255,0.1)'] } },
       axisLine: { lineStyle: { color: 'var(--cf-border-soft)' } }
     },
     series: [{
       type: 'radar',
       data: [{
-        value: [technical, fundamental, liquidity, volatilityScore, momentumScore],
-        name: '综合评估',
-        itemStyle: { color: '#00AEEC' },
-        areaStyle: { color: 'rgba(0, 174, 236, 0.2)' },
-        lineStyle: { width: 2 },
+        value: [technical, fundamental, liquidity, volScore, momScore],
+        name: '多维诊断',
         symbol: 'circle',
-        symbolSize: 4
+        symbolSize: 5,
+        itemStyle: { color: '#00AEEC' },
+        areaStyle: { 
+          color: new echarts.graphic.RadialGradient(0.5, 0.5, 1, [
+            { color: 'rgba(0, 174, 236, 0.5)', offset: 0 },
+            { color: 'rgba(0, 174, 236, 0.05)', offset: 1 }
+          ])
+        },
+        lineStyle: { width: 3, color: '#00AEEC', shadowBlur: 10, shadowColor: 'rgba(0, 174, 236, 0.4)' }
       }]
     }]
   }
@@ -204,164 +225,128 @@ onUnmounted(() => {
   radarInstance?.dispose()
 })
 
+function getXueqiuUrl() {
+  const [code, market] = props.stock.symbol.split('.')
+  const xqMarket = market === 'SH' ? 'SH' : 'SZ'
+  return `https://xueqiu.com/S/${xqMarket}${code}`
+}
+
 const scoreColor = computed(() => {
   const s = props.stock.total || 0
   if (s >= 70) return '#FB7299'
   if (s >= 60) return '#00AEEC'
   return '#9499A0'
 })
-
-function getXueqiuUrl() {
-  const [code, market] = props.stock.symbol.split('.')
-  const xqMarket = market === 'SH' ? 'SH' : 'SZ'
-  return `https://xueqiu.com/S/${xqMarket}${code}`
-}
 </script>
 
 <template>
-  <div class="stock-detail-container">
-    <!-- Header: 股票基本概况 -->
-    <div class="stock-header card-glow">
+  <div class="fintech-dashboard">
+    <!-- 1. Top Glass Header -->
+    <div class="glass-header card-glow">
       <div class="header-left">
         <el-button class="back-btn" :icon="ArrowLeft" circle @click="emit('back')" />
-        <div class="title-group">
-          <div class="name-row">
-            <h1 class="stock-name">{{ stock.name }}</h1>
-            <span class="stock-symbol">{{ stock.symbol }}</span>
+        <div class="stock-title">
+          <div class="stock-name-row">
+            <span class="name">{{ stock.name }}</span>
+            <span class="symbol">{{ stock.symbol }}</span>
+            <el-tag size="small" class="bili-tag-filled">A股</el-tag>
           </div>
-          <div class="tags-row">
-            <el-tag size="small" class="bili-tag">A股主板</el-tag>
-            <el-tag size="small" type="info" plain class="bili-tag">{{ stock.industry || '通用板块' }}</el-tag>
+          <div class="industry-row">
+            <el-icon><Compass /></el-icon> {{ stock.industry || '综合性行业' }}
           </div>
         </div>
       </div>
 
       <div class="header-price" v-if="stock.price">
-        <div class="main-price" :style="{color: getChangeColor(stock.pct_chg)}">{{ stock.price.toFixed(2) }}</div>
-        <div class="price-meta">
-          <span :style="{color: getChangeColor(stock.pct_chg)}">
-            {{ stock.pct_chg > 0 ? '+' : '' }}{{ stock.pct_chg.toFixed(2) }}%
-          </span>
+        <div class="price-val" :style="{color: getChangeColor(stock.pct_chg)}">{{ formatNum(stock.price) }}</div>
+        <div class="price-pct" :style="{color: getChangeColor(stock.pct_chg)}">
+          {{ stock.pct_chg > 0 ? '+' : '' }}{{ formatNum(stock.pct_chg) }}%
         </div>
       </div>
 
-      <div class="header-stats">
-        <div class="stat-item">
-          <div class="label">综合评分</div>
-          <div class="value total-score" :style="{color: scoreColor}">{{ stock.total.toFixed(1) }}</div>
+      <div class="header-metrics">
+        <div class="metric-box">
+          <span class="m-label">综合评分</span>
+          <span class="m-value score" :style="{color: scoreColor}">{{ formatNum(stock.total, 1) }}</span>
         </div>
-        <div class="stat-sep"></div>
-        <div class="stat-item">
-          <div class="label">流通市值</div>
-          <div class="value">{{ stock.mkt_cap?.toFixed(1) || '-' }} 亿</div>
+        <div class="m-divider"></div>
+        <div class="metric-box">
+          <span class="m-label">市值 (亿)</span>
+          <span class="m-value">{{ formatNum(stock.mkt_cap, 1) }}</span>
         </div>
-        <div class="stat-sep"></div>
-        <div class="stat-item">
-          <div class="label">市盈率(TTM)</div>
-          <div class="value">{{ stock.pe?.toFixed(1) || '-' }}</div>
+        <div class="m-divider"></div>
+        <div class="metric-box">
+          <span class="m-label">PE(TTM)</span>
+          <span class="m-value">{{ formatNum(stock.pe, 1) }}</span>
         </div>
       </div>
 
       <div class="header-right">
-        <el-link :href="getXueqiuUrl()" target="_blank" type="primary" :underline="false" class="xq-btn">
-          雪球实时行情 <el-icon><TopRight /></el-icon>
-        </el-link>
+        <el-button type="primary" class="xq-link-btn" @click="window.open(getXueqiuUrl(), '_blank')">
+          <el-icon style="margin-right: 4px;"><TopRight /></el-icon> 实时行情
+        </el-button>
       </div>
     </div>
 
-    <!-- Main Content -->
-    <div class="stock-content">
-      <!-- Left: K-Line & Market Data -->
-      <div class="content-left">
-        <!-- 行情九宫格 -->
-        <div class="market-grid card-glow">
-          <div class="grid-item">
-            <span class="label">今开</span>
-            <span class="val" :style="{color: getChangeColor((stock.raw?.open || 0) - (stock.raw?.prev_close || 0))}">
-              {{ stock.raw?.open?.toFixed(2) || '-' }}
-            </span>
-          </div>
-          <div class="grid-item">
-            <span class="label">最高</span>
-            <span class="val" style="color: #F25D59">{{ stock.raw?.high?.toFixed(2) || '-' }}</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">成交量</span>
-            <span class="val">{{ (stock.raw?.volume || 0).toFixed(1) }} 万手</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">昨收</span>
-            <span class="val">{{ stock.raw?.prev_close?.toFixed(2) || '-' }}</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">最低</span>
-            <span class="val" style="color: #00B578">{{ stock.raw?.low?.toFixed(2) || '-' }}</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">成交额</span>
-            <span class="val">{{ stock.raw?.amount?.toFixed(2) || '-' }} 亿</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">换手率</span>
-            <span class="val">{{ stock.raw?.turnover_rate?.toFixed(2) || '-' }}%</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">振幅</span>
-            <span class="val">{{ stock.raw?.amplitude?.toFixed(2) || '-' }}%</span>
-          </div>
-          <div class="grid-item">
-            <span class="label">量比</span>
-            <span class="val">{{ stock.raw?.volume_ratio?.toFixed(2) || '-' }}</span>
+    <!-- 2. Main Layout -->
+    <div class="main-grid">
+      <!-- Left: Multi-pane Chart Area -->
+      <div class="chart-area content-card card-glow">
+        <div class="area-header">
+          <span class="area-title"><el-icon><TrendCharts /></el-icon> 历史走势 (120日)</span>
+          <div class="period-switcher">
+            <span class="p-btn active">日K</span>
+            <span class="p-btn">分时</span>
           </div>
         </div>
+        
+        <!-- 九宫格实时面板（嵌入在图表上方） -->
+        <div class="grid-panel">
+          <div class="grid-cell"><span class="l">今开</span><span class="v" :style="{color: getChangeColor((stock.raw?.open || 0) - (stock.raw?.prev_close || 0))}">{{ formatNum(stock.raw?.open) }}</span></div>
+          <div class="grid-cell"><span class="l">最高</span><span class="v" style="color: #F25D59">{{ formatNum(stock.raw?.high) }}</span></div>
+          <div class="grid-cell"><span class="l">成交量</span><span class="v">{{ formatNum((stock.raw?.volume || 0), 1) }}万</span></div>
+          <div class="grid-cell"><span class="l">昨收</span><span class="v">{{ formatNum(stock.raw?.prev_close) }}</span></div>
+          <div class="grid-cell"><span class="l">最低</span><span class="v" style="color: #00B578">{{ formatNum(stock.raw?.low) }}</span></div>
+          <div class="grid-cell"><span class="l">成交额</span><span class="v">{{ formatNum(stock.raw?.amount, 2) }}亿</span></div>
+          <div class="grid-cell"><span class="l">换手</span><span class="v">{{ formatNum(stock.raw?.turnover_rate) }}%</span></div>
+          <div class="grid-cell"><span class="l">振幅</span><span class="v">{{ formatNum(stock.raw?.amplitude) }}%</span></div>
+          <div class="grid-cell"><span class="l">量比</span><span class="v">{{ formatNum(stock.raw?.volume_ratio) }}</span></div>
+        </div>
 
-        <!-- 巨幅 K 线 -->
-        <div class="chart-box card-glow">
-          <div class="box-header">
-            <div class="title"><el-icon><TrendCharts /></el-icon> 历史走势 (Daily)</div>
-            <div class="actions">
-              <span class="act-item active">日K</span>
-              <span class="act-item">均线叠加</span>
-            </div>
+        <div v-loading="loading" class="chart-viewport">
+          <div v-if="error" class="error-ui">
+            <el-icon size="40"><Warning /></el-icon>
+            <p>{{ error }}</p>
           </div>
-          <div v-loading="loading" class="chart-wrapper">
-            <div v-if="error" class="chart-error">{{ error }}</div>
-            <div ref="chartRef" class="echarts-dom"></div>
-          </div>
+          <div ref="chartRef" class="echarts-dom"></div>
         </div>
       </div>
 
-      <!-- Right: AI Analysis & Factor Scores -->
-      <div class="content-right">
-        <!-- 因子雷达图 -->
-        <div class="radar-box card-glow">
-          <div class="box-header">
-            <div class="title"><el-icon><PieChart /></el-icon> 因子雷达</div>
-          </div>
-          <div class="radar-wrapper">
+      <!-- Right: AI Diagnosis & Insights -->
+      <div class="insight-area">
+        <!-- Radar Section -->
+        <div class="radar-card content-card card-glow">
+          <div class="area-header"><span class="area-title"><el-icon><PieChart /></el-icon> 多维评估</span></div>
+          <div class="radar-viewport">
             <div ref="radarRef" class="echarts-dom"></div>
           </div>
         </div>
 
-        <!-- 核心特征 -->
-        <div class="tags-box card-glow">
-          <div class="box-header">
-            <div class="title"><el-icon><DataAnalysis /></el-icon> 核心特征</div>
-          </div>
-          <div class="tags-list">
-            <span v-for="tag in stock.reasons" :key="tag" class="bili-tag-lg">{{ tag }}</span>
-            <div v-if="!stock.reasons?.length" class="empty-hint">模型暂未识别显著特征</div>
+        <!-- Tags & Analysis -->
+        <div class="feature-card content-card card-glow">
+          <div class="area-header"><span class="area-title"><el-icon><DataAnalysis /></el-icon> 核心特征</span></div>
+          <div class="tags-wall">
+            <span v-for="tag in stock.reasons" :key="tag" class="bili-tag-fancy">{{ tag }}</span>
+            <div v-if="!stock.reasons?.length" class="empty-state">未识别到特定技术特征</div>
           </div>
         </div>
 
-        <!-- 风险警告 -->
-        <div class="risk-box card-glow" v-if="stock.risk_notes?.length">
-          <div class="box-header">
-            <div class="title risk"><el-icon><Warning /></el-icon> 风险提示</div>
-          </div>
+        <!-- Risk Board -->
+        <div class="risk-card content-card card-glow" v-if="stock.risk_notes?.length">
+          <div class="area-header"><span class="area-title risk"><el-icon><Warning /></el-icon> 风险监测</span></div>
           <div class="risk-list">
-            <div v-for="risk in stock.risk_notes" :key="risk" class="risk-item">
-              <span class="dot"></span> {{ risk }}
+            <div v-for="risk in stock.risk_notes" :key="risk" class="risk-line">
+              <span class="bullet"></span> {{ risk }}
             </div>
           </div>
         </div>
@@ -371,132 +356,112 @@ function getXueqiuUrl() {
 </template>
 
 <style scoped>
-.stock-detail-container {
+.fintech-dashboard {
   flex: 1;
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  background: var(--cf-bg);
   padding: 16px;
   gap: 16px;
-  background-color: var(--cf-bg);
-  height: 100vh;
   overflow: hidden;
   box-sizing: border-box;
 }
 
-/* ── Common Card Style ── */
-.card-glow {
+/* ── Glass Header ── */
+.glass-header {
+  height: 90px;
   background: var(--cf-card);
   border: 1px solid var(--cf-border-soft);
-  border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.card-glow:hover {
-  border-color: var(--cf-border-glow);
-  box-shadow: 0 8px 24px rgba(0, 174, 236, 0.08);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
 }
 
-.box-header {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--cf-border-soft);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.box-header .title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--cf-text-2);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.box-header .title.risk { color: #F25D59; }
-
-/* ── Header Section ── */
-.stock-header {
-  height: 90px;
-  display: flex;
-  align-items: center;
-  padding: 0 20px;
-}
 .header-left { display: flex; align-items: center; gap: 20px; flex: 1; }
-.back-btn { border: none; background: var(--cf-bg-2); }
-.back-btn:hover { background: #00AEEC; color: #fff; }
+.back-btn { background: var(--cf-bg-2); border: none; font-weight: bold; }
+.back-btn:hover { background: #00AEEC; color: #fff; transform: scale(1.1); }
 
-.title-group { display: flex; flex-direction: column; gap: 4px; }
-.name-row { display: flex; align-items: baseline; gap: 10px; }
-.stock-name { font-size: 24px; font-weight: 800; margin: 0; color: var(--cf-text-1); }
-.stock-symbol { font-family: monospace; font-size: 14px; color: var(--cf-text-3); }
-.tags-row { display: flex; gap: 6px; }
+.stock-title { display: flex; flex-direction: column; gap: 2px; }
+.stock-name-row { display: flex; align-items: baseline; gap: 10px; }
+.stock-name-row .name { font-size: 26px; font-weight: 900; color: var(--cf-text-1); }
+.stock-name-row .symbol { font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--cf-text-4); }
+.industry-row { font-size: 12px; color: var(--cf-text-4); display: flex; align-items: center; gap: 5px; }
 
-.header-price { flex: 0.8; display: flex; flex-direction: column; align-items: center; }
-.main-price { font-size: 32px; font-weight: 800; line-height: 1; }
-.price-meta { font-size: 14px; font-weight: 600; margin-top: 4px; }
+.header-price { flex: 0.7; display: flex; flex-direction: column; align-items: center; border-left: 1px solid var(--cf-border-soft); }
+.price-val { font-size: 34px; font-weight: 800; line-height: 1.1; font-family: 'Inter', sans-serif; }
+.price-pct { font-size: 14px; font-weight: 700; }
 
-.header-stats { flex: 1.5; display: flex; align-items: center; justify-content: center; gap: 24px; }
-.stat-item { display: flex; flex-direction: column; align-items: center; }
-.stat-item .label { font-size: 11px; color: var(--cf-text-4); margin-bottom: 4px; }
-.stat-item .value { font-size: 18px; font-weight: 700; color: var(--cf-text-2); }
-.stat-item .value.total-score { font-size: 22px; }
-.stat-sep { width: 1px; height: 30px; background: var(--cf-border-soft); }
+.header-metrics { flex: 1.5; display: flex; align-items: center; justify-content: center; gap: 32px; border-left: 1px solid var(--cf-border-soft); }
+.metric-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.m-label { font-size: 10px; color: var(--cf-text-4); text-transform: uppercase; letter-spacing: 0.5px; }
+.m-value { font-size: 18px; font-weight: 700; color: var(--cf-text-2); }
+.m-value.score { font-size: 24px; }
+.m-divider { width: 1px; height: 32px; background: var(--cf-border-soft); }
 
-.header-right { flex: 1; display: flex; justify-content: flex-end; }
-.xq-btn { font-weight: 700; background: var(--cf-active); padding: 8px 16px; border-radius: 20px; }
+.header-right { flex: 0.8; display: flex; justify-content: flex-end; }
+.xq-link-btn { border-radius: 99px; padding: 10px 20px; font-weight: 800; background: #00AEEC; border: none; }
 
-/* ── Content Layout ── */
-.stock-content { flex: 1; display: flex; gap: 16px; min-height: 0; }
+/* ── Grid Layout ── */
+.main-grid { flex: 1; display: flex; gap: 16px; min-height: 0; }
 
-/* Left Content */
-.content-left { flex: 2.5; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.chart-area { flex: 2.8; display: flex; flex-direction: column; min-width: 0; padding: 20px; position: relative; }
+.insight-area { flex: 1; display: flex; flex-direction: column; gap: 16px; min-width: 320px; overflow-y: auto; }
 
-.market-grid {
+.content-card { background: var(--cf-card); border-radius: 16px; border: 1px solid var(--cf-border-soft); }
+.area-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.area-title { font-size: 14px; font-weight: 800; color: var(--cf-text-2); display: flex; align-items: center; gap: 8px; }
+.area-title.risk { color: #F25D59; }
+
+/* 行情九宫格 */
+.grid-panel {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  padding: 16px;
-}
-.grid-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  gap: 8px;
   background: var(--cf-bg-2);
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  margin-bottom: 20px;
 }
-.grid-item .label { font-size: 12px; color: var(--cf-text-4); }
-.grid-item .val { font-size: 14px; font-weight: 700; font-family: monospace; }
+.grid-cell { display: flex; justify-content: space-between; align-items: baseline; }
+.grid-cell .l { font-size: 11px; color: var(--cf-text-4); }
+.grid-cell .v { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
 
-.chart-box { flex: 1; display: flex; flex-direction: column; }
-.chart-wrapper { flex: 1; position: relative; }
+.chart-viewport { flex: 1; width: 100%; position: relative; }
 .echarts-dom { width: 100%; height: 100%; }
 
-/* Right Content */
-.content-right { flex: 1; display: flex; flex-direction: column; gap: 16px; min-width: 300px; overflow-y: auto; }
+/* ── Sidebar Cards ── */
+.radar-card { height: 300px; padding: 20px; }
+.radar-viewport { flex: 1; height: calc(100% - 30px); }
 
-.radar-box { height: 260px; }
-.radar-wrapper { flex: 1; height: calc(100% - 45px); }
-
-.tags-box { padding-bottom: 20px; }
-.tags-list { padding: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
-.bili-tag-lg {
-  background: linear-gradient(135deg, #F0F9FF 0%, #E3F2FD 100%);
-  color: #0077B6;
-  border: 1px solid #BEE3F8;
-  padding: 8px 16px;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 700;
+.feature-card { padding: 20px; }
+.tags-wall { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 0; }
+.bili-tag-fancy {
+  background: linear-gradient(135deg, #00AEEC 0%, #FB7299 100%);
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 4px 10px rgba(0, 174, 236, 0.2);
 }
 
-.risk-box { background: #FFF9F9; border-color: #FFE3E3; }
-.risk-list { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-.risk-item { font-size: 13px; color: #444; display: flex; gap: 8px; align-items: flex-start; }
-.risk-item .dot { width: 6px; height: 6px; background: #F25D59; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+.risk-card { background: #FFF9F9; padding: 20px; border-color: #FFE3E3; }
+.risk-list { display: flex; flex-direction: column; gap: 12px; }
+.risk-line { font-size: 13px; color: #444; line-height: 1.5; display: flex; gap: 8px; }
+.risk-line .bullet { width: 6px; height: 6px; background: #F25D59; border-radius: 50%; margin-top: 7px; flex-shrink: 0; }
 
-.empty-hint { font-size: 12px; color: var(--cf-text-4); text-align: center; padding: 20px 0; font-style: italic; }
-.chart-error { height: 100%; display: flex; align-items: center; justify-content: center; color: #F25D59; font-weight: 600; }
+/* ── Effects ── */
+.card-glow { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03); transition: all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1); }
+.card-glow:hover { transform: translateY(-2px); border-color: var(--cf-border-glow); box-shadow: 0 12px 32px rgba(0, 174, 236, 0.1); }
 
-.act-item { font-size: 11px; padding: 2px 10px; border-radius: 4px; color: var(--cf-text-4); cursor: pointer; }
-.act-item.active { background: #00AEEC; color: #fff; }
+.period-switcher { display: flex; background: var(--cf-bg-2); padding: 3px; border-radius: 8px; gap: 4px; }
+.p-btn { font-size: 10px; padding: 4px 12px; border-radius: 6px; color: var(--cf-text-4); cursor: pointer; transition: 0.2s; }
+.p-btn.active { background: #fff; color: #00AEEC; font-weight: bold; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+
+.error-ui { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #F25D59; text-align: center; gap: 10px; }
+.empty-state { color: var(--cf-text-4); font-size: 12px; font-style: italic; width: 100%; text-align: center; padding: 20px 0; }
+
+.bili-tag-filled { background: #00AEEC; border: none; color: #fff; font-size: 10px; font-weight: bold; border-radius: 4px; }
 </style>
