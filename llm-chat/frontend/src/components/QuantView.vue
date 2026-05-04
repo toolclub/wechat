@@ -1,20 +1,74 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useQuant } from '../composables/useQuant'
-import { ChatLineRound, Filter, DataAnalysis, Warning, TrendCharts } from '@element-plus/icons-vue'
+import { ChatLineRound, Filter, DataAnalysis, Warning, TrendCharts, Money, Suitcase, Collection, Finished, Aim, Check, Search } from '@element-plus/icons-vue'
 
-const quant = useQuant()
+const quantCN = useQuant('cn_a')
+const quantUS = useQuant('us_stock')
+const activeMarket = ref<'cn_a' | 'us_stock'>('cn_a')
+
+// 当前活跃的量化状态对象
+const quant = computed(() => activeMarket.value === 'cn_a' ? quantCN : quantUS)
+
+// ── 搜索与分页 ──
+const searchQuery = ref('')
+const currentPage = ref(1)
+const pageSize = ref(10)
+
+const filteredRows = computed(() => {
+  const rows = quant.value.screenResult.value?.rows || []
+  if (!searchQuery.value) return rows
+  const q = searchQuery.value.toLowerCase()
+  return rows.filter(r => 
+    r.name.toLowerCase().includes(q) || 
+    r.symbol.toLowerCase().includes(q)
+  )
+})
+
+const paginatedRows = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  const end = start + pageSize.value
+  return filteredRows.value.slice(start, end)
+})
+
+// 当结果变化或搜索变化时，重置页码
+watch([() => quant.value.screenResult.value, searchQuery], () => {
+  currentPage.value = 1
+})
+
+const universeOptions = computed(() => {
+  if (activeMarket.value === 'cn_a') {
+    return [
+      { label: '全市场', value: 'all', desc: '4000+ A股样本', icon: Collection },
+      { label: '沪深300', value: 'hs300', desc: '核心蓝筹权重', icon: Finished },
+      { label: '中证500', value: 'zz500', desc: '中盘成长代表', icon: Aim }
+    ]
+  } else {
+    return [
+      { label: '全美市场', value: 'all', desc: '8000+ 美股样本', icon: Collection },
+      { label: '纳斯达克', value: 'nasdaq', desc: '科技创新先锋', icon: Finished },
+      { label: '标普 500', value: 'sp500', desc: '美股大盘基石', icon: Aim }
+    ]
+  }
+})
 
 let _statusTimer: number | null = null
 
 onMounted(() => {
-  quant.loadProviders()
-  quant.loadCacheStatus()
-  quant.checkActiveSession()
+  // 初始化两个市场的状态
+  quantCN.loadProviders()
+  quantCN.loadCacheStatus()
+  quantCN.checkActiveSession()
+  
+  quantUS.loadProviders()
+  // quantUS.loadCacheStatus() // 缓存状态是全局的，拉一份即可
+  quantUS.checkActiveSession()
+
   // 智能预热：进入页面自动触发，后端已实现 5min 冷却保护
-  quant.refreshCacheNow()
+  quantCN.refreshCacheNow()
+  
   // 每 30s 刷新一次缓存徽标
-  _statusTimer = window.setInterval(() => quant.loadCacheStatus(), 30_000) as unknown as number
+  _statusTimer = window.setInterval(() => quantCN.loadCacheStatus(), 30_000) as unknown as number
 })
 
 onUnmounted(() => {
@@ -23,13 +77,13 @@ onUnmounted(() => {
 
 const emit = defineEmits<{
   (e: 'switch-workspace', workspace: 'chat' | 'quant'): void
-  // 把 snapshot_id 抛给 App.vue（App 持有规范的 chat 实例，useChat 非单例不能在子组件里 send）
+  // 把 snapshot_id 抛给 App.vue
   (e: 'continue-with-snapshot', snapshotId: string): void
   (e: 'open-stock-detail', stock: any): void
 }>()
 
 function continueInChat() {
-  const snapId = quant.screenResult.value?.snapshot_id
+  const snapId = quant.value.screenResult.value?.snapshot_id
   if (!snapId) return
   emit('continue-with-snapshot', snapId)
   emit('switch-workspace', 'chat')
@@ -40,6 +94,11 @@ function getScoreColor(score: number): string {
   if (score >= 60) return '#00AEEC'
   return '#9499A0'
 }
+
+// 监听 tab 切换，可以根据需要做一些额外处理
+watch(activeMarket, (newMarket) => {
+  console.log('Switched to market:', newMarket)
+})
 </script>
 
 <template>
@@ -50,16 +109,32 @@ function getScoreColor(score: number): string {
         <el-icon class="header-icon"><TrendCharts /></el-icon>
         <span class="header-title">量化选股工作台</span>
         <span class="header-subtitle">Alpha 1.0</span>
+        
+        <div class="market-tabs">
+          <div 
+            class="market-tab" 
+            :class="{ active: activeMarket === 'cn_a' }"
+            @click="activeMarket = 'cn_a'"
+          >
+            <el-icon><Money /></el-icon> 中国 A 股
+          </div>
+          <div 
+            class="market-tab" 
+            :class="{ active: activeMarket === 'us_stock' }"
+            @click="activeMarket = 'us_stock'"
+          >
+            <el-icon><Suitcase /></el-icon> 美国股票
+          </div>
+        </div>
       </div>
       <div class="header-right">
         <!-- 缓存徽标：spot 数据时效 + 手动刷新 -->
-        <span class="cache-badge" :class="{ stale: !quant.cacheStatus.value?.spot_latest }">
-          <span class="cache-dot" :class="{ running: quant.cacheStatus.value?.warmer_running }"></span>
-          数据更新于 {{ quant.cacheAgeText.value }}
-          <span v-if="quant.cacheStatus.value" class="cache-meta">
-            · spot {{ quant.cacheStatus.value.spot_files }} 份
-            · bars {{ quant.cacheStatus.value.bars_files }} 天
-            · {{ quant.cacheStatus.value.total_mb }}MB
+        <span class="cache-badge" :class="{ stale: !quantCN.cacheStatus.value?.spot_latest }">
+          <span class="cache-dot" :class="{ running: quantCN.cacheStatus.value?.warmer_running }"></span>
+          数据更新于 {{ quantCN.cacheAgeText.value }}
+          <span v-if="quantCN.cacheStatus.value" class="cache-meta">
+            · spot {{ quantCN.cacheStatus.value.spot_files }} 份
+            · {{ quantCN.cacheStatus.value.total_mb }}MB
           </span>
         </span>
         <el-button
@@ -83,35 +158,35 @@ function getScoreColor(score: number): string {
           </div>
           
           <div class="filter-item">
-            <label>目标市场 (Market)</label>
-            <el-select v-model="quant.criteria.value.market" size="default" class="bili-select">
-              <el-option label="中国 A 股" value="cn_a" />
-              <el-option label="美国股票" value="us_stock" />
-            </el-select>
-          </div>
-
-          <div class="filter-item">
             <label>股票池 (Universe)</label>
-            <el-select v-model="quant.criteria.value.universe" size="default" class="bili-select">
-              <template v-if="quant.criteria.value.market === 'cn_a'">
-                <el-option label="全市场 (A股)" value="all" />
-                <el-option label="沪深300" value="hs300" />
-                <el-option label="中证500" value="zz500" />
-              </template>
-              <template v-else>
-                <el-option label="全市场 (US)" value="all" />
-                <el-option label="纳斯达克 (Nasdaq)" value="nasdaq" />
-                <el-option label="标普500 (S&P 500)" value="sp500" />
-              </template>
-            </el-select>
+            <div class="universe-selection-grid">
+              <div 
+                v-for="opt in universeOptions" 
+                :key="opt.value"
+                class="universe-opt-card"
+                :class="{ active: quant.criteria.value.universe === opt.value }"
+                @click="quant.criteria.value.universe = opt.value"
+              >
+                <div class="opt-main">
+                  <el-icon class="opt-icon"><component :is="opt.icon" /></el-icon>
+                  <div class="opt-text">
+                    <div class="opt-label">{{ opt.label }}</div>
+                    <div class="opt-desc">{{ opt.desc }}</div>
+                  </div>
+                </div>
+                <div class="opt-check" v-if="quant.criteria.value.universe === opt.value">
+                  <el-icon><Check /></el-icon>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="filter-item">
-            <label>最低市值 ({{ quant.criteria.value.market === 'cn_a' ? '亿元' : '亿美元' }})</label>
+            <label>最低市值 ({{ activeMarket === 'cn_a' ? '亿元' : '亿美元' }})</label>
             <el-input-number v-model="quant.criteria.value.min_market_cap" :min="0" :step="100" class="bili-input-number" />
           </div>
 
-          <div class="filter-item" v-if="quant.criteria.value.market === 'cn_a'">
+          <div class="filter-item" v-if="activeMarket === 'cn_a'">
             <el-checkbox v-model="quant.criteria.value.exclude_st" label="剔除 ST / 退市标的" />
           </div>
 
@@ -154,7 +229,6 @@ function getScoreColor(score: number): string {
       </div>
 
       <!-- Main Result Area -->
-      <!-- 渲染优先级：loading（哪怕已有旧结果也压在上面）→ result → empty -->
       <div class="main-content">
         <div v-if="quant.isScreening.value" class="loading-layout">
           <div class="bili-loading-box">
@@ -171,7 +245,7 @@ function getScoreColor(score: number): string {
           <div class="analysis-card">
             <div class="card-header">
               <el-icon color="#00AEEC"><ChatLineRound /></el-icon>
-              <span>AI 选股洞察</span>
+              <span>AI 选股洞察 ({{ activeMarket === 'cn_a' ? 'A 股' : '美股' }})</span>
               <span v-if="quant.isAnalyzing.value" class="analyze-pulse">分析中…</span>
             </div>
             <div class="analysis-body">
@@ -197,12 +271,25 @@ function getScoreColor(score: number): string {
           <!-- Result Table Card -->
           <div class="table-card">
             <div class="card-header">
-              <span>筛选结果 (Top {{ quant.screenResult.value.rows.length }})</span>
-              <span class="as-of">数据截至: {{ quant.screenResult.value.as_of_date }}</span>
+              <div class="header-main">
+                <span>筛选结果 (共 {{ filteredRows.length }} 条)</span>
+                <span class="as-of">数据截至: {{ quant.screenResult.value.as_of_date }}</span>
+              </div>
+              <div class="header-actions">
+                <el-input
+                  v-model="searchQuery"
+                  placeholder="搜索名称或代码..."
+                  :prefix-icon="Search"
+                  size="small"
+                  clearable
+                  class="table-search-input"
+                />
+              </div>
             </div>
             
             <el-table 
-              :data="quant.screenResult.value.rows" 
+              v-if="filteredRows.length > 0"
+              :data="paginatedRows" 
               style="width: 100%" 
               header-cell-class-name="bili-table-header"
               row-class-name="bili-table-row"
@@ -235,6 +322,22 @@ function getScoreColor(score: number): string {
               </el-table-column>
             </el-table>
 
+            <div v-else class="empty-search">
+              <el-empty :image-size="80" description="未找到匹配的股票标的" />
+            </div>
+
+            <div class="pagination-footer" v-if="filteredRows.length > 0">
+              <el-pagination
+                v-model:current-page="currentPage"
+                v-model:page-size="pageSize"
+                :total="filteredRows.length"
+                :page-sizes="[10, 20, 50]"
+                layout="total, sizes, prev, pager, next"
+                small
+                background
+              />
+            </div>
+
             <div class="traces" v-if="quant.screenResult.value.provider_trace?.length">
               <span class="trace-label">数据源追踪:</span>
               <span 
@@ -249,11 +352,14 @@ function getScoreColor(score: number): string {
           </div>
         </div>
 
-        <!-- Empty State（兜底：既不在 loading 也无 result）-->
+        <!-- Empty State -->
         <div v-else class="empty-layout">
           <div class="empty-content">
             <el-empty :image-size="120" description="请在左侧设置筛选条件" />
             <p class="empty-tip">支持 10000+ A股/美股全市场实时打分分析</p>
+            <div class="empty-actions">
+               <el-button type="primary" plain round @click="quant.runScreen">立即开始对 {{ activeMarket === 'cn_a' ? 'A 股' : '美股' }} 筛选</el-button>
+            </div>
           </div>
         </div>
       </div>
@@ -286,7 +392,7 @@ function getScoreColor(score: number): string {
 .header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
 }
 .header-icon {
   font-size: 24px;
@@ -298,12 +404,112 @@ function getScoreColor(score: number): string {
   color: var(--cf-text-1);
 }
 .header-subtitle {
-  font-size: 12px;
+  font-size: 11px;
   color: #FB7299;
   background: rgba(251, 114, 153, 0.1);
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
   font-weight: 600;
+  margin-right: 8px;
+}
+
+/* ── Market Tabs ── */
+.market-tabs {
+  display: flex;
+  background: var(--cf-bg-2);
+  padding: 3px;
+  border-radius: 8px;
+  gap: 4px;
+}
+.market-tab {
+  padding: 6px 16px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--cf-text-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+  user-select: none;
+}
+.market-tab:hover {
+  color: var(--cf-text-1);
+}
+.market-tab.active {
+  background: var(--cf-card);
+  color: #00AEEC;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+
+/* ── Universe Selection Grid ── */
+.universe-selection-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.universe-opt-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--cf-bg-2);
+  border: 1px solid var(--cf-border-soft);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+.universe-opt-card:hover {
+  border-color: #00AEEC;
+  background: rgba(0, 174, 236, 0.02);
+  transform: translateX(2px);
+}
+.universe-opt-card.active {
+  background: var(--cf-card);
+  border-color: #00AEEC;
+  box-shadow: 0 4px 12px rgba(0, 174, 236, 0.08);
+}
+.opt-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.opt-icon {
+  font-size: 18px;
+  color: var(--cf-text-3);
+  transition: all 0.2s;
+}
+.universe-opt-card.active .opt-icon {
+  color: #00AEEC;
+}
+.opt-text {
+  display: flex;
+  flex-direction: column;
+}
+.opt-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cf-text-2);
+}
+.universe-opt-card.active .opt-label {
+  color: var(--cf-text-1);
+}
+.opt-desc {
+  font-size: 11px;
+  color: var(--cf-text-4);
+  margin-top: 1px;
+}
+.opt-check {
+  font-size: 16px;
+  color: #00AEEC;
+  animation: check-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes check-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ── Container ── */
@@ -400,20 +606,56 @@ function getScoreColor(score: number): string {
 }
 
 /* ── Cards ── */
-.analysis-card, .table-card {
+.analysis-card {
   background: var(--cf-card);
   border-radius: 12px;
   border: 1px solid var(--cf-border-soft);
   overflow: hidden;
 }
+.table-card {
+  background: var(--cf-card);
+  border-radius: 12px;
+  border: 1px solid var(--cf-border-soft);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 .card-header {
   padding: 12px 20px;
   border-bottom: 1px solid var(--cf-border-soft);
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: 16px;
+}
+.header-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   font-weight: 700;
   font-size: 15px;
+}
+.table-search-input {
+  width: 200px;
+}
+.pagination-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--cf-border-soft);
+  display: flex;
+  justify-content: flex-end;
+}
+.empty-search {
+  padding: 40px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--cf-card);
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .analysis-body {
   padding: 16px 20px;
@@ -504,8 +746,12 @@ function getScoreColor(score: number): string {
   align-items: center;
   justify-content: center;
 }
+.empty-content {
+  text-align: center;
+}
 .empty-tip {
   margin-top: -10px;
+  margin-bottom: 20px;
   font-size: 13px;
   color: var(--cf-text-4);
 }

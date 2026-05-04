@@ -7,7 +7,7 @@ import type { QuantCacheStatus } from '../api'
  * 量化工作台 composable。注意：非单例 — 每次 useQuant() 都是独立 state，
  * 子组件不要再 useQuant 一次（会和父级断开）。
  */
-export function useQuant() {
+export function useQuant(initialMarket?: string) {
   const providers = ref<QuantProviderInfo[]>([])
   const loadingProviders = ref(false)
 
@@ -37,10 +37,10 @@ export function useQuant() {
   })
 
   const criteria = ref<QuantScreenCriteria>({
-    market: 'cn_a',
-    universe: 'all',
-    top_n: 10,
-    min_market_cap: 500,
+    market: initialMarket || 'cn_a',
+    universe: initialMarket === 'us_stock' ? 'nasdaq' : 'hs300',
+    top_n: 50,
+    min_market_cap: initialMarket === 'us_stock' ? 100 : 500,
     pe_range: [0, 100],
     momentum_window: 60,
     volatility_window: 20,
@@ -181,7 +181,7 @@ export function useQuant() {
 
   async function checkActiveSession() {
     try {
-      const res = await api.fetchActiveQuantSession()
+      const res = await api.fetchActiveQuantSession(criteria.value.market)
       if (res.active && res.snapshot_id) {
         if (res.criteria) {
           criteria.value = { ...criteria.value, ...res.criteria }

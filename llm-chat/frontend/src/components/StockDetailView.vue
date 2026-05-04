@@ -66,7 +66,41 @@ async function initChart() {
         backgroundColor: 'rgba(255, 255, 255, 0.98)',
         padding: 12,
         textStyle: { color: '#18191C', fontSize: 12 },
-        extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,0.15); border-radius: 8px;'
+        extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,0.15); border-radius: 8px;',
+        formatter: function (params: any) {
+          let res = `<div style="margin-bottom:5px; font-weight:bold; color:#9499A0">${params[0].name}</div>`;
+          params.forEach((item: any) => {
+            if (item.seriesName === 'K线') {
+              const data = item.data;
+              res += `
+                <div style="display:flex; justify-content:space-between; gap:20px; margin-bottom:3px;">
+                  <span style="color:#9499A0">开盘</span>
+                  <span style="font-weight:bold">${data[1]}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; gap:20px; margin-bottom:3px;">
+                  <span style="color:#9499A0">收盘</span>
+                  <span style="font-weight:bold; color:${data[2] >= data[1] ? '#F25D59' : '#00B578'}">${data[2]}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; gap:20px; margin-bottom:3px;">
+                  <span style="color:#9499A0">最低</span>
+                  <span style="font-weight:bold">${data[3]}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; gap:20px; margin-bottom:3px;">
+                  <span style="color:#9499A0">最高</span>
+                  <span style="font-weight:bold">${data[4]}</span>
+                </div>
+              `;
+            } else if (item.seriesName !== '成交量') {
+              res += `
+                <div style="display:flex; justify-content:space-between; gap:20px; margin-bottom:3px;">
+                  <span style="color:#9499A0">${item.seriesName}</span>
+                  <span style="font-weight:bold; color:${item.color}">${item.value}</span>
+                </div>
+              `;
+            }
+          });
+          return res;
+        }
       },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
@@ -137,6 +171,28 @@ async function initChart() {
             color: upColor, color0: downColor,
             borderColor: upColor, borderColor0: downColor
           },
+          markLine: {
+            symbol: ['none', 'none'],
+            data: [
+              {
+                yAxis: data.values[data.values.length - 1][2],
+                label: {
+                  position: 'end',
+                  formatter: '现价: {c}',
+                  backgroundColor: upColor,
+                  color: '#fff',
+                  padding: [2, 4],
+                  borderRadius: 2
+                },
+                lineStyle: {
+                  type: 'dashed',
+                  color: upColor,
+                  width: 1,
+                  opacity: 0.8
+                }
+              }
+            ]
+          }
         },
         { name: 'MA5', type: 'line', data: data.ma5, smooth: true, showSymbol: false, lineStyle: { color: '#FF9736', width: 1.2 } },
         { name: 'MA10', type: 'line', data: data.ma10, smooth: true, showSymbol: false, lineStyle: { color: '#00AEEC', width: 1.2 } },
@@ -260,10 +316,12 @@ const scoreColor = computed(() => {
         </div>
       </div>
 
-      <div class="header-price" v-if="stock.price">
-        <div class="price-val" :style="{color: getChangeColor(stock.pct_chg)}">{{ formatNum(stock.price) }}</div>
+      <div class="header-price">
+        <div class="price-val" :style="{color: getChangeColor(stock.pct_chg)}">
+          {{ formatNum(stock.price || stock.raw?.close) }}
+        </div>
         <div class="price-pct" :style="{color: getChangeColor(stock.pct_chg)}">
-          {{ stock.pct_chg > 0 ? '+' : '' }}{{ formatNum(stock.pct_chg) }}%
+          {{ (stock.pct_chg || 0) > 0 ? '+' : '' }}{{ formatNum(stock.pct_chg) }}%
         </div>
       </div>
 

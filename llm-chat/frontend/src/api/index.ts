@@ -521,8 +521,10 @@ export async function refreshQuantCache(kinds?: string[]): Promise<{ scheduled: 
   return res.json()
 }
 
-export async function fetchActiveQuantSession(): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
-  const res = await fetch(`${API_BASE}/api/quant/session/active`, {
+export async function fetchActiveQuantSession(market?: string): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
+  let url = `${API_BASE}/api/quant/session/active`
+  if (market) url += `?market=${encodeURIComponent(market)}`
+  const res = await fetch(url, {
     headers: { 'X-Client-ID': getClientId() },
   })
   if (!res.ok) return { active: false }

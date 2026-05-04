@@ -56,16 +56,18 @@ async def update_quant_snapshot(
             await session.commit()
 
 
-async def get_active_quant_session(client_id: str) -> Optional[QuantSnapshotModel]:
+async def get_active_quant_session(client_id: str, market: Optional[str] = None) -> Optional[QuantSnapshotModel]:
     """查询该客户端最近一个筛选任务（1小时内，任意状态）。"""
     one_hour_ago = time.time() - 3600
     async with AsyncSessionLocal() as session:
+        stmt = select(QuantSnapshotModel).where(QuantSnapshotModel.client_id == client_id).where(QuantSnapshotModel.created_at >= one_hour_ago)
+        
+        if market:
+            # PostgreSQL JSONB lookup: criteria ->> 'market'
+            stmt = stmt.where(QuantSnapshotModel.criteria['market'].astext == market)
+            
         result = await session.execute(
-            select(QuantSnapshotModel)
-            .where(QuantSnapshotModel.client_id == client_id)
-            .where(QuantSnapshotModel.created_at >= one_hour_ago)
-            .order_by(desc(QuantSnapshotModel.created_at))
-            .limit(1)
+            stmt.order_by(desc(QuantSnapshotModel.created_at)).limit(1)
         )
         return result.scalars().first()
 

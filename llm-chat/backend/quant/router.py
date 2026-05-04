@@ -92,6 +92,7 @@ async def cache_refresh(kinds: list[str] | None = None) -> dict:
 
 @router.get("/session/active")
 async def get_active_session(
+    market: str | None = None,
     x_client_id: str = Header(default="", alias="X-Client-ID"),
 ) -> dict:
     """查询当前客户端是否有正在进行的筛选任务。供前端刷新页面后恢复状态用。"""
@@ -99,7 +100,7 @@ async def get_active_session(
     if not x_client_id:
         return {"active": False}
     
-    snap = await get_active_quant_session(x_client_id)
+    snap = await get_active_quant_session(x_client_id, market=market)
     if not snap:
         return {"active": False}
     
