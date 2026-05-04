@@ -34,7 +34,12 @@ class OAuthProvider(ABC):
 
     def _client(self) -> httpx.AsyncClient:
         """创建带代理配置的 HTTP 客户端"""
-        return httpx.AsyncClient(proxy=self._proxy)
+        return httpx.AsyncClient(
+            proxy=self._proxy,
+            http2=False,            # 代理不支持 HTTP/2
+            timeout=15.0,           # 充足超时
+            follow_redirects=True,
+        )
 
     @abstractmethod
     def get_login_url(self, state: str) -> str:
