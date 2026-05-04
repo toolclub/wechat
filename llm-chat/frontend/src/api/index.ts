@@ -22,6 +22,8 @@ function normalizeThinking(raw: unknown): ThinkingEvent | null {
 }
 
 const API_BASE = ''
+let isRefreshing = false
+let refreshPromise: Promise<string> | null = null
 
 function generateUUID(): string {
   // crypto.randomUUID() requires a secure context (HTTPS/localhost)
@@ -44,73 +46,147 @@ function getClientId(): string {
   return id
 }
 
+async function refreshAccessToken(): Promise<string> {
+  if (isRefreshing && refreshPromise) {
+    return refreshPromise
+  }
+
+  isRefreshing = true
+  refreshPromise = fetch(`${API_BASE}/api/auth/token/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  })
+    .then(res => {
+      if (!res.ok) throw new Error('Refresh failed')
+      return res.json()
+    })
+    .then(data => {
+      localStorage.setItem('cf_access_token', data.access_token)
+      return data.access_token
+    })
+    .finally(() => {
+      isRefreshing = false
+      refreshPromise = null
+    })
+
+  return refreshPromise
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = localStorage.getItem('cf_access_token')
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Client-ID': getClientId(),
+    ...options.headers as Record<string, string>,
+  }
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  })
+
+  if (response.status === 401 && token) {
+    try {
+      const newToken = await refreshAccessToken()
+      headers['Authorization'] = `Bearer ${newToken}`
+      return fetch(url, { ...options, headers, credentials: 'include' })
+    } catch {
+      localStorage.removeItem('cf_access_token')
+      // Optional: trigger a logout event or reload
+      return response
+    }
+  }
+
+  return response
+}
+
+export async function get<T>(path: string): Promise<T> {
+  const res = await fetchWithAuth(`${API_BASE}${path}`)
+  return res.json()
+}
+
+export async function post<T>(path: string, body: any): Promise<T> {
+  const res = await fetchWithAuth(`${API_BASE}${path}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  return res.json()
+}
+
+export async function put<T>(path: string, body: any): Promise<T> {
+  const res = await fetchWithAuth(`${API_BASE}${path}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+  return res.json()
+}
+
+export async function patch<T>(path: string, body: any): Promise<T> {
+  const res = await fetchWithAuth(`${API_BASE}${path}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+  return res.json()
+}
+
 function commonHeaders(): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-Client-ID': getClientId(),
   }
+  const token = localStorage.getItem('cf_access_token')
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
 }
 
 export async function fetchModels(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/api/models`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/models`)
   const data = await res.json()
   return data.models || []
 }
 
 export async function fetchConversations() {
-  const res = await fetch(`${API_BASE}/api/conversations`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations`)
   const data = await res.json()
   return data.conversations || []
 }
 
 export async function createConversation(title: string = '新对话') {
-  const res = await fetch(`${API_BASE}/api/conversations`, {
-    method: 'POST',
-    headers: commonHeaders(),
-    body: JSON.stringify({ title }),
-  })
-  return res.json()
+  return post('/api/conversations', { title })
 }
 
 export async function fetchConversation(id: string) {
-  const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${id}`)
   return res.json()
 }
 
 export async function deleteConversation(id: string) {
-  await fetch(`${API_BASE}/api/conversations/${id}`, {
+  await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
     method: 'DELETE',
-    headers: { 'X-Client-ID': getClientId() },
   })
 }
 
 export async function batchDeleteConversations(ids: string[]): Promise<{ ok: boolean; deleted: number }> {
-  const res = await fetch(`${API_BASE}/api/conversations/batch-delete`, {
-    method: 'POST',
-    headers: commonHeaders(),
-    body: JSON.stringify({ conversation_ids: ids }),
-  })
-  return res.json()
+  return post('/api/conversations/batch-delete', { conversation_ids: ids })
 }
 
 export async function renameConversation(id: string, title: string) {
-  await fetch(`${API_BASE}/api/conversations/${id}`, {
+  await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
     method: 'PATCH',
-    headers: commonHeaders(),
     body: JSON.stringify({ title }),
   })
 }
 
 export async function stopStream(convId: string): Promise<void> {
-  await fetch(`${API_BASE}/api/chat/${convId}/stop`, {
+  await fetchWithAuth(`${API_BASE}/api/chat/${convId}/stop`, {
     method: 'POST',
-    headers: { 'X-Client-ID': getClientId() },
   }).catch(() => {})
 }
 
@@ -123,11 +199,9 @@ export async function stopStreamWithToken(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const res = await fetch(`${API_BASE}/api/chat/${convId}/stop`, {
+    const res = await fetchWithAuth(`${API_BASE}/api/chat/${convId}/stop`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'X-Client-ID': getClientId(),
         'X-Stop-Token': stopToken,
       },
       body: JSON.stringify({
@@ -179,25 +253,19 @@ export async function stopStreamWithToken(
 }
 
 export async function fetchConvTools(convId: string): Promise<ToolHistoryEvent[]> {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/tools`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/tools`)
   const data = await res.json()
   return data.events || []
 }
 
 export async function fetchLatestPlan(convId: string): Promise<{ id: string; goal: string; steps: PlanStep[] } | null> {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/plan`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/plan`)
   const data = await res.json()
   return data.plan || null
 }
 
 export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]> {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/artifacts`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/artifacts`)
   const data = await res.json()
   return data.artifacts || []
 }
@@ -207,10 +275,21 @@ export async function uploadFile(convId: string, file: File): Promise<UploadedFi
   const form = new FormData()
   form.append('conv_id', convId)
   form.append('file', file)
+  // 注意：fetchWithAuth 会自动带上 Authorization 和 X-Client-ID
+  // 但是我们这里手动处理 FormData，不要设置 Content-Type 让浏览器自动设置 boundary
+  const token = localStorage.getItem('cf_access_token')
+  const headers: Record<string, string> = {
+    'X-Client-ID': getClientId(),
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const res = await fetch(`${API_BASE}/api/files/upload`, {
     method: 'POST',
-    headers: { 'X-Client-ID': getClientId() },  // 注意：不设 Content-Type，让浏览器自动带 boundary
+    headers,
     body: form,
+    credentials: 'include',
   })
   if (!res.ok) {
     let detail = ''
@@ -222,35 +301,27 @@ export async function uploadFile(convId: string, file: File): Promise<UploadedFi
 
 /** 按需加载单个产物的完整内容（含二进制、slides_html） */
 export async function fetchArtifactContent(artifactId: number): Promise<FileArtifact | null> {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}`)
   const data = await res.json()
   return data.error ? null : data
 }
 
 /** 用产物下载 URL 拉原始字节（供 PDF/Excel/图片 模态预览使用，避免传 base64 经状态层） */
 export async function fetchArtifactBlob(artifactId: number): Promise<Blob> {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/download`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}/download`)
   if (!res.ok) throw new Error(`下载失败: ${res.status}`)
   return res.blob()
 }
 
 /** 获取对话的完整状态（含消息详情、计划、产物等，供刷新后恢复） */
 export async function fetchFullState(convId: string) {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/full-state`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/full-state`)
   return res.json()
 }
 
 /** 快速检查对话是否有活跃的流式输出 */
 export async function fetchStreamingStatus(convId: string): Promise<{ streaming: boolean; last_event_id: number }> {
-  const res = await fetch(`${API_BASE}/api/conversations/${convId}/streaming-status`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/streaming-status`)
   return res.json()
 }
 
@@ -281,8 +352,7 @@ export async function resumeStream(
 ) {
   let url = `${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`
   if (messageId) url += `&message_id=${encodeURIComponent(messageId)}`
-  const res = await fetch(url, {
-    headers: { 'X-Client-ID': getClientId() },
+  const res = await fetchWithAuth(url, {
     signal,
   })
 
@@ -394,9 +464,8 @@ export async function sendMessage(
     body.context_refs = contextRefs
   }
 
-  const res = await fetch(`${API_BASE}/api/chat`, {
+  const res = await fetchWithAuth(`${API_BASE}/api/chat`, {
     method: 'POST',
-    headers: commonHeaders(),
     body: JSON.stringify(body),
     signal,
   })
@@ -504,69 +573,43 @@ export interface QuantCacheStatus {
 }
 
 export async function fetchQuantCacheStatus(): Promise<QuantCacheStatus> {
-  const res = await fetch(`${API_BASE}/api/quant/cache/status`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/cache/status`)
   if (!res.ok) throw new Error(`获取缓存状态失败: ${res.status}`)
   return res.json()
 }
 
 export async function refreshQuantCache(kinds?: string[]): Promise<{ scheduled: string[]; worker: string }> {
-  const res = await fetch(`${API_BASE}/api/quant/cache/refresh`, {
-    method: 'POST',
-    headers: commonHeaders(),
-    body: JSON.stringify(kinds || null),
-  })
-  if (!res.ok) throw new Error(`触发缓存刷新失败: ${res.status}`)
-  return res.json()
+  return post('/api/quant/cache/refresh', kinds || null)
 }
 
 export async function fetchActiveQuantSession(market?: string): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
   let url = `${API_BASE}/api/quant/session/active`
   if (market) url += `?market=${encodeURIComponent(market)}`
-  const res = await fetch(url, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(url)
   if (!res.ok) return { active: false }
   return res.json()
 }
 
 export async function fetchQuantSnapshot(snapshotId: string): Promise<QuantScreenResult> {
-  const res = await fetch(`${API_BASE}/api/quant/snapshot/${snapshotId}`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/snapshot/${snapshotId}`)
   if (!res.ok) throw new Error(`获取快照失败: ${res.status}`)
   return res.json()
 }
 
 export async function fetchStockChart(symbol: string, days: number = 240): Promise<any> {
-  const res = await fetch(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`)
   if (!res.ok) throw new Error(`获取图表失败: ${res.status}`)
   return res.json()
 }
 
 export async function fetchQuantProviders(): Promise<QuantProviderInfo[]> {
-  const res = await fetch(`${API_BASE}/api/quant/providers`, {
-    headers: { 'X-Client-ID': getClientId() },
-  })
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/providers`)
   if (!res.ok) throw new Error(`获取 Provider 失败: ${res.status}`)
   return res.json()
 }
 
 export async function runQuantScreen(criteria: QuantScreenCriteria): Promise<QuantScreenResult> {
-  const res = await fetch(`${API_BASE}/api/quant/screen`, {
-    method: 'POST',
-    headers: commonHeaders(),
-    body: JSON.stringify(criteria),
-  })
-  if (!res.ok) {
-    let detail = ''
-    try { detail = (await res.json()).detail || '' } catch {}
-    throw new Error(detail || `选股失败 (HTTP ${res.status})`)
-  }
-  return res.json()
+  return post('/api/quant/screen', criteria)
 }
 
 /**
@@ -583,8 +626,7 @@ export async function streamQuantAnalyze(
   onError: (msg: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/quant/snapshot/${snapshotId}/analyze`, {
-    headers: { 'X-Client-ID': getClientId() },
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/snapshot/${snapshotId}/analyze`, {
     signal,
   })
   if (!res.ok) {

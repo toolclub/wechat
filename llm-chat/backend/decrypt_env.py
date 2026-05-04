@@ -24,7 +24,12 @@ _SECRET_CANDIDATES = [
 
 # .env 文件路径：容器内 /app/../.env 不存在，但 os.environ 已由 docker env_file 注入
 # 本地开发：llm-chat/.env
-_ENV_FILE = Path(__file__).parent.parent / ".env"
+_BASE = Path(__file__).parent.parent
+_ENV_FILES = [
+    _BASE / ".env",
+    _BASE / ".env.dev",
+    _BASE / ".env.prod",
+]
 
 
 def _get_fernet():
@@ -66,19 +71,20 @@ def load_encrypted_env() -> bool:
     from cryptography.fernet import InvalidToken
 
     # 收集所有需要解密的 key→ENC(...) 映射
-    # 来源1：.env 文件（本地开发 / 直接运行）
+    # 来源1：所有 env 文件（本地开发 / 直接运行）
     enc_map: dict[str, str] = {}
-    if _ENV_FILE.exists():
-        with open(_ENV_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, _, v = line.partition("=")
-                    k, v = k.strip(), v.strip()
-                    if k and _ENC_RE.match(v):
-                        enc_map[k] = v
+    for env_file in _ENV_FILES:
+        if env_file.exists():
+            with open(env_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        k, v = k.strip(), v.strip()
+                        if k and _ENC_RE.match(v):
+                            enc_map[k] = v
 
     # 来源2：os.environ（docker env_file 注入的情况）
     for k, v in os.environ.items():

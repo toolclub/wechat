@@ -168,6 +168,7 @@ from routers.chat_router import router as chat_router
 from routers.tool_router import router as tool_router
 from routers.model_router import router as model_router
 from routers.files_router import router as files_router
+from routers.auth_router import router as auth_router
 from quant.router import router as quant_router
 
 app.include_router(conversation_router)
@@ -175,6 +176,7 @@ app.include_router(chat_router)
 app.include_router(tool_router)
 app.include_router(model_router)
 app.include_router(files_router)
+app.include_router(auth_router)
 app.include_router(quant_router)
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────

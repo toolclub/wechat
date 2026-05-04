@@ -6,11 +6,14 @@ import json as _json
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from tools import get_tools_info
 from db.artifact_store import get_artifact_content
+from db.database import AsyncSessionLocal
+from db.models import ConversationModel
+from services.auth.dependencies import CurrentUser
 
 logger = logging.getLogger("routers.tool")
 
@@ -23,21 +26,44 @@ async def list_tools():
     return {"tools": get_tools_info()}
 
 
+async def _check_artifact_access(artifact_data: dict, user: dict):
+    """检查用户是否有权访问该产物"""
+    conv_id = artifact_data.get("conv_id")
+    if not conv_id:
+        raise HTTPException(status_code=404, detail="产物未关联对话")
+    
+    async with AsyncSessionLocal() as session:
+        conv = await session.get(ConversationModel, conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    
+    if user.get("id"):
+        if conv.user_id != user["id"]:
+            raise HTTPException(status_code=403, detail="无权访问该产物")
+    else:
+        if conv.user_id or conv.client_id != user.get("client_id"):
+            raise HTTPException(status_code=403, detail="无权访问该产物")
+
+
 @router.get("/artifacts/{artifact_id}")
-async def get_artifact_detail(artifact_id: int):
+async def get_artifact_detail(artifact_id: int, user: CurrentUser):
     """按需加载单个产物的完整内容（含二进制、slides_html 等）。"""
     data = await get_artifact_content(artifact_id)
     if not data:
         return {"error": "产物不存在"}
+    
+    await _check_artifact_access(data, user)
     return data
 
 
 @router.get("/artifacts/{artifact_id}/download")
-async def download_artifact(artifact_id: int):
+async def download_artifact(artifact_id: int, user: CurrentUser):
     """下载文件产物（二进制流，浏览器直接触发下载）。"""
     data = await get_artifact_content(artifact_id)
     if not data:
         return {"error": "产物不存在"}
+
+    await _check_artifact_access(data, user)
 
     name = data.get("name", "download")
     content = data.get("content", "")

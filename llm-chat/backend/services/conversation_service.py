@@ -38,8 +38,8 @@ class ConversationService:
 
     # ── 列表 / 单查 ──────────────────────────────────────────────────────────
 
-    async def list_conversations(self, client_id: str = "") -> list[dict]:
-        return await memory_store.db_list_conversations(client_id)
+    async def list_conversations(self, client_id: str = "", user_id: str = "") -> list[dict]:
+        return await memory_store.db_list_conversations(client_id, user_id)
 
     async def get_conversation(self, conv_id: str) -> dict | None:
         return await memory_store.db_get_conversation(conv_id)
@@ -47,7 +47,7 @@ class ConversationService:
     # ── 创建 ─────────────────────────────────────────────────────────────────
 
     async def create_conversation(
-        self, title: str = "新对话", system_prompt: str = "", client_id: str = "",
+        self, title: str = "新对话", system_prompt: str = "", client_id: str = "", user_id: str = "",
     ) -> dict:
         conv_id = str(uuid.uuid4())[:8]
         conv = await memory_store.create(
@@ -55,6 +55,7 @@ class ConversationService:
             title=title or "新对话",
             system_prompt=system_prompt or "",
             client_id=client_id,
+            user_id=user_id,
         )
         return {"id": conv.id, "title": conv.title}
 

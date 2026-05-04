@@ -7,10 +7,95 @@ SQLAlchemy ORM 模型定义（重构版 — DB-first 架构）
   - 新增 tool_executions 表：工具调用独立记录
   - 保留 message_details 表向后兼容（逐步废弃）
 """
-from sqlalchemy import Column, String, Text, Integer, Float, Boolean, Index
+from sqlalchemy import Column, String, Text, Integer, Float, Boolean, Index, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import relationship
 
 from db.database import Base
+
+
+class UserModel(Base):
+    """用户主表"""
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    avatar_url = Column(String(512), default="")
+    bio = Column(Text, default="")
+    locale = Column(String(10), default="zh-CN")
+    timezone = Column(String(50), default="Asia/Shanghai")
+    password_hash = Column(String(255), default="")
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_verified = Column(Boolean, nullable=False, default=False)
+    last_login_at = Column(Float, default=0)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    # 关联关系
+    oauth_accounts = relationship("OAuthAccountModel", back_populates="user", cascade="all, delete-orphan")
+    settings = relationship("UserSettingsModel", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    sessions = relationship("SessionModel", back_populates="user", cascade="all, delete-orphan")
+
+
+class OAuthAccountModel(Base):
+    """OAuth 账号关联表"""
+    __tablename__ = "oauth_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(20), nullable=False)  # google, github
+    provider_id = Column(String(255), nullable=False)
+    provider_email = Column(String(255), default="")
+    provider_name = Column(String(100), default="")
+    provider_avatar = Column(String(512), default="")
+    access_token = Column(Text, default="")
+    refresh_token = Column(Text, default="")
+    token_expires_at = Column(Float, default=0)
+    raw_profile = Column(JSONB, default=dict)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    user = relationship("UserModel", back_populates="oauth_accounts")
+
+    __table_args__ = (
+        Index("uq_oauth_provider", "provider", "provider_id", unique=True),
+    )
+
+
+class UserSettingsModel(Base):
+    """用户设置表"""
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    theme = Column(String(20), default="system")
+    default_model = Column(String(100), default="")
+    agent_mode_default = Column(Boolean, default=True)
+    language = Column(String(10), default="zh-CN")
+    notifications_enabled = Column(Boolean, default=True)
+    sidebar_collapsed = Column(Boolean, default=False)
+    custom_settings = Column(JSONB, default=dict)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    user = relationship("UserModel", back_populates="settings")
+
+
+class SessionModel(Base):
+    """登录会话表 (Refresh Token)"""
+    __tablename__ = "sessions"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    refresh_token_hash = Column(String(255), nullable=False, unique=True, index=True)
+    device_info = Column(String(255), default="")
+    ip_address = Column(String(50), default="")
+    is_active = Column(Boolean, nullable=False, default=True)
+    expires_at = Column(Float, nullable=False)
+    created_at = Column(Float, nullable=False)
+
+    user = relationship("UserModel", back_populates="sessions")
 
 
 class ConversationModel(Base):
@@ -43,6 +128,7 @@ class ConversationModel(Base):
         String(50), nullable=False, default="",
         comment="沙箱 Worker ID（持久化会话亲和性，跨 worker 恢复）",
     )
+    user_id = Column(String(36), nullable=False, default="", index=True)
     created_at = Column(Float, nullable=False)
     updated_at = Column(Float, nullable=False)
 
@@ -156,6 +242,7 @@ class QuantSnapshotModel(Base):
 
     id = Column(String(50), primary_key=True)
     client_id = Column(String(36), nullable=False, index=True)
+    user_id = Column(String(36), nullable=False, default="", index=True)
     conversation_id = Column(String(36), nullable=True)
     criteria = Column(JSONB, nullable=False)
     rows = Column(JSONB, nullable=False)

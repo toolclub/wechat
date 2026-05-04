@@ -298,3 +298,38 @@ export interface QuantScreenResult {
   /** LLM 提取的风险点（异步回填） */
   risk_notes?: string[]
 }
+
+// ── 用户认证与设置 ────────────────────────────────────────────────────────────
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  avatar_url: string
+  bio?: string
+  locale: string
+  timezone: string
+  is_active: boolean
+  is_verified: boolean
+  last_login_at: number
+  created_at: number
+}
+
+export interface UserSettings {
+  theme: 'light' | 'dark' | 'system'
+  default_model: string
+  agent_mode_default: boolean
+  language: string
+  notifications_enabled: boolean
+  sidebar_collapsed: boolean
+  custom_settings: Record<string, any>
+}
+
+export interface AuthSession {
+  id: string
+  device_info: string
+  ip_address: string
+  is_active: boolean
+  created_at: number
+  expires_at: number
+}

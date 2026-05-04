@@ -30,6 +30,7 @@ from quant.cache_warmer import get_warmer
 from quant.config import QUANT_ENABLED
 from quant.domain import ProviderInfo, ScreenCriteria
 from quant.provider_registry import NoProviderAvailable, get_registry
+from services.auth.dependencies import CurrentUser
 
 logger = logging.getLogger("quant.router")
 
@@ -92,15 +93,17 @@ async def cache_refresh(kinds: list[str] | None = None) -> dict:
 
 @router.get("/session/active")
 async def get_active_session(
+    user: CurrentUser,
     market: str | None = None,
-    x_client_id: str = Header(default="", alias="X-Client-ID"),
 ) -> dict:
     """查询当前客户端是否有正在进行的筛选任务。供前端刷新页面后恢复状态用。"""
     _ensure_enabled()
-    if not x_client_id:
-        return {"active": False}
     
-    snap = await get_active_quant_session(x_client_id, market=market)
+    snap = await get_active_quant_session(
+        client_id=user.get("client_id", ""),
+        market=market,
+        user_id=user.get("id", "")
+    )
     if not snap:
         return {"active": False}
     
@@ -116,18 +119,21 @@ async def get_active_session(
 @router.post("/screen")
 async def screen(
     criteria: ScreenCriteria,
-    x_client_id: str = Header(default="", alias="X-Client-ID"),
+    user: CurrentUser,
 ) -> dict:
     """发起选股：立即返回 snapshot_id，后台异步计算。"""
     _ensure_enabled()
     
+    client_id = user.get("client_id", "")
+    user_id = user.get("id", "")
     snapshot_id = f"qs_{uuid.uuid4().hex[:12]}"
     
     # 1. 立即入库一个"计算中"的占位记录
     try:
         await save_quant_snapshot(
             snapshot_id=snapshot_id,
-            client_id=x_client_id,
+            client_id=client_id,
+            user_id=user_id,
             criteria=criteria.model_dump(),
             status="COMPUTING",
         )
@@ -136,7 +142,12 @@ async def screen(
         raise HTTPException(status_code=500, detail=f"初始化筛选失败：{exc}")
 
     # 2. 触发后台异步任务（不等待）
-    asyncio.create_task(background_screen(snapshot_id, x_client_id, criteria.model_dump()))
+    asyncio.create_task(background_screen(
+        snapshot_id, 
+        client_id, 
+        criteria.model_dump(),
+        user_id=user_id
+    ))
 
     # 3. 立即返回 ID
     return {
@@ -148,12 +159,26 @@ from quant.service import get_service, QuantScreeningService
 
 logger = logging.getLogger("quant.router")
 ...
-@router.get("/snapshot/{snapshot_id}")
-async def read_snapshot(snapshot_id: str) -> dict:
-    _ensure_enabled()
+async def _check_snapshot_access(snapshot_id: str, user: dict):
+    """验证用户是否有权访问该快照"""
     snap = await get_quant_snapshot(snapshot_id)
     if snap is None:
         raise HTTPException(status_code=404, detail="快照不存在")
+    
+    if user.get("id"):
+        if snap.user_id != user["id"]:
+            raise HTTPException(status_code=403, detail="无权访问该快照")
+    else:
+        # 匿名用户：必须匹配 client_id 且 user_id 为空
+        if snap.user_id or snap.client_id != user.get("client_id"):
+            raise HTTPException(status_code=403, detail="无权访问该快照")
+    return snap
+
+
+@router.get("/snapshot/{snapshot_id}")
+async def read_snapshot(snapshot_id: str, user: CurrentUser) -> dict:
+    _ensure_enabled()
+    snap = await _check_snapshot_access(snapshot_id, user)
     return {
         "snapshot_id":    snap.id,
         "client_id":      snap.client_id,
@@ -181,9 +206,9 @@ async def get_stock_chart(symbol: str, days: int = 240) -> dict:
 
 
 @router.get("/snapshot/{snapshot_id}/analyze")
-
 async def analyze_snapshot(
     snapshot_id: str,
+    user: CurrentUser,
     request: Request,
 ) -> StreamingResponse:
     """SSE 流式分析。前端 fetch ReadableStream 或 EventSource 订阅。
@@ -194,9 +219,7 @@ async def analyze_snapshot(
       data: {"event":"error","message":"..."}
     """
     _ensure_enabled()
-    snap = await get_quant_snapshot(snapshot_id)
-    if snap is None:
-        raise HTTPException(status_code=404, detail="快照不存在")
+    snap = await _check_snapshot_access(snapshot_id, user)
 
     rows = snap.rows or []
     criteria = snap.criteria or {}

@@ -231,6 +231,7 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
                 return None
         item: dict = {
             "id": row.id,
+            "conv_id": row.conv_id,
             "name": row.name,
             "path": row.path,
             "language": row.language,

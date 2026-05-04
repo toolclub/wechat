@@ -106,6 +106,82 @@ _MIGRATIONS = [
     "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'DONE'",
 
     "CREATE INDEX IF NOT EXISTS ix_quant_snapshots_client ON quant_snapshots(client_id)",
+
+    # ── 用户认证系统 ──
+    """CREATE TABLE IF NOT EXISTS users (
+        id              VARCHAR(36)      NOT NULL,
+        email           VARCHAR(255)     NOT NULL UNIQUE,
+        name            VARCHAR(100)     NOT NULL,
+        avatar_url      VARCHAR(512)     DEFAULT '',
+        bio             TEXT             DEFAULT '',
+        locale          VARCHAR(10)      DEFAULT 'zh-CN',
+        timezone        VARCHAR(50)      DEFAULT 'Asia/Shanghai',
+        password_hash   VARCHAR(255)     DEFAULT '',
+        is_active       BOOLEAN          NOT NULL DEFAULT TRUE,
+        is_verified     BOOLEAN          NOT NULL DEFAULT FALSE,
+        last_login_at   DOUBLE PRECISION DEFAULT 0,
+        created_at      DOUBLE PRECISION NOT NULL,
+        updated_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_users PRIMARY KEY (id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_users_email ON users(email)",
+
+    """CREATE TABLE IF NOT EXISTS oauth_accounts (
+        id              SERIAL           NOT NULL,
+        user_id         VARCHAR(36)      NOT NULL,
+        provider        VARCHAR(20)      NOT NULL,
+        provider_id     VARCHAR(255)     NOT NULL,
+        provider_email  VARCHAR(255)     DEFAULT '',
+        provider_name   VARCHAR(100)     DEFAULT '',
+        provider_avatar VARCHAR(512)     DEFAULT '',
+        access_token    TEXT             DEFAULT '',
+        refresh_token   TEXT             DEFAULT '',
+        token_expires_at DOUBLE PRECISION DEFAULT 0,
+        raw_profile     JSONB            DEFAULT '{}',
+        created_at      DOUBLE PRECISION NOT NULL,
+        updated_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_oauth_accounts PRIMARY KEY (id),
+        CONSTRAINT fk_oauth_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT uq_oauth_provider UNIQUE (provider, provider_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_oauth_user ON oauth_accounts(user_id)",
+
+    """CREATE TABLE IF NOT EXISTS user_settings (
+        id              SERIAL           NOT NULL,
+        user_id         VARCHAR(36)      NOT NULL UNIQUE,
+        theme           VARCHAR(20)      DEFAULT 'system',
+        default_model   VARCHAR(100)     DEFAULT '',
+        agent_mode_default BOOLEAN       DEFAULT TRUE,
+        language        VARCHAR(10)      DEFAULT 'zh-CN',
+        notifications_enabled BOOLEAN    DEFAULT TRUE,
+        sidebar_collapsed BOOLEAN        DEFAULT FALSE,
+        custom_settings JSONB            DEFAULT '{}',
+        created_at      DOUBLE PRECISION NOT NULL,
+        updated_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_user_settings PRIMARY KEY (id),
+        CONSTRAINT fk_settings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""",
+
+    """CREATE TABLE IF NOT EXISTS sessions (
+        id              VARCHAR(36)      NOT NULL,
+        user_id         VARCHAR(36)      NOT NULL,
+        refresh_token_hash VARCHAR(255)  NOT NULL UNIQUE,
+        device_info     VARCHAR(255)     DEFAULT '',
+        ip_address      VARCHAR(50)      DEFAULT '',
+        is_active       BOOLEAN          NOT NULL DEFAULT TRUE,
+        expires_at      DOUBLE PRECISION NOT NULL,
+        created_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_sessions PRIMARY KEY (id),
+        CONSTRAINT fk_session_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id)",
+
+    # 现有业务表补 user_id
+    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_user ON conversations(user_id)",
+
+    "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS ix_quant_snapshots_user ON quant_snapshots(user_id)",
 ]
 
 

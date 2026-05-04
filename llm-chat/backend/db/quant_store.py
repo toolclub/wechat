@@ -14,6 +14,7 @@ async def save_quant_snapshot(
     analysis: str = "",
     risk_notes: list = None,
     status: str = "DONE",
+    user_id: str = "",
 ) -> None:
     if rows is None: rows = []
     if provider_trace is None: provider_trace = []
@@ -23,6 +24,7 @@ async def save_quant_snapshot(
         snapshot = QuantSnapshotModel(
             id=snapshot_id,
             client_id=client_id,
+            user_id=user_id,
             criteria=criteria,
             rows=rows,
             provider_trace=provider_trace,
@@ -56,11 +58,23 @@ async def update_quant_snapshot(
             await session.commit()
 
 
-async def get_active_quant_session(client_id: str, market: Optional[str] = None) -> Optional[QuantSnapshotModel]:
+async def get_active_quant_session(
+    client_id: str,
+    market: Optional[str] = None,
+    user_id: str = "",
+) -> Optional[QuantSnapshotModel]:
     """查询该客户端最近一个筛选任务（1小时内，任意状态）。"""
     one_hour_ago = time.time() - 3600
     async with AsyncSessionLocal() as session:
-        stmt = select(QuantSnapshotModel).where(QuantSnapshotModel.client_id == client_id).where(QuantSnapshotModel.created_at >= one_hour_ago)
+        stmt = select(QuantSnapshotModel).where(QuantSnapshotModel.created_at >= one_hour_ago)
+        
+        if user_id:
+            stmt = stmt.where(QuantSnapshotModel.user_id == user_id)
+        else:
+            stmt = stmt.where(
+                QuantSnapshotModel.client_id == client_id,
+                QuantSnapshotModel.user_id == ""
+            )
         
         if market:
             # PostgreSQL JSONB lookup: criteria ->> 'market'

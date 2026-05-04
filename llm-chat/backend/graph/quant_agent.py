@@ -31,6 +31,7 @@ logger = logging.getLogger("graph.quant_agent")
 
 class ScreenState(TypedDict, total=False):
     client_id: str
+    user_id: str
     criteria: dict
     snapshot_id: str
     rows: list[dict]
@@ -103,14 +104,15 @@ def _build_screen_graph():
 screen_graph = _build_screen_graph()
 
 
-async def background_screen(snapshot_id: str, client_id: str, criteria: dict):
+async def background_screen(snapshot_id: str, client_id: str, criteria: dict, user_id: str = ""):
     """在后台运行选股流程的入口。"""
     t0 = time.perf_counter()
-    logger.info("🚀 [后台任务] 启动选股 snapshot_id=%s client_id=%s", snapshot_id, client_id)
+    logger.info("🚀 [后台任务] 启动选股 snapshot_id=%s client_id=%s user_id=%s", snapshot_id, client_id, user_id)
     try:
         state = {
             "snapshot_id": snapshot_id,
             "client_id": client_id,
+            "user_id": user_id,
             "criteria": criteria,
         }
         await screen_graph.ainvoke(state)

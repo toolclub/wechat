@@ -1,21 +1,61 @@
 <script setup lang="ts">
 import { onMounted, computed, ref, watch } from 'vue'
 import { useChat } from './composables/useChat'
+import { useAuth } from './composables/useAuth'
 import type { FileArtifact } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
 import QuantView from './components/QuantView.vue'
 import StockDetailView from './components/StockDetailView.vue'
+import LoginView from './components/LoginView.vue'
 
 const chat = useChat()
+const auth = useAuth()
 const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail'>('chat')
 const selectedStockData = ref<any>(null)
+const showLogin = ref(false)
+const GUEST_EXPIRE_DAYS = 3
 
 onMounted(async () => {
-  await chat.loadConversations()
-  await chat.restoreFromHash()
+  try {
+    // 处理 OAuth 回调成功（从 URL Fragment 提取 token）
+    if (window.location.hash.includes('auth_success=1')) {
+      const hash = window.location.hash.slice(1)
+      const params = new URLSearchParams(hash)
+      const accessToken = params.get('access_token')
+      if (accessToken) {
+        await auth.handleAuthSuccess(accessToken)
+        window.history.replaceState({}, '', window.location.pathname)
+        await chat.loadConversations()
+      }
+    }
+
+    await auth.init()
+    await chat.loadConversations()
+    await chat.restoreFromHash()
+  } finally {
+    // 无论加载是否出错，登录检查都执行
+    if (!auth.isLoggedIn.value) {
+      const guestSince = localStorage.getItem('cf_guest_since')
+      if (!guestSince) {
+        localStorage.setItem('cf_guest_since', String(Date.now()))
+        showLogin.value = true
+      } else {
+        const elapsed = Date.now() - Number(guestSince)
+        if (elapsed > GUEST_EXPIRE_DAYS * 24 * 60 * 60 * 1000) {
+          showLogin.value = true
+        }
+      }
+    }
+  }
 })
+
+function onSkipLogin() {
+  showLogin.value = false
+  // 刷新游客过期时间
+  localStorage.setItem('cf_guest_since', String(Date.now()))
+}
 
 // ── 面板折叠/展开（用户可手动控制） ──────────────────────────────────────────
 const panelOpen = ref(false)
@@ -179,6 +219,9 @@ function onDragStart(e: MouseEvent) {
 
 <template>
   <div class="app">
+    <!-- 登录界面 -->
+    <LoginView v-if="showLogin" @skip="onSkipLogin" />
+
     <Sidebar
       :conversations="chat.conversations.value"
       :currentConvId="chat.currentConvId.value"
@@ -190,6 +233,7 @@ function onDragStart(e: MouseEvent) {
       @delete="chat.removeConversation($event)"
       @batch-delete="chat.batchRemoveConversations($event)"
       @switchWorkspace="activeWorkspace = $event"
+      @show-login="showLogin = true"
     />
 
     <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->

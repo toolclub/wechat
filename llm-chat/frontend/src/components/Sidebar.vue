@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
-  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor,
+  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor, User,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -110,6 +110,10 @@ watch(() => props.conversations, () => {
 const deletingIds = ref<Set<string>>(new Set())
 
 import * as api from '../api'
+import { useAuth } from '../composables/useAuth'
+
+const auth = useAuth()
+const showDropdown = ref(false)
 
 // ── 重命名 ──
 const editingId = ref<string | null>(null)
@@ -134,14 +138,10 @@ async function finishRename(id: string) {
 }
 function cancelRename() { editingId.value = null }
 
-// ── 暗色模式 ──
-const isDark = ref(localStorage.getItem('cf_dark') === '1')
-function toggleDark() {
-  isDark.value = !isDark.value
-  document.body.classList.toggle('dark', isDark.value)
-  localStorage.setItem('cf_dark', isDark.value ? '1' : '0')
-}
-onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
+onMounted(() => {
+  const savedDark = localStorage.getItem('cf_dark') === '1'
+  document.body.classList.toggle('dark', savedDark)
+})
 </script>
 
 <template>
@@ -324,17 +324,41 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
       </TransitionGroup>
     </div>
 
-    <!-- 底部：运行状态 -->
+    <!-- 底部：用户 -->
     <div class="sidebar-footer">
-      <button class="dark-toggle" @click="toggleDark" :title="isDark ? '切换亮色' : '切换暗色'">
-        <svg v-if="isDark" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-        </svg>
-        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
-        </svg>
-        <span>{{ isDark ? '亮色模式' : '暗色模式' }}</span>
-      </button>
+      <!-- 已登录 -->
+      <div v-if="auth.isLoggedIn.value" class="user-area" @click="showDropdown = !showDropdown">
+        <div class="user-row">
+          <img :src="auth.userAvatar.value" class="user-avatar-img" referrerpolicy="no-referrer" />
+          <span class="user-name">{{ auth.userName.value }}</span>
+        </div>
+        <!-- 下拉菜单 -->
+        <div v-if="showDropdown" class="user-dropdown-inline" @click.stop>
+          <div class="dropdown-item header">
+            <img :src="auth.userAvatar.value" class="dropdown-avatar" referrerpolicy="no-referrer" />
+            <div>
+              <div class="dropdown-name">{{ auth.userName.value }}</div>
+              <div class="dropdown-email">{{ auth.userEmail.value }}</div>
+            </div>
+          </div>
+          <div class="dropdown-item logout" @click="showDropdown = false; auth.logout()">
+            <el-icon><Close /></el-icon> 退出登录
+          </div>
+        </div>
+      </div>
+
+      <!-- 未登录：点击展开登录 -->
+      <div v-else class="user-area" @click="emit('showLogin')">
+        <div class="user-info guest-info">
+          <div class="guest-avatar">
+            <el-icon :size="16"><User /></el-icon>
+          </div>
+          <div class="user-meta">
+            <span class="user-name">未登录</span>
+            <span class="user-status">点击登录</span>
+          </div>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -752,29 +776,137 @@ body.dark .workspace-btn.active {
 .sidebar-footer {
   padding: 12px;
   border-top: 1px solid var(--cf-border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-/* ── Dark toggle ── */
-.dark-toggle {
+
+.user-area {
+  position: relative;
+  margin-bottom: 4px;
+}
+
+/* ── 用户行（未登录和已登录共用） ── */
+.user-info,
+.user-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 13px;
-  background: none;
-  border: 1px solid var(--cf-border-soft);
+  gap: 10px;
+  padding: 6px 8px;
   border-radius: 12px;
-  color: var(--cf-text-3);
-  font-size: 12px;
-  font-weight: 500;
-  font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s;
+  border: 1px solid transparent;
 }
-.dark-toggle:hover {
+
+.user-info:hover,
+.user-row:hover {
   background: var(--cf-hover);
-  color: var(--cf-text-1);
-  border-color: var(--cf-border);
+  border-color: var(--cf-border-soft);
 }
+
+.guest-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--cf-hover);
+  color: var(--cf-text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ── 已登录头像图片（固定尺寸） ── */
+.user-avatar-img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.user-meta {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cf-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-status {
+  font-size: 11px;
+  color: #10b981;
+}
+
+/* ── 内联下拉菜单 ── */
+.user-dropdown-inline {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: var(--cf-card);
+  border: 1px solid var(--cf-border-soft);
+  border-radius: 14px;
+  box-shadow: var(--cf-shadow-md);
+  overflow: hidden;
+  z-index: 100;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dropdown-item.header {
+  cursor: default;
+  border-bottom: 1px solid var(--cf-border-soft);
+}
+
+.dropdown-item.logout {
+  color: #ef4444;
+}
+
+.dropdown-item.logout:hover {
+  background: #fef2f2;
+}
+
+body.dark .dropdown-item.logout:hover {
+  background: #2a1a1a;
+}
+
+.dropdown-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.dropdown-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--cf-text-1);
+}
+
+.dropdown-email {
+  font-size: 11px;
+  color: var(--cf-text-3);
+}
+
 </style>
 
 <!-- Bilibili 风格 Popconfirm：popper 被 Teleport 到 body，必须使用 unscoped 样式 -->
@@ -861,5 +993,49 @@ body.dark .cf-bili-popconfirm .el-button:not(.el-button--danger) {
 }
 body.dark .cf-bili-popconfirm .el-popper__arrow::before {
   background: linear-gradient(135deg, #1f1419, #2a1e24) !important;
+}
+
+/* ── 用户下拉菜单样式 ── */
+.user-dropdown.el-popper {
+  border-radius: 16px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  border: 1px solid var(--cf-border-soft) !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+}
+
+.dropdown-header {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.05), rgba(139, 92, 246, 0.05));
+  border-bottom: 1px solid var(--cf-border-soft);
+}
+
+.header-meta {
+  display: flex;
+  flex-direction: column;
+}
+
+.header-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cf-text-1);
+}
+
+.header-email {
+  font-size: 12px;
+  color: var(--cf-text-3);
+}
+
+.user-dropdown .el-dropdown-menu__item {
+  padding: 10px 16px !important;
+  font-size: 13px !important;
+}
+
+.user-dropdown .el-dropdown-menu__item:hover {
+  background-color: var(--cf-hover) !important;
+  color: #ef4444 !important;
 }
 </style>

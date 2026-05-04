@@ -159,6 +159,27 @@ class Settings(BaseSettings):
     conversations_dir: str
     log_dir: str
 
+    # ── JWT 配置 ──────────────────────────────────────────────────────────────
+    jwt_secret_key: str = "your-jwt-secret-key-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_access_expire_minutes: int = 15
+    jwt_refresh_expire_days: int = 7
+
+    # ── OAuth 配置 ─────────────────────────────────────────────────────────────
+    oauth_google_client_id: str = ""
+    oauth_google_client_secret: str = ""
+    oauth_google_redirect_uri: str = ""
+    oauth_github_client_id: str = ""
+    oauth_github_client_secret: str = ""
+    oauth_github_redirect_uri: str = ""
+
+    # ── Cookie 配置 ────────────────────────────────────────────────────────────
+    cookie_secure: bool = False
+
+    # ── CORS 配置 ──────────────────────────────────────────────────────────────
+    cors_allowed_origins: list[str] = ["http://localhost:5173", "http://localhost"]
+    frontend_url: str = "http://localhost"
+
     # ── 系统提示词（长文本，保留在代码中）────────────────────────────────────
     # 系统提示词从 prompts/*.md 加载，这里保留空默认值供 Pydantic 验证
     # 实际值在模块底部通过 _load_prompts_into_settings() 注入
@@ -259,6 +280,25 @@ BACKEND_PORT              = settings.backend_port
 CONVERSATIONS_DIR         = settings.conversations_dir
 DATABASE_URL              = settings.database_url
 LOG_DIR                   = settings.log_dir
+
+# ── JWT 配置 ──────────────────────────────────────────────────────────────
+JWT_SECRET_KEY            = settings.jwt_secret_key
+JWT_ALGORITHM             = settings.jwt_algorithm
+JWT_ACCESS_EXPIRE_MINUTES = settings.jwt_access_expire_minutes
+JWT_REFRESH_EXPIRE_DAYS   = settings.jwt_refresh_expire_days
+
+# ── OAuth 配置 ──────────────────────────────────────────────────────────────
+OAUTH_GOOGLE_CLIENT_ID    = settings.oauth_google_client_id
+OAUTH_GOOGLE_CLIENT_SECRET = settings.oauth_google_client_secret
+OAUTH_GOOGLE_REDIRECT_URI = settings.oauth_google_redirect_uri
+OAUTH_GITHUB_CLIENT_ID    = settings.oauth_github_client_id
+OAUTH_GITHUB_CLIENT_SECRET = settings.oauth_github_client_secret
+OAUTH_GITHUB_REDIRECT_URI = settings.oauth_github_redirect_uri
+
+# ── Cookie/CORS 配置 ────────────────────────────────────────────────────────
+COOKIE_SECURE             = settings.cookie_secure
+CORS_ALLOWED_ORIGINS      = settings.cors_allowed_origins
+FRONTEND_URL              = settings.frontend_url
 
 # 系统提示词从 prompts/*.md 加载（代码中不硬编码提示词内容）
 from prompts import load_prompt as _lp

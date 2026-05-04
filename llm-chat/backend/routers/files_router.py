@@ -17,13 +17,14 @@ import json
 import logging
 import mimetypes
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 
 from config import UPLOAD_MAX_FILE_SIZE
 from db.artifact_store import detect_language, save_artifact
 from db.database import AsyncSessionLocal
 from db.models import ConversationModel
 from sandbox.manager import sandbox_manager
+from services.auth.dependencies import CurrentUser
 
 logger = logging.getLogger("routers.files")
 
@@ -32,18 +33,26 @@ router = APIRouter(prefix="/api", tags=["files"])
 
 @router.post("/files/upload")
 async def upload_file(
+    user: CurrentUser,
     conv_id: str = Form(...),
     file: UploadFile = File(...),
 ):
     """上传文件到沙箱 + 持久化到 artifacts。
-
-    返回 {id, name, path, size, language, source} —— 前端拿 id 在发消息时带 file_ids。
+    ...
     """
-    # ── 1. 校验对话存在（防止往野 conv 上传文件） ──
+    # ── 1. 校验对话存在且属于当前用户 ──
     async with AsyncSessionLocal() as session:
         conv = await session.get(ConversationModel, conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    
+    # 鉴权：必须是该用户的对话
+    if user.get("id"):
+        if conv.user_id != user["id"]:
+            raise HTTPException(status_code=403, detail="无权访问该对话")
+    else:
+        if conv.user_id or conv.client_id != user.get("client_id"):
+            raise HTTPException(status_code=403, detail="无权访问该对话")
 
     # ── 2. 校验沙箱可用 ──
     if not sandbox_manager.available:

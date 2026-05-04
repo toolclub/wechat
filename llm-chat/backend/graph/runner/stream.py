@@ -55,6 +55,7 @@ class StreamSession:
         model: str,
         temperature: float = 0.7,
         client_id: str = "",
+        user_id: str = "",
         images: list[str] | None = None,
         agent_mode: bool = True,
         force_plan: list[dict] | None = None,
@@ -67,6 +68,7 @@ class StreamSession:
         self.model = model
         self.temperature = temperature
         self.client_id = client_id
+        self.user_id = user_id
         self.images = images or []
         self.agent_mode = agent_mode
         self.force_plan = force_plan or []
@@ -739,7 +741,8 @@ class StreamSession:
 
 async def stream_response(
     conv_id: str, user_message: str, model: str,
-    temperature: float = 0.7, client_id: str = "", images: list[str] | None = None,
+    temperature: float = 0.7, client_id: str = "", user_id: str = "",
+    images: list[str] | None = None,
     agent_mode: bool = True, force_plan: list[dict] | None = None,
     stop_event: asyncio.Event | None = None,
     file_ids: list[int] | None = None,
@@ -747,9 +750,9 @@ async def stream_response(
 ) -> AsyncGenerator[str, None]:
     session = StreamSession(
         conv_id=conv_id, user_message=user_message, model=model,
-        temperature=temperature, client_id=client_id, images=images,
-        agent_mode=agent_mode, force_plan=force_plan, stop_event=stop_event,
-        file_ids=file_ids, context_refs=context_refs,
+        temperature=temperature, client_id=client_id, user_id=user_id,
+        images=images, agent_mode=agent_mode, force_plan=force_plan,
+        stop_event=stop_event, file_ids=file_ids, context_refs=context_refs,
     )
     async for chunk in session.stream():
         yield chunk

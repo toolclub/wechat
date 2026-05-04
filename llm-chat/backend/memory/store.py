@@ -30,11 +30,13 @@ def get(conv_id: str) -> Optional[Conversation]:
     return _store.get(conv_id)
 
 
-def all_conversations(client_id: str = "") -> list[Conversation]:
-    """返回指定 client 的对话（内存缓存）。"""
-    if not client_id:
-        return list(_store.values())
-    return [c for c in _store.values() if not c.client_id or c.client_id == client_id]
+def all_conversations(client_id: str = "", user_id: str = "") -> list[Conversation]:
+    """返回指定 client 或 user 的对话（内存缓存）。"""
+    if user_id:
+        return [c for c in _store.values() if c.user_id == user_id]
+    if client_id:
+        return [c for c in _store.values() if c.client_id == client_id and not c.user_id]
+    return list(_store.values())
 
 
 # ── DB 直查接口（多 worker 安全，供 API 端点使用）────────────────────────────────
@@ -70,6 +72,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
             messages=messages, mid_term_summary=row.mid_term_summary,
             mid_term_cursor=row.mid_term_cursor, created_at=row.created_at,
             updated_at=row.updated_at, client_id=row.client_id,
+            user_id=getattr(row, "user_id", "") or "",
             status=getattr(row, "status", "active") or "active",
         )
         _store[conv_id] = conv  # 刷新缓存
@@ -97,18 +100,21 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
                 for mr in msg_rows
             ],
             "mid_term_summary": row.mid_term_summary,
+            "user_id": getattr(row, "user_id", "") or "",
             "status": getattr(row, "status", "active") or "active",
         }
 
 
-async def db_list_conversations(client_id: str = "") -> list[dict]:
+async def db_list_conversations(client_id: str = "", user_id: str = "") -> list[dict]:
     """从 DB 直接读取对话列表（跨 worker 一致性）。"""
     async with AsyncSessionLocal() as session:
         query = select(ConversationModel).order_by(ConversationModel.updated_at.desc())
-        if client_id:
-            from sqlalchemy import or_
+        if user_id:
+            query = query.where(ConversationModel.user_id == user_id)
+        elif client_id:
             query = query.where(
-                or_(ConversationModel.client_id == client_id, ConversationModel.client_id == "")
+                ConversationModel.client_id == client_id,
+                ConversationModel.user_id == ""
             )
         result = await session.execute(query)
         rows = result.scalars().all()
@@ -158,6 +164,7 @@ async def init() -> None:
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 client_id=row.client_id,
+                user_id=getattr(row, "user_id", "") or "",
                 status=getattr(row, "status", "active") or "active",
             )
             _store[row.id] = conv
@@ -189,6 +196,7 @@ async def create(
     title: str = "新对话",
     system_prompt: str = "",
     client_id: str = "",
+    user_id: str = "",
 ) -> Conversation:
     """创建新对话：写入 DB + 更新缓存。"""
     prompt = system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
@@ -198,6 +206,7 @@ async def create(
         title=title,
         system_prompt=prompt,
         client_id=client_id,
+        user_id=user_id,
         created_at=now,
         updated_at=now,
     )
@@ -212,6 +221,7 @@ async def create(
             mid_term_summary="",
             mid_term_cursor=0,
             client_id=conv.client_id,
+            user_id=conv.user_id,
             status="active",
             created_at=now,
             updated_at=now,
