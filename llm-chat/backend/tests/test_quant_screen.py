@@ -332,3 +332,74 @@ def test_baostock_symbol_conversion():
     assert BaoStockProvider._bs_code_to_internal("sz.000001") == "000001.SZ"
     assert BaoStockProvider._bs_code_to_internal("bj.430090") == "430090.BJ"
     assert BaoStockProvider._bs_code_to_internal("") == ""
+
+
+# ── Market Filtering ─────────────────────────────────────────────────────────
+
+class _MockMarketProvider:
+    def __init__(self, name, priority, capabilities, supported_markets):
+        self.name = name
+        self.priority = priority
+        self.capabilities = capabilities
+        self.supported_markets = supported_markets
+
+    async def health_check(self):
+        return ProviderHealth(status=ProviderHealthStatus.OK)
+
+
+@pytest.mark.unit
+def test_market_filtering_logic():
+    from quant.provider_registry import ProviderRegistry
+    
+    p_cn = _MockMarketProvider("cn_only", 10, {ProviderCapability.REALTIME_SNAPSHOT}, {"cn_a"})
+    p_us = _MockMarketProvider("us_only", 20, {ProviderCapability.REALTIME_SNAPSHOT}, {"us_stock"})
+    p_both = _MockMarketProvider("both", 30, {ProviderCapability.REALTIME_SNAPSHOT}, {"cn_a", "us_stock"})
+    
+    registry = ProviderRegistry()
+    registry.register(p_cn)
+    registry.register(p_us)
+    registry.register(p_both)
+    
+    # Test CN market
+    cn_candidates = registry.candidates(ProviderCapability.REALTIME_SNAPSHOT, market="cn_a")
+    cn_names = [p.name for p in cn_candidates]
+    assert "cn_only" in cn_names
+    assert "both" in cn_names
+    assert "us_only" not in cn_names
+    
+    # Test US market
+    us_candidates = registry.candidates(ProviderCapability.REALTIME_SNAPSHOT, market="us_stock")
+    us_names = [p.name for p in us_candidates]
+    assert "us_only" in us_names
+    assert "both" in us_names
+    assert "cn_only" not in us_names
+
+
+@pytest.mark.unit
+def test_call_with_fallback_market_filtering():
+    from quant.provider_registry import ProviderRegistry
+    registry = ProviderRegistry()
+    
+    # Provider that would succeed if called, but shouldn't be called for US
+    p_cn = _MockMarketProvider("cn_only", 10, {ProviderCapability.REALTIME_SNAPSHOT}, {"cn_a"})
+    # Provider that should be called for US
+    p_us = _MockMarketProvider("us_only", 20, {ProviderCapability.REALTIME_SNAPSHOT}, {"us_stock"})
+        
+    registry.register(p_cn)
+    registry.register(p_us)
+    
+    async def test():
+        async def invoker(p):
+            if p.name == "cn_only":
+                return pd.DataFrame([{"symbol": "CN"}]), 1
+            return pd.DataFrame([{"symbol": "US"}]), 1
+            
+        result = await registry.call_with_fallback(
+            ProviderCapability.REALTIME_SNAPSHOT, 
+            invoker,
+            market="us_stock"
+        )
+        return result
+        
+    result = asyncio.run(test())
+    assert result.iloc[0]["symbol"] == "US"

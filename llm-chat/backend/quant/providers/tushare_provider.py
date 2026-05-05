@@ -43,6 +43,7 @@ class TushareProvider:
         ProviderCapability.INDEX_WEIGHT,
         ProviderCapability.TRADING_CALENDAR,
     }
+    supported_markets = {"cn_a", "us_stock"}
 
     def __init__(
         self,

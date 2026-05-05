@@ -32,6 +32,7 @@ class BaoStockProvider:
         ProviderCapability.INDEX_WEIGHT,
         ProviderCapability.TRADING_CALENDAR,
     }
+    supported_markets = {"cn_a"}
 
     _BARS_FIELDS = (
         "date,code,open,high,low,close,preclose,volume,amount,"
@@ -87,12 +88,18 @@ class BaoStockProvider:
     ) -> pd.DataFrame:
         if not symbols:
             return pd.DataFrame()
+        
+        # 快速过滤掉不支持的代码（如 .US），避免无效加锁
+        cn_symbols = [s for s in symbols if s.endswith((".SH", ".SZ", ".BJ"))]
+        if not cn_symbols:
+            return pd.DataFrame()
+            
         adjust_flag = {"qfq": "2", "hfq": "1"}.get(adjust, "3")
 
         # 核心修复：分批锁定，防止长耗时预热任务饿死其他请求
         BATCH_SIZE = 20
         all_results: list[pd.DataFrame] = []
-        sym_list = list(symbols)
+        sym_list = list(cn_symbols)
         total_batches = (len(sym_list) + BATCH_SIZE - 1) // BATCH_SIZE
         done_count = 0
         fail_count = 0

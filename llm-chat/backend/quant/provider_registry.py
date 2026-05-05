@@ -87,10 +87,11 @@ class ProviderRegistry:
             for p in self._providers
         ]
 
-    def candidates(self, capability: ProviderCapability) -> list[MarketDataProvider]:
+    def candidates(self, capability: ProviderCapability, market: str | None = None) -> list[MarketDataProvider]:
         return [
             p for p in self._providers
             if capability in p.capabilities
+            and (market is None or market in getattr(p, "supported_markets", {market}))
             and self._health.get(p.name, ProviderHealthStatus.OK) != ProviderHealthStatus.DOWN
         ]
 
@@ -100,6 +101,7 @@ class ProviderRegistry:
         invoker,
         trace: list[ProviderTrace] | None = None,
         *,
+        market: str | None = None,
         max_retries: int = 2,
     ):
         """按优先级依次尝试 provider 调用 invoker(provider)，遇错自动 fallback。
@@ -111,9 +113,9 @@ class ProviderRegistry:
         """
         import random as _random
 
-        cs = self.candidates(capability)
+        cs = self.candidates(capability, market=market)
         if not cs:
-            raise NoProviderAvailable(f"无可用 provider 提供能力：{capability.value}")
+            raise NoProviderAvailable(f"无可用 provider 提供能力：{capability.value} (market={market})")
 
         last_exc: Exception | None = None
         for idx, p in enumerate(cs):

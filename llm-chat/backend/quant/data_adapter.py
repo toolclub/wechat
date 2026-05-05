@@ -65,6 +65,7 @@ class CachedDataAdapter:
 
         df = await self._registry.call_with_fallback(
             ProviderCapability.REALTIME_SNAPSHOT, invoker, trace,
+            market=market,
         )
         if df is not None and not df.empty:
             try:
@@ -127,34 +128,46 @@ class CachedDataAdapter:
                 return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
             return pd.DataFrame()
 
-        # 2) 缓存不足：回源全量（仅 warmer / 非 API 路径走这里）
+        # 2) 增量回源：仅请求缺失的标的
+        cached_syms = set(cached["symbol"].astype(str).unique()) if cached is not None and not cached.empty else set()
+        missing_syms = list(sym_set - cached_syms)
+        
+        if not missing_syms:
+            return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True) if cached is not None else pd.DataFrame()
+
+        logger.info("bars 缓存缺失: %d/%d, 仅请求缺失标的", len(missing_syms), len(sym_set))
+
         async def invoker(provider):
             df = await provider.daily_bars(
-                symbols, start=_to_str(s_date), end=_to_str(e_date),
+                missing_syms, start=_to_str(s_date), end=_to_str(e_date),
             )
-            if df is None or df.empty:
-                raise RuntimeError(
-                    f"{provider.name} 返回空 bars（{len(symbols)} 只标的）"
-                )
             return df, len(df)
 
         try:
-            df = await self._registry.call_with_fallback(
+            new_df = await self._registry.call_with_fallback(
                 ProviderCapability.DAILY_BARS, invoker, trace,
+                market=market,
             )
+            # 写盘（新拉取的部分）
+            if new_df is not None and not new_df.empty:
+                try:
+                    await cache_disk.write_bars(market, new_df)
+                except Exception as exc:
+                    logger.warning("bars 写盘失败: %s", exc)
+                
+                # 合并缓存与新抓取的数据
+                if cached is not None and not cached.empty:
+                    df = pd.concat([cached, new_df], ignore_index=True).drop_duplicates(["symbol", "date"])
+                else:
+                    df = new_df
+                return df[df["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
         except Exception as exc:
-            logger.warning("daily_bars 回源失败：%s", exc)
-            if cached is not None and not cached.empty:
-                return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
-            return pd.DataFrame()
-
-        # 3) 写盘（按 date 拆分）
-        if df is not None and not df.empty:
-            try:
-                await cache_disk.write_bars(market, df)
-            except Exception as exc:
-                logger.warning("bars 写盘失败（不影响请求）: %s", exc)
-        return df
+            logger.warning("daily_bars 增量回源失败：%s", exc)
+        
+        # 失败则返回已有的部分
+        if cached is not None and not cached.empty:
+            return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
+        return pd.DataFrame()
 
     # ── index 成分 ──────────────────────────────────────────────────────────
 
@@ -162,6 +175,7 @@ class CachedDataAdapter:
         self,
         index_code: str,
         trace: list[ProviderTrace] | None = None,
+        market: str | None = None,
     ) -> list[str]:
         cached = await cache_disk.read_index(index_code)
         if cached:
@@ -181,6 +195,7 @@ class CachedDataAdapter:
 
         symbols = await self._registry.call_with_fallback(
             ProviderCapability.INDEX_WEIGHT, invoker, trace,
+            market=market,
         )
         if symbols:
             try:

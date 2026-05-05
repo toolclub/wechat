@@ -28,6 +28,7 @@ class MarketDataProvider(Protocol):
     name: str
     priority: int
     capabilities: set[ProviderCapability]
+    supported_markets: set[str]
 
     async def health_check(self) -> ProviderHealth: ...
 

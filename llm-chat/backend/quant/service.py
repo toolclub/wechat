@@ -280,7 +280,7 @@ class QuantScreeningService:
                 if index_code == "nasdaq": index_code = "nasdaq_list"
                 elif index_code == "sp500": index_code = "sp500_list"
 
-            symbols = await self._adapter.index_constituents(index_code, trace)
+            symbols = await self._adapter.index_constituents(index_code, trace, market=criteria.market)
         except Exception as exc:
             logger.warning("获取指数 %s 成分股失败，回退全市场: %s", criteria.universe, exc)
             warnings.append(f"获取指数成分股失败：{exc}; 回退到全市场")

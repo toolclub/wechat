@@ -61,6 +61,7 @@ class AKShareUSProvider:
         ProviderCapability.REALTIME_SNAPSHOT,
         ProviderCapability.DAILY_BARS,
     }
+    supported_markets = {"us_stock"}
 
     def __init__(self, priority: int = 110, max_concurrency: int = 4) -> None:
         self.priority = priority

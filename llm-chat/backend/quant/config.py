@@ -30,5 +30,5 @@ QUANT_WARMER_ENABLED: bool = bool(getattr(settings, "quant_warmer_enabled", True
 QUANT_WARMER_SPOT_INTERVAL: int = int(getattr(settings, "quant_warmer_spot_interval", 1800))
 QUANT_WARMER_BARS_HOUR: int = int(getattr(settings, "quant_warmer_bars_hour", 16))
 QUANT_WARMER_INDEX_HOUR: int = int(getattr(settings, "quant_warmer_index_hour", 7))
-QUANT_SPOT_FRESH_SECONDS: int = int(getattr(settings, "quant_spot_fresh_seconds", 1800))
+QUANT_SPOT_FRESH_SECONDS: int = int(getattr(settings, "quant_spot_fresh_seconds", 3600))
 QUANT_BARS_LOOKBACK_DAYS: int = int(getattr(settings, "quant_bars_lookback_days", 120))

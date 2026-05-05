@@ -368,7 +368,7 @@ class WarmerState:
         ]
         for code, market in indices:
             try:
-                syms = await adapter.index_constituents(code)
+                syms = await adapter.index_constituents(code, market=market)
                 if syms:
                     ok += 1
                     logger.info("    ∟ Index %s (%s) 加载成功 | 数量: %d", code, market, len(syms))

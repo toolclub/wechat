@@ -79,6 +79,7 @@ class AKShareProvider:
         ProviderCapability.INDEX_WEIGHT,
         ProviderCapability.TRADING_CALENDAR,
     }
+    supported_markets = {"cn_a"}
 
     def __init__(self, priority: int = 100, max_concurrency: int = 8) -> None:
         self.priority = priority
