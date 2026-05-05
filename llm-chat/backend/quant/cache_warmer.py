@@ -195,15 +195,15 @@ class WarmerState:
             last_spot_val = float(last_spot) if last_spot else 0.0
         except Exception:
             last_spot_val = self.last_spot_ok
-# spot：行情时间窗 + 间隔到了
-if _is_trading_hours(now) or _is_us_trading_hours(now):
-    need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
-    if need or self._first_tick:
-        # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
-        # 注意：这里会静默尝试获取锁，抢不到就跳过，不会踢掉手动任务
-        await self._refresh_once(["spot", "bars_top"])
-        self._first_tick = False
 
+        # spot：行情时间窗 + 间隔到了
+        if _is_trading_hours(now) or _is_us_trading_hours(now):
+            need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
+            if need or self._first_tick:
+                # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
+                # 注意：这里会静默尝试获取锁，抢不到就跳过，不会踢掉手动任务
+                await self._refresh_once(["spot", "bars_top"])
+                self._first_tick = False
 
         # 全量预热：凌晨跑 (4 AM)
         today = date.today()
