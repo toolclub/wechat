@@ -252,7 +252,7 @@ class LLMClient:
         import json
         yield ("__done__", json.dumps({
             "content": content,
-            "thinking": thinking,
+            "thinking": thinking, # 这里就是 reasoning_content
             "tool_calls": tool_calls,
         }, ensure_ascii=False))
 

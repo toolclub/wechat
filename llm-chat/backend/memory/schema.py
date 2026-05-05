@@ -16,6 +16,7 @@ class Message:
     thinking: str = ""       # 思考纯文本（向后兼容，= 所有 segments 拼接）
     thinking_segments: list = field(default_factory=list)
     # 结构化思考段：[{"node", "step_index", "phase", "content"}]
+    tool_calls: list = field(default_factory=list)  # 保存原始 tool_calls 供重放历史
 
 
 @dataclass

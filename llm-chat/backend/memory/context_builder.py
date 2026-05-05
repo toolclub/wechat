@@ -135,7 +135,28 @@ def build_messages(
                 # 压缩后 tool_summary 已清空，不会重复注入
                 if msg.tool_summary:
                     content += "\n\n[工具调用摘要] " + msg.tool_summary[:300]
-                messages.append(AIMessage(content=content))
+                
+                # DeepSeek thinking 模式适配：保留 reasoning_content 和 tool_calls
+                # 使用 additional_kwargs 暂存，供 BaseNode._to_openai_messages 提取
+                additional_kwargs = {}
+                if msg.thinking:
+                    additional_kwargs["reasoning_content"] = msg.thinking
+                
+                # 恢复消息详情中的工具调用，确保 MiniMax/DeepSeek 等模型重放上下文一致
+                tool_calls = None
+                try:
+                    # MessageDetailStore 加载的消息详情存放在额外的 metadata 或后续补充逻辑中
+                    # 这里假设 schema.Message 已经通过 memory/store.py 加载了这些属性
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        tool_calls = msg.tool_calls
+                except Exception:
+                    pass
+
+                messages.append(AIMessage(
+                    content=content, 
+                    additional_kwargs=additional_kwargs,
+                    tool_calls=tool_calls or []
+                ))
 
     return messages
 

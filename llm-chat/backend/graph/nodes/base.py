@@ -83,6 +83,12 @@ class BaseNode(ABC):
 
             # AIMessage 中的 tool_calls 转 OpenAI function calling 格式
             if role == "assistant":
+                # ── 适配 DeepSeek 推理内容 ──────────────────────────────────
+                # 从 context_builder 存入的 additional_kwargs 中提取
+                reasoning = msg.additional_kwargs.get("reasoning_content")
+                if reasoning:
+                    entry["reasoning_content"] = reasoning
+
                 lc_tool_calls = getattr(msg, "tool_calls", None) or []
                 if lc_tool_calls:
                     oai_tool_calls = []
@@ -385,6 +391,7 @@ class BaseNode(ABC):
             return {"messages": [], "full_response": ""}
 
         content = final_data.get("content", "")
+        thinking = final_data.get("thinking", "")
         tool_calls_raw = final_data.get("tool_calls", [])
 
         if tool_calls_raw:
@@ -406,11 +413,14 @@ class BaseNode(ABC):
                 conv_id, node, len(content),
                 [tc["name"] for tc in lc_tool_calls],
             )
-            return {
+            result = {
                 "messages": [ai_msg],
                 "full_response": content,
                 "_was_streamed": True,
             }
+            if thinking:
+                result["full_thinking"] = thinking
+            return result
         else:
             # 无 tool_calls → 纯文本回复
             ai_msg = AIMessage(content=content)
@@ -418,11 +428,14 @@ class BaseNode(ABC):
                 "_stream_tokens_with_tools 完成（纯文本）| conv=%s | node=%s | content_len=%d",
                 conv_id, node, len(content),
             )
-            return {
+            result = {
                 "messages": [ai_msg],
                 "full_response": content,
                 "_was_streamed": True,
             }
+            if thinking:
+                result["full_thinking"] = thinking
+            return result
 
     @classmethod
     def _is_audit_error(cls, exc: Exception) -> bool:

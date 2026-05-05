@@ -41,6 +41,10 @@ def all_conversations(client_id: str = "", user_id: str = "") -> list[Conversati
 
 # ── DB 直查接口（多 worker 安全，供 API 端点使用）────────────────────────────────
 
+from db.models import ConversationModel, MessageModel, ToolExecutionModel
+
+# ... (imports unchanged)
+
 async def db_get_conversation(conv_id: str) -> Optional[dict]:
     """从 DB 直接读取对话（跨 worker 一致性）。返回 dict 或 None。"""
     async with AsyncSessionLocal() as session:
@@ -55,6 +59,25 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
         )
         msg_rows = msgs_result.scalars().all()
 
+        # 批量获取本会话的所有工具调用记录
+        tool_execs_result = await session.execute(
+            select(ToolExecutionModel)
+            .where(ToolExecutionModel.conv_id == conv_id)
+            .order_by(ToolExecutionModel.sequence_number.asc())
+        )
+        tool_rows = tool_execs_result.scalars().all()
+        
+        # 按 message_id 分组工具调用（LangChain 格式）
+        from collections import defaultdict
+        msg_tool_calls = defaultdict(list)
+        for tr in tool_rows:
+            msg_tool_calls[tr.message_id].append({
+                "id": f"call_{tr.id}", # 还原 ID
+                "name": tr.tool_name,
+                "args": tr.tool_input,
+                "type": "tool_call"
+            })
+
         # 同时刷新本 worker 的内存缓存
         messages = [
             Message(
@@ -63,6 +86,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
                 step_summary=getattr(mr, "step_summary", "") or "",
                 thinking=getattr(mr, "thinking", "") or "",
                 thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
+                tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), [])
             )
             for mr in msg_rows
         ]
@@ -140,6 +164,25 @@ async def init() -> None:
                 .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
             )
             msg_rows = msgs_result.scalars().all()
+            
+            # 批量获取本会话的所有工具调用记录
+            tool_execs_result = await session.execute(
+                select(ToolExecutionModel)
+                .where(ToolExecutionModel.conv_id == row.id)
+                .order_by(ToolExecutionModel.sequence_number.asc())
+            )
+            tool_rows = tool_execs_result.scalars().all()
+            
+            from collections import defaultdict
+            msg_tool_calls = defaultdict(list)
+            for tr in tool_rows:
+                msg_tool_calls[tr.message_id].append({
+                    "id": f"call_{tr.id}",
+                    "name": tr.tool_name,
+                    "args": tr.tool_input,
+                    "type": "tool_call"
+                })
+
             messages = [
                 Message(
                     role=mr.role,
@@ -150,6 +193,7 @@ async def init() -> None:
                     step_summary=getattr(mr, "step_summary", "") or "",
                     thinking=getattr(mr, "thinking", "") or "",
                     thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
+                    tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), [])
                 )
                 for mr in msg_rows
             ]
@@ -327,6 +371,7 @@ async def add_message(
     msg = Message(
         role=role, content=content, timestamp=now, id=msg_db_id,
         tool_summary=tool_summary, step_summary=step_summary,
+        tool_calls=[] # 新消息初始工具调用为空，后续由 ToolExecution 关联
     )
     conv.messages.append(msg)
     conv.updated_at = now
