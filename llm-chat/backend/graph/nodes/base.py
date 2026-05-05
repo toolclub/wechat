@@ -334,8 +334,14 @@ class BaseNode(ABC):
             "_stream_tokens 完成 | conv=%s | node=%s | tokens=%d | content_len=%d | thinking_len=%d",
             conv_id, node, token_count, len(full_content), len(full_thinking),
         )
+        
+        # 将 thinking 塞入 AIMessage 的 additional_kwargs，确保图执行期间后续节点能拿到
+        additional_kwargs = {}
+        if full_thinking:
+            additional_kwargs["reasoning_content"] = full_thinking
+            
         result: dict = {
-            "messages":      [AIMessage(content=full_content)],
+            "messages":      [AIMessage(content=full_content, additional_kwargs=additional_kwargs)],
             "full_response": full_content,
             "_was_streamed": True,
         }
@@ -394,6 +400,11 @@ class BaseNode(ABC):
         thinking = final_data.get("thinking", "")
         tool_calls_raw = final_data.get("tool_calls", [])
 
+        # 统一提取推理内容
+        additional_kwargs = {}
+        if thinking:
+            additional_kwargs["reasoning_content"] = thinking
+
         if tool_calls_raw:
             # 有 tool_calls → 构建 LangChain AIMessage
             lc_tool_calls = []
@@ -406,7 +417,11 @@ class BaseNode(ABC):
                     "id": tc["id"], "name": tc["name"],
                     "args": args, "type": "tool_call",
                 })
-            ai_msg = AIMessage(content=content, tool_calls=lc_tool_calls)
+            ai_msg = AIMessage(
+                content=content, 
+                tool_calls=lc_tool_calls,
+                additional_kwargs=additional_kwargs
+            )
             logger.info(
                 "_stream_tokens_with_tools 完成（tool_calls）| conv=%s | node=%s | "
                 "content_len=%d | tool_calls=%s",
@@ -423,7 +438,7 @@ class BaseNode(ABC):
             return result
         else:
             # 无 tool_calls → 纯文本回复
-            ai_msg = AIMessage(content=content)
+            ai_msg = AIMessage(content=content, additional_kwargs=additional_kwargs)
             logger.info(
                 "_stream_tokens_with_tools 完成（纯文本）| conv=%s | node=%s | content_len=%d",
                 conv_id, node, len(content),
