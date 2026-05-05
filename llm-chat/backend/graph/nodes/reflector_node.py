@@ -48,6 +48,8 @@ class ReflectorNode(BaseNode):
     通过分层快速路径大幅减少 LLM 调用：
     - 绝大多数步骤（有响应 + 首次执行）直接 continue/done，无 LLM 开销
     - 只有重试中的边缘场景才真正调用 LLM 进行质量评估
+    """
+
     @property
     def name(self) -> str:
         return "reflector"
@@ -98,334 +100,211 @@ class ReflectorNode(BaseNode):
             if step_iters < _MAX_STEP_ITERATIONS - 1 and await self._last_tool_failed(state):
                 logger.info(
                     "reflector retry (last-step tool failed) | conv=%s | step=%d | iters=%d",
-                    state.get("conv_id", ""), current_idx + 1, step_iters,
+                    state.get("conv_id", ""), current_idx, step_iters,
                 )
                 updated_plan = self._mark_step(plan, current_idx, "running")
                 return {
                     "reflector_decision": "retry",
-                    "reflection":         "最后一步工具执行失败，重试以修复",
+                    "reflection":         "最后一步工具执行失败，尝试修复并重新执行",
                     "plan":               updated_plan,
                     "step_iterations":    step_iters + 1,
-                    "forget_mode":        False,
                 }
-            return await self._make_done_result(state, plan, current_idx, full_response)
 
-        # ── 快速路径 4：非最后步骤 + 有响应 + 首次执行 → continue（最常见路径）──
-        # 这覆盖了绝大多数正常多步执行场景，彻底消除 reflector LLM 调用
+            # 正常完成：标记最后一步完成
+            updated_plan = self._mark_step(plan, current_idx, "done")
+            return {
+                "reflector_decision": "done",
+                "reflection":         "最后一步执行完成",
+                "plan":               updated_plan,
+            }
+
+        # ── 快速路径 4：非最后步骤 + 有响应 + 首次执行 → 直接推进 ─────────────────
         if not is_last and full_response and step_iters == 0:
-            return await self._make_continue_result(state, plan, current_idx, total, full_response)
+            updated_plan = self._mark_step(plan, current_idx, "done")
+            # 下一步自动设为 running
+            updated_plan = self._mark_step(updated_plan, current_idx + 1, "running")
+            # 注入下一步指令
+            messages = self._build_next_step_messages(state, updated_plan, current_idx + 1)
+            
+            logger.info(
+                "reflector continue (fast-path) | conv=%s | step=%d -> %d",
+                state.get("conv_id", ""), current_idx, current_idx + 1,
+            )
+            return {
+                "reflector_decision": "continue",
+                "reflection":         f"步骤 {current_idx + 1} 完成，推进到步骤 {current_idx + 2}",
+                "plan":               updated_plan,
+                "current_step_index": current_idx + 1,
+                "step_iterations":    0,
+                "messages":           messages,
+            }
 
-        # ── 快速路径 5：无响应 + 可重试 → retry ──────────────────────────────────
+        # ── 快速路径 5：无响应 + 可重试 → retry ──────────────────────────────
         if not full_response and step_iters < _MAX_STEP_ITERATIONS - 1:
             logger.info(
-                "reflector fast-retry | conv=%s | step=%d | iters=%d | 无响应重试",
-                state.get("conv_id", ""), current_idx + 1, step_iters,
+                "reflector retry (no response) | conv=%s | step=%d | iters=%d",
+                state.get("conv_id", ""), current_idx, step_iters,
             )
             updated_plan = self._mark_step(plan, current_idx, "running")
             return {
                 "reflector_decision": "retry",
-                "reflection":         "步骤未产生响应，自动重试",
+                "reflection":         "未获得有效响应，尝试重新执行当前步骤",
                 "plan":               updated_plan,
                 "step_iterations":    step_iters + 1,
-                "forget_mode":        False,
             }
 
-        # ── LLM 评估：仅用于重试中有响应的边缘场景 ───────────────────────────────
-        return await self._llm_evaluate(state, plan, current_idx, total, step_iters, full_response, is_last)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # 结果构建
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _make_done_result(
-        self,
-        state: GraphState,
-        plan: list[PlanStep],
-        current_idx: int,
-        full_response: str,
-    ) -> ReflectorNodeOutput:
-        """标记当前步骤完成，累积 step_results，返回 done。"""
-        updated_plan = self._mark_step(plan, current_idx, "done")
-        updated_plan[current_idx] = {**updated_plan[current_idx], "result": full_response[:3000]}
-
-        step_results = self._accumulate_step_results(state, full_response)
-        await self._persist_step(state, current_idx, full_response, current_idx + 1)
-
+        # ── LLM 评估路径 ──────────────────────────────────────────────────────
+        # 触发场景：重试中（step_iters > 0）且获得了响应，需要判断是否改进到可接受
         logger.info(
-            "reflector done (fast) | conv=%s | step=%d/%d",
-            state.get("conv_id", ""), current_idx + 1, len(plan),
+            "reflector LLM 评估触发 | conv=%s | step=%d | iters=%d",
+            state.get("conv_id", ""), current_idx, step_iters,
         )
-        result: ReflectorNodeOutput = {
-            "reflector_decision": "done",
-            "reflection":         "步骤执行完成",
-            "plan":               updated_plan,
-            "step_results":       step_results,
-        }
-        # 兜底 response 写回 state，确保 save_response 不存空内容
-        if full_response and not state.get("full_response"):
-            result["full_response"] = full_response
-        return result
+        return await self._evaluate_with_llm(state, plan, current_idx, step_iters, full_response)
 
-    async def _make_continue_result(
-        self,
-        state: GraphState,
-        plan: list[PlanStep],
-        current_idx: int,
-        total: int,
-        full_response: str,
+    async def _evaluate_with_llm(
+        self, state: GraphState, plan: list[PlanStep], 
+        idx: int, iters: int, response: str,
     ) -> ReflectorNodeOutput:
-        """标记当前步骤完成，构建下一步指令（含前序步骤摘要），返回 continue。"""
-        updated_plan = self._mark_step(plan, current_idx, "done")
-        updated_plan[current_idx] = {**updated_plan[current_idx], "result": full_response[:3000]}
+        """调用 LLM 评估当前步骤执行质量。"""
+        model = state.get("tool_model") or state["model"]
+        llm = get_chat_llm(model=model, temperature=0.0)
 
-        next_idx     = current_idx + 1
-        updated_plan = self._mark_step(updated_plan, next_idx, "running")
-
-        step_results = self._accumulate_step_results(state, full_response)
-        await self._persist_step(state, current_idx, full_response, next_idx)
-
-        step_msg = self._build_step_message(updated_plan, current_idx, next_idx, total, step_results)
-
-        logger.info(
-            "reflector continue (fast) | conv=%s | step=%d→%d/%d",
-            state.get("conv_id", ""), current_idx + 1, next_idx + 1, total,
+        step = plan[idx]
+        user_msg = state.get("user_message", "")
+        
+        # 构建评估提示
+        prompt = (
+            f"用户原始需求：{user_msg}\n\n"
+            f"当前正在执行第 {idx + 1} 步：{step['title']}\n"
+            f"步骤描述：{step['description']}\n\n"
+            f"模型给出的执行结果：\n---\n{response}\n---\n\n"
+            "请评估该结果是否完成了本步骤的任务？\n"
+            "若完成或基本完成（即使有小瑕疵但能继续），请输出：DONE | <简短理由>\n"
+            "若完全没完成、逻辑严重错误或拒绝执行，请输出：RETRY | <具体改进建议>\n"
         )
-        result: ReflectorNodeOutput = {
-            "reflector_decision": "continue",
-            "reflection":         f"步骤 {current_idx + 1} 完成，继续步骤 {next_idx + 1}",
-            "plan":               updated_plan,
-            "messages":           [step_msg],
-            "current_step_index": next_idx,
-            "step_iterations":    0,
-            "step_results":       step_results,
-        }
-        if full_response and not state.get("full_response"):
-            result["full_response"] = full_response
-        return result
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # LLM 评估（仅边缘场景）
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _llm_evaluate(
-        self,
-        state: GraphState,
-        plan: list[PlanStep],
-        current_idx: int,
-        total: int,
-        step_iters: int,
-        full_response: str,
-        is_last: bool,
-    ) -> ReflectorNodeOutput:
-        """LLM 评估：仅在重试中有响应时调用，判断质量是否足够好。"""
-        model = state.get("answer_model") or state.get("model", "")
-        llm   = get_chat_llm(model=model, temperature=0.1)
-
-        messages      = list(state.get("messages", []))
-        recent        = messages[-5:] if len(messages) > 5 else messages
-        recent_text   = "\n".join(
-            f"[{type(m).__name__}]: {str(m.content)[:500]}" for m in recent
-        )
-        current_step  = plan[current_idx]
-        eval_prompt   = (
-            f"执行计划共 {total} 步，当前步骤 {current_idx + 1}：{current_step['title']}\n"
-            f"步骤描述：{current_step['description']}\n\n"
-            f"最近执行记录：\n{recent_text}\n\n"
-            f"是否还有后续步骤：{'是' if not is_last else '否（这是最后一步）'}\n"
-            f"已重试 {step_iters} 次。"
-        )
-
-        messages_for_llm = [
+        
+        # 路由 model 也要披露思考过程
+        messages = [
             {"role": "system", "content": _REFLECTOR_SYSTEM},
-            {"role": "user",   "content": eval_prompt},
+            {"role": "user", "content": prompt},
         ]
-
-        from logging_config import log_prompt
-        log_prompt(state.get("conv_id", ""), "reflector", model, messages_for_llm)
-
-        decision        = "done"
-        reflection_text = "评估完成"
-        usage_data      = {}
+        
+        content = ""
+        usage_data = {}
         try:
-            # 流式调用：逐 token 推送 thinking 事件给前端，避免长时间静默
-            _THINK_PREFIX = "\x00THINK\x00"
-            content_parts: list[str] = []
-            # reflector 在某个步骤上下文里评估，step_index 从 state 读
-            step_idx_for_think = self._active_step_index(state)
-            async for delta in llm.astream(messages_for_llm, temperature=0.1):
+            # 评估过程也流式（披露反思逻辑）
+            async for delta in llm.astream(messages, temperature=0.0):
                 if isinstance(delta, dict) and "usage" in delta:
                     usage_data = delta["usage"]
                     continue
-                
-                if delta.startswith(_THINK_PREFIX):
-                    thinking_text = delta[len(_THINK_PREFIX):]
-                    await self.emit_thinking("reflector", "reasoning", thinking_text, step_idx_for_think)
+                if delta.startswith(BaseNode._THINK_PREFIX):
+                    thinking_text = delta[len(BaseNode._THINK_PREFIX):]
+                    await self.emit_thinking("reflector", "reasoning", thinking_text, idx)
                 else:
-                    content_parts.append(delta)
-                    # reflector 的 JSON 生成过程作为 content phase 披露
-                    await self.emit_thinking("reflector", "content", delta, step_idx_for_think)
-            raw = "".join(content_parts).strip()
-            if not raw:
-                raise ValueError("LLM 返回空内容")
-            if "```" in raw:
-                for part in raw.split("```"):
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:].strip()
-                    if part.startswith("{"):
-                        raw = part
-                        break
-            data            = json.loads(raw)
-            decision        = data.get("decision", "done")
-            reflection_text = data.get("reflection", "")
-            if decision not in ("done", "continue", "retry"):
-                decision = "done"
+                    content += delta
+            
+            raw = content.strip().upper()
         except Exception as exc:
-            logger.warning("Reflector LLM 失败: %s，默认完成", exc)
+            logger.warning("reflector LLM 评估异常: %s，降级到 done", exc)
+            raw = "DONE"
 
-        logger.info(
-            "reflector LLM decision | conv=%s | step=%d/%d | decision=%s | iters=%d",
-            state.get("conv_id", ""), current_idx + 1, total, decision, step_iters,
-        )
-
-        if decision == "continue" and not is_last:
-            res = await self._make_continue_result(state, plan, current_idx, total, full_response)
-            res["usage"] = usage_data
-            return res
-        elif decision == "retry" and step_iters < _MAX_STEP_ITERATIONS - 1:
-            updated_plan = self._mark_step(plan, current_idx, "running")
+        if "RETRY" in raw and iters < _MAX_STEP_ITERATIONS - 1:
+            decision = "retry"
+            reflection = raw.split("|")[-1].strip() if "|" in raw else "建议重试以改进质量"
+            updated_plan = self._mark_step(plan, idx, "running")
             return {
                 "reflector_decision": "retry",
-                "reflection":         reflection_text,
+                "reflection":         reflection,
                 "plan":               updated_plan,
-                "step_iterations":    step_iters + 1,
+                "step_iterations":    iters + 1,
                 "usage":              usage_data,
             }
         else:
-            # done 或 continue 溢出边界 → 视为完成
-            res = await self._make_done_result(state, plan, current_idx, full_response or "(步骤结果为空)")
-            res["usage"] = usage_data
-            return res
+            decision = "done"
+            reflection = raw.split("|")[-1].strip() if "|" in raw else "步骤执行通过"
+            updated_plan = self._mark_step(plan, idx, "done")
+            
+            if idx < len(plan) - 1:
+                # 还有下一步，推进
+                updated_plan = self._mark_step(updated_plan, idx + 1, "running")
+                messages = self._build_next_step_messages(state, updated_plan, idx + 1)
+                return {
+                    "reflector_decision": "continue",
+                    "reflection":         reflection,
+                    "plan":               updated_plan,
+                    "current_step_index": idx + 1,
+                    "step_iterations":    0,
+                    "messages":           messages,
+                    "usage":              usage_data,
+                }
+            else:
+                # 全部完成
+                return {
+                    "reflector_decision": "done",
+                    "reflection":         reflection,
+                    "plan":               updated_plan,
+                    "usage":              usage_data,
+                }
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # 工具方法
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _build_fallback_response(state: GraphState) -> str:
+    def _build_next_step_messages(self, state: GraphState, plan: list[PlanStep], next_idx: int) -> list:
         """
-        从 messages 中的 ToolMessage 构建兜底响应摘要。
-
-        当模型只产出了 tool_calls 没有 content 时（如工具上限截断），
-        收集最近的工具执行结果作为 full_response，确保 save_response 不存空内容。
+        构建进入下一步时所需的聚焦消息指令。
+        
+        策略：在 messages 中追加一条 HumanMessage，明确告知"上一步已完成，现在开始下一步"。
         """
-        messages = state.get("messages", [])
-        parts: list[str] = []
+        from langchain_core.messages import HumanMessage
+        
+        prev_step = plan[next_idx - 1]
+        next_step = plan[next_idx]
+        
+        # 提取上一步的执行结果摘要（避免 full_response 过长淹没指令）
+        res = state.get("full_response", "")
+        res_summary = (res[:_STEP_RESULT_SUMMARY_LEN] + "...") if len(res) > _STEP_RESULT_SUMMARY_LEN else res
+        
+        instruction = (
+            f"✅ **[步骤 {next_idx} 已完成]**: {prev_step['title']}\n"
+            f"执行结果摘要：\n{res_summary}\n\n"
+            f"---\n\n"
+            f"🚀 **[现在开始执行步骤 {next_idx + 1}/{len(plan)}]**: {next_step['title']}\n"
+            f"具体任务：{next_step['description']}\n"
+            f"请开始执行。"
+        )
+        
+        return [HumanMessage(content=instruction)]
 
-        # 从最后一条 HumanMessage 开始，收集本步骤的所有工具调用和结果
-        for m in reversed(messages):
-            msg_type = type(m).__name__
-            if msg_type == "HumanMessage":
+    async def _last_tool_failed(self, state: GraphState) -> bool:
+        """检查最近的一次工具执行是否失败。"""
+        messages = list(state.get("messages") or [])
+        # 逆序查找最近的 ToolMessage
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if type(msg).__name__ == "ToolMessage":
+                # 简单的失败启发式：内容包含 Error, Exception, Failed 等关键词且较短
+                content = str(msg.content).lower()
+                if any(k in content for k in ("error", "exception", "failed", "not found", "invalid")):
+                    # 排除掉虽然有关键词但内容很长（可能是正常的搜索结果）
+                    if len(content) < 500:
+                        return True
                 break
-            if msg_type == "AIMessage" and hasattr(m, "content") and m.content:
-                parts.append(str(m.content)[:1000])
-            elif msg_type == "ToolMessage" and hasattr(m, "content") and m.content:
-                parts.append(str(m.content)[:500])
-
-        if not parts:
-            return ""
-        parts.reverse()
-        return "\n\n".join(parts)
-
-    @staticmethod
-    async def _last_tool_failed(state: GraphState) -> bool:
-        """从 tool_executions DB 查询最近一次工具调用是否失败。"""
-        conv_id = state.get("conv_id", "")
-        if not conv_id:
-            return False
-        try:
-            from db.tool_store import get_tool_executions_for_conv
-            tool_execs = await get_tool_executions_for_conv(conv_id)
-            if tool_execs:
-                return tool_execs[-1].get("status") == "error"
-        except Exception:
-            pass
+            # 如果先遇到了 HumanMessage/SystemMessage 还没找到 ToolMessage，说明这轮没调工具
+            if type(msg).__name__ in ("HumanMessage", "SystemMessage"):
+                break
         return False
 
-    @staticmethod
-    def _accumulate_step_results(state: GraphState, full_response: str) -> list[str]:
-        """将当前步骤结果追加到 step_results 列表（截断防止无限增长）。"""
-        existing = list(state.get("step_results") or [])
-        if full_response:
-            existing.append(full_response[:3000])
-        return existing
-
-    @staticmethod
-    async def _persist_step(
-        state: GraphState,
-        step_idx: int,
-        full_response: str,
-        next_step: int,
-    ) -> None:
-        """持久化步骤结果到 DB（失败仅记录日志，不影响主流程）。"""
-        plan_id = state.get("plan_id", "")
-        if not plan_id or not full_response:
-            return
-        try:
-            from db.plan_store import save_step_result
-            await save_step_result(plan_id, step_idx, full_response, next_step)
-        except Exception as exc:
-            logger.warning("DB 步骤结果写入失败（不影响主流程）: %s", exc)
-
-    @staticmethod
-    def _build_step_message(
-        plan: list[PlanStep],
-        done_idx: int,
-        next_idx: int,
-        total: int,
-        step_results: list[str],
-    ) -> HumanMessage:
+    def _build_fallback_response(self, state: GraphState) -> str:
         """
-        构建步骤过渡指令消息。
-
-        包含：
-        - 已完成步骤的结果摘要（让模型知道之前做了什么）
-        - 下一步骤的标题和描述
-        - 是否为末步的行动指引
+        从工具结果中提取信息，为没有 content 的回复构建兜底文本。
         """
-        next_step    = plan[next_idx]
-        is_next_last = next_idx >= total - 1
-
-        # 前序步骤结果摘要（最多展示最近 3 步的摘要）
-        summary_parts: list[str] = []
-        for i, res in enumerate(step_results[-3:], start=max(0, done_idx - 2)):
-            if res:
-                short = res[:_STEP_RESULT_SUMMARY_LEN]
-                if len(res) > _STEP_RESULT_SUMMARY_LEN:
-                    short += "..."
-                summary_parts.append(f"步骤 {i + 1} 结果摘要：{short}")
-
-        summary_block = (
-            "\n\n**已完成步骤摘要**\n" + "\n".join(summary_parts)
-            if summary_parts else ""
-        )
-
-        if is_next_last:
-            action_hint = (
-                "请基于以上所有步骤的执行结果，生成完整的最终回复。"
-                "直接输出最终内容，不要再调用工具。"
-            )
-        else:
-            action_hint = (
-                "请完成此步骤的任务：若需要新信息则使用工具；"
-                "否则直接给出本步骤的摘要结论（不要提前生成最终回复）。"
-            )
-
-        content = (
-            f"步骤 {done_idx + 1} 已完成。{summary_block}\n\n"
-            f"**[执行步骤 {next_idx + 1}/{total}]: {next_step['title']}**\n"
-            f"具体任务：{next_step['description']}\n\n"
-            f"{action_hint}"
-        )
-
-        return HumanMessage(content=content)
+        messages = list(state.get("messages") or [])
+        parts = []
+        for m in messages[-5:]:  # 只看最近几条
+            if type(m).__name__ == "ToolMessage":
+                content = str(m.content)
+                # 提取前 300 字作为摘要
+                summary = content[:300] + ("..." if len(content) > 300 else "")
+                parts.append(f"[工具执行结果]: {summary}")
+        
+        if not parts:
+            return ""
+            
+        return "模型已执行以下工具操作：\n\n" + "\n\n".join(parts)
