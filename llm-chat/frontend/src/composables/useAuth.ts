@@ -10,7 +10,7 @@ const initialized = ref(false)
 
 export function useAuth() {
   const isLoggedIn = computed(() => user.value !== null)
-  const userName = computed(() => user.value?.name || '匿名用户')
+  const userName = computed(() => user.value?.name || '游客')
   const userAvatar = computed(() => user.value?.avatar_url || '')
   const userEmail = computed(() => user.value?.email || '')
 

@@ -329,13 +329,19 @@ onMounted(() => {
       <!-- 已登录 -->
       <div v-if="auth.isLoggedIn.value" class="user-area" @click="showDropdown = !showDropdown">
         <div class="user-row">
-          <img :src="auth.userAvatar.value" class="user-avatar-img" referrerpolicy="no-referrer" />
+          <img v-if="auth.userAvatar.value" :src="auth.userAvatar.value" class="user-avatar-img" referrerpolicy="no-referrer" @error="(e: any) => e.target.style.display='none'" />
+          <div v-else class="guest-avatar" style="width: 28px; height: 28px;">
+            <el-icon :size="16"><User /></el-icon>
+          </div>
           <span class="user-name">{{ auth.userName.value }}</span>
         </div>
         <!-- 下拉菜单 -->
         <div v-if="showDropdown" class="user-dropdown-inline" @click.stop>
           <div class="dropdown-item header">
-            <img :src="auth.userAvatar.value" class="dropdown-avatar" referrerpolicy="no-referrer" />
+            <img v-if="auth.userAvatar.value" :src="auth.userAvatar.value" class="dropdown-avatar" referrerpolicy="no-referrer" />
+            <div v-else class="guest-avatar" style="width: 32px; height: 32px; margin-right: 10px;">
+              <el-icon :size="18"><User /></el-icon>
+            </div>
             <div>
               <div class="dropdown-name">{{ auth.userName.value }}</div>
               <div class="dropdown-email">{{ auth.userEmail.value }}</div>
@@ -354,7 +360,7 @@ onMounted(() => {
             <el-icon :size="16"><User /></el-icon>
           </div>
           <div class="user-meta">
-            <span class="user-name">未登录</span>
+            <span class="user-name">游客</span>
             <span class="user-status">点击登录</span>
           </div>
         </div>

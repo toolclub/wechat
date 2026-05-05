@@ -117,13 +117,15 @@ async def oauth_callback(
         await session_store.create_session(user["id"], refresh_token)
 
         # 7. 设置 HttpOnly Cookie（安全配置从环境变量读取）
+        # 在 HTTPS/生产环境下，samesite="none" + secure=True 兼容性最好，能解决跨域 Cookie 丢失问题
         response.set_cookie(
             key="refresh_token",
             value=refresh_token,
             max_age=settings.jwt_refresh_expire_days * 24 * 60 * 60,
             httponly=True,
-            secure=COOKIE_SECURE,  # 生产环境必须为 True
-            samesite="lax",
+            secure=settings.cookie_secure,
+            samesite="none" if settings.cookie_secure else "lax",
+            path="/",
         )
 
         # 8. 重定向回前端 (使用 Fragment # 传递 access_token)
@@ -208,7 +210,8 @@ async def logout(request: Request, response: Response, user: RequiredUser):
     response.delete_cookie(
         "refresh_token", 
         secure=settings.cookie_secure, 
-        samesite="none" if settings.cookie_secure else "lax"
+        samesite="none" if settings.cookie_secure else "lax",
+        path="/",
     )
     return {"success": True}
 
