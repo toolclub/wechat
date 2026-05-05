@@ -10,7 +10,7 @@ const props = defineProps<{
   currentConvId: string | null
   activeConvIds?: Set<string>
   creating?: boolean
-  activeWorkspace?: 'chat' | 'quant'
+  activeWorkspace?: 'chat' | 'quant' | 'stock_detail' | 'admin'
 }>()
 
 const emit = defineEmits<{

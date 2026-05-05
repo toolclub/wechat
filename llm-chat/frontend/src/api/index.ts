@@ -105,8 +105,10 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
   return response
 }
 
-export async function get<T>(path: string): Promise<T> {
-  const res = await fetchWithAuth(`${API_BASE}${path}`)
+export async function get<T>(path: string, params: Record<string, any> = {}, headers: Record<string, string> = {}): Promise<T> {
+  const query = new URLSearchParams(params).toString()
+  const url = `${API_BASE}${path}${query ? '?' + query : ''}`
+  const res = await fetchWithAuth(url, { headers })
   if (!res.ok) {
     const error = await res.json().catch(() => ({}))
     throw new Error(error.detail || `Request failed with status ${res.status}`)

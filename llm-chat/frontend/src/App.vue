@@ -9,7 +9,7 @@ import CognitivePanel from './components/CognitivePanel.vue'
 import QuantView from './components/QuantView.vue'
 import StockDetailView from './components/StockDetailView.vue'
 import LoginView from './components/LoginView.vue'
-import AdminDashboard from './components/AdminDashboard.vue'
+import SystemDashboard from './components/SystemDashboard.vue'
 
 const chat = useChat()
 const auth = useAuth()
@@ -351,7 +351,7 @@ function onDragStart(e: MouseEvent) {
       />
 
       <!-- 管理者面板 -->
-      <AdminDashboard
+      <SystemDashboard
         v-if="activeWorkspace === 'admin'"
         :admin-key="verifiedAdminKey"
         @back="activeWorkspace = 'chat'"
