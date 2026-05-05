@@ -232,8 +232,9 @@ class QuantScreeningService:
         return c
 
     async def _fetch_spot(self, market: str, trace: list[ProviderTrace]) -> pd.DataFrame:
-        """读 spot：disk_cache → Redis（COMPAT）→ provider fallback。"""
-        df = await self._adapter.spot(market, trace)
+        """读 spot：强制 cache 优先，不回源。"""
+        from quant.config import QUANT_FORCE_CACHE
+        df = await self._adapter.spot(market, trace, readonly=QUANT_FORCE_CACHE)
         if df is not None and not df.empty:
             # 顺手填 Redis（10min TTL）
             try:
@@ -387,6 +388,7 @@ class QuantScreeningService:
         days_needed = max(c.momentum_window, c.volatility_window) + 10
         end_d = datetime.now().date()
         start_d = end_d - timedelta(days=int(days_needed * 1.6))
+        from quant.config import QUANT_FORCE_CACHE
         try:
             return await self._adapter.bars(
                 symbols=symbols,
@@ -394,6 +396,7 @@ class QuantScreeningService:
                 end=end_d,
                 market=c.market,
                 trace=trace,
+                readonly=QUANT_FORCE_CACHE,
             )
         except Exception as exc:
             logger.warning("日线拉取失败，技术因子退到 spot 兜底: %s", exc)

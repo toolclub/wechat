@@ -41,9 +41,12 @@ class CachedDataAdapter:
         self,
         market: str,
         trace: list[ProviderTrace] | None = None,
+        *,
+        readonly: bool = False,
     ) -> pd.DataFrame:
         # 1) disk
-        if await cache_disk.is_spot_fresh(market):
+        # 如果是 readonly 或者新鲜，直接读磁盘
+        if readonly or await cache_disk.is_spot_fresh(market):
             df = await cache_disk.read_spot(market)
             if df is not None and not df.empty:
                 if trace is not None:
@@ -57,6 +60,11 @@ class CachedDataAdapter:
                         error=f"age={int(age)}s",
                     ))
                 return df
+
+        # readonly 模式：即使磁盘不新鲜，如果上面没读到（可能文件损坏），也不回源
+        if readonly:
+            logger.warning("spot 模式为 readonly，但磁盘缓存为空或损坏，返回空数据")
+            return pd.DataFrame()
 
         # 2) provider fallback
         async def invoker(provider):

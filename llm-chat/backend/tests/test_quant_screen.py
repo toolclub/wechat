@@ -25,6 +25,8 @@ from quant.service import QuantScreeningService
 @pytest.fixture(autouse=True)
 def _isolate_quant_cache(tmp_path, monkeypatch):
     monkeypatch.setattr("quant.cache_disk.QUANT_CACHE_DIR", str(tmp_path / "quant_cache"))
+    # 测试环境下不强制使用缓存，否则 FakeProvider 无法被调用
+    monkeypatch.setattr("quant.config.QUANT_FORCE_CACHE", False)
     yield
 
 
