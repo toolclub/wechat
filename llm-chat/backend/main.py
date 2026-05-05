@@ -55,6 +55,15 @@ async def lifespan(app: FastAPI):
         await run_migrations(conn)
     logger.info("数据库初始化完成")
 
+    # 1.5 清理过期的量化任务状态
+    try:
+        from db.quant_store import cleanup_stale_quant_sessions
+        cleaned_count = await cleanup_stale_quant_sessions()
+        if cleaned_count > 0:
+            logger.info("已清理 %d 条由于意外中断卡住的量化筛选任务", cleaned_count)
+    except Exception as exc:
+        logger.error("清理过期量化任务失败: %s", exc)
+
     # 2. 从数据库加载对话到内存缓存
     from memory import store as memory_store
     await memory_store.init()

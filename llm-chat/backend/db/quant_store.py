@@ -119,3 +119,17 @@ async def update_quant_analysis(
         snapshot.analysis = analysis or ""
         snapshot.risk_notes = list(risk_notes or [])
         await session.commit()
+
+async def cleanup_stale_quant_sessions() -> int:
+    """系统启动时调用：清理所有卡在 COMPUTING 状态的旧任务。"""
+    from sqlalchemy import update
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            update(QuantSnapshotModel)
+            .where(QuantSnapshotModel.status == "COMPUTING")
+            .values(status="FAILED", analysis="服务重启，筛选任务已中断")
+        )
+        result = await session.execute(stmt)
+        count = result.rowcount
+        await session.commit()
+        return count
