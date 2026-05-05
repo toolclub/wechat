@@ -110,8 +110,8 @@ class LLMClient:
         temperature: float | None = None,
         timeout: float = 180.0,
         extra_body: dict | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """流式调用 LLM。"""
+    ) -> AsyncGenerator[str | dict, None]:
+        """流式调用 LLM。返回 AsyncGenerator，最后一个 yield 可能包含 usage 字典。"""
         temp = temperature if temperature is not None else self.temperature
         eb = extra_body
         if eb is None and self.provider:
@@ -127,6 +127,7 @@ class LLMClient:
             "messages":    messages,
             "temperature": temp,
             "stream":      True,
+            "stream_options": {"include_usage": True},
             "timeout":     timeout,
         }
         if eb:
@@ -137,6 +138,19 @@ class LLMClient:
         )
 
         async for chunk in stream:
+            # 处理 usage (通常在最后一个 chunk)
+            if hasattr(chunk, "usage") and chunk.usage:
+                u = chunk.usage
+                yield {
+                    "usage": {
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "total_tokens": u.total_tokens,
+                        "reasoning_tokens": getattr(u.completion_tokens_details, "reasoning_tokens", 0) if hasattr(u, "completion_tokens_details") else 0
+                    }
+                }
+                continue
+
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -165,6 +179,7 @@ class LLMClient:
             "tools": tools,
             "temperature": temp,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "timeout": timeout,
         }
         if eb:
@@ -187,8 +202,21 @@ class LLMClient:
         _args_last_flush = _time.monotonic()
         _ARGS_FLUSH_INTERVAL = 0.2  # 200ms 发一次
         _ARGS_FLUSH_SIZE = 500      # 或累积 500 字符发一次
+        
+        usage_data = {}
 
         async for chunk in stream:
+            # 处理 usage
+            if hasattr(chunk, "usage") and chunk.usage:
+                u = chunk.usage
+                usage_data = {
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "total_tokens": u.total_tokens,
+                    "reasoning_tokens": getattr(u.completion_tokens_details, "reasoning_tokens", 0) if hasattr(u, "completion_tokens_details") else 0
+                }
+                continue
+
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -252,8 +280,9 @@ class LLMClient:
         import json
         yield ("__done__", json.dumps({
             "content": content,
-            "thinking": thinking, # 这里就是 reasoning_content
+            "thinking": thinking, 
             "tool_calls": tool_calls,
+            "usage": usage_data,
         }, ensure_ascii=False))
 
     def __repr__(self) -> str:

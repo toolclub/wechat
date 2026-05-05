@@ -175,6 +175,9 @@ class MessageModel(Base):
         JSONB, nullable=False, default=dict,
         comment="澄清问询数据（question + items），非空表示本轮需要用户澄清",
     )
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    reasoning_tokens = Column(Integer, nullable=False, default=0)
     created_at = Column(Float, nullable=False)
 
     __table_args__ = (

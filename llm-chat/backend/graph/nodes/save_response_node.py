@@ -124,11 +124,13 @@ class SaveResponseNode(BaseNode):
         if full_response:
             tool_summary = self._build_tool_summary(state)
             step_summary = self._build_step_context(state)
+            usage = state.get("usage", {})
             await memory_store.add_message(
                 conv_id, "assistant", self._sanitize_for_db(full_response),
                 update_db_id=pre_asst_id,
                 tool_summary=self._sanitize_for_db(tool_summary),
                 step_summary=self._sanitize_for_db(step_summary),
+                usage=usage,
             )
 
         # ── 保存工具调用事件 ─────────────────────────────────────────────────

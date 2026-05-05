@@ -73,48 +73,66 @@ class BaseNode(ABC):
             "FunctionMessage": "function",
         }
         result: list[dict[str, Any]] = []
-        for msg in messages:
+        for i, msg in enumerate(messages):
             role = role_map.get(type(msg).__name__, "user")
-            entry: dict[str, Any] = {"role": role, "content": msg.content}
+            content = msg.content
+
+            # AIMessage 中的 tool_calls 处理：DeepSeek 强制要求 tool_calls 必须紧跟 tool 响应
+            oai_tool_calls = None
+            if role == "assistant":
+                lc_tool_calls = getattr(msg, "tool_calls", None) or []
+                if lc_tool_calls:
+                    # 检查后续是否紧跟 tool 响应
+                    has_responses = False
+                    if i + 1 < len(messages):
+                        next_msg = messages[i+1]
+                        # 只要紧跟了一个 ToolMessage，我们就认为这一组调用是有效的（简化判断）
+                        if type(next_msg).__name__ in ("ToolMessage", "FunctionMessage"):
+                            has_responses = True
+                    
+                    if has_responses:
+                        oai_tool_calls = []
+                        for tc in lc_tool_calls:
+                            if isinstance(tc, dict):
+                                tc_id   = tc.get("id", "")
+                                tc_name = tc.get("name", "")
+                                tc_args = tc.get("args", {})
+                            else:
+                                tc_id   = getattr(tc, "id", "")
+                                tc_name = getattr(tc, "name", "")
+                                tc_args = getattr(tc, "args", {})
+                            oai_tool_calls.append({
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc_name,
+                                    "arguments": json.dumps(tc_args, ensure_ascii=False),
+                                },
+                            })
+                        content = None  # 有 tool_calls 时 content 须为 None
+                    else:
+                        # 悬挂的 tool_calls：如果没有紧跟工具响应，DeepSeek 会报 400
+                        # 业界的做法是剥离这些未完成的调用，保留文本内容
+                        logger.warning("发现悬挂的 tool_calls (index=%d)，由于无后续响应已剥离以兼容 DeepSeek", i)
+                        oai_tool_calls = None
+                        if not content:
+                            # 如果 content 为空，尝试从 tool_summary 恢复或给个占位符
+                            summary = getattr(msg, "tool_summary", "")
+                            content = f"[已中断的工具调用] {summary}" if summary else "..."
+
+            entry: dict[str, Any] = {"role": role, "content": content}
+
+            # ── 适配 DeepSeek 推理内容 ──────────────────────────────────
+            if role == "assistant":
+                reasoning = msg.additional_kwargs.get("reasoning_content")
+                if reasoning:
+                    entry["reasoning_content"] = reasoning
+                if oai_tool_calls:
+                    entry["tool_calls"] = oai_tool_calls
 
             # ToolMessage 需要带上 tool_call_id
             if role == "tool":
                 entry["tool_call_id"] = getattr(msg, "tool_call_id", "")
-
-            # AIMessage 中的 tool_calls 转 OpenAI function calling 格式
-            if role == "assistant":
-                # ── 适配 DeepSeek 推理内容 ──────────────────────────────────
-                # 从 context_builder 存入的 additional_kwargs 中提取
-                reasoning = msg.additional_kwargs.get("reasoning_content")
-                if reasoning:
-                    entry["reasoning_content"] = reasoning
-
-                lc_tool_calls = getattr(msg, "tool_calls", None) or []
-                if lc_tool_calls:
-                    oai_tool_calls = []
-                    for tc in lc_tool_calls:
-                        if isinstance(tc, dict):
-                            tc_id   = tc.get("id", "")
-                            tc_name = tc.get("name", "")
-                            tc_args = tc.get("args", {})
-                        else:
-                            tc_id   = getattr(tc, "id", "")
-                            tc_name = getattr(tc, "name", "")
-                            tc_args = getattr(tc, "args", {})
-                        oai_tool_calls.append({
-                            "id": tc_id,
-                            "type": "function",
-                            "function": {
-                                "name": tc_name,
-                                "arguments": json.dumps(tc_args, ensure_ascii=False),
-                            },
-                        })
-                    entry["tool_calls"] = oai_tool_calls
-                    # OpenAI 规范：有 tool_calls 时 content 须为 None。
-                    # 强制置 None（不管原始 content 是否为空），防止 MiniMax 等模型
-                    # 在 content 字段中注入 <minimax:tool_call> XML 残留，
-                    # 污染后续节点的 LLM 上下文。
-                    entry["content"] = None
 
             result.append(entry)
         return result
@@ -295,10 +313,15 @@ class BaseNode(ABC):
         _THINK_PREFIX = BaseNode._THINK_PREFIX
         content_parts:  list[str] = []
         thinking_parts: list[str] = []
+        usage_data:     dict = {}
         token_count = 0
 
         try:
             async for delta in llm.astream(oai_messages, temperature=temperature, timeout=timeout):
+                if isinstance(delta, dict) and "usage" in delta:
+                    usage_data = delta["usage"]
+                    continue
+                
                 token_count += 1
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
@@ -344,6 +367,7 @@ class BaseNode(ABC):
             "messages":      [AIMessage(content=full_content, additional_kwargs=additional_kwargs)],
             "full_response": full_content,
             "_was_streamed": True,
+            "usage":         usage_data,
         }
         if full_thinking:
             result["full_thinking"] = full_thinking
@@ -399,6 +423,7 @@ class BaseNode(ABC):
         content = final_data.get("content", "")
         thinking = final_data.get("thinking", "")
         tool_calls_raw = final_data.get("tool_calls", [])
+        usage_data = final_data.get("usage", {})
 
         # 统一提取推理内容
         additional_kwargs = {}
@@ -424,14 +449,16 @@ class BaseNode(ABC):
             )
             logger.info(
                 "_stream_tokens_with_tools 完成（tool_calls）| conv=%s | node=%s | "
-                "content_len=%d | tool_calls=%s",
+                "content_len=%d | tool_calls=%s | usage=%s",
                 conv_id, node, len(content),
                 [tc["name"] for tc in lc_tool_calls],
+                usage_data,
             )
             result = {
                 "messages": [ai_msg],
                 "full_response": content,
                 "_was_streamed": True,
+                "usage": usage_data,
             }
             if thinking:
                 result["full_thinking"] = thinking
@@ -440,13 +467,14 @@ class BaseNode(ABC):
             # 无 tool_calls → 纯文本回复
             ai_msg = AIMessage(content=content, additional_kwargs=additional_kwargs)
             logger.info(
-                "_stream_tokens_with_tools 完成（纯文本）| conv=%s | node=%s | content_len=%d",
-                conv_id, node, len(content),
+                "_stream_tokens_with_tools 完成（纯文本）| conv=%s | node=%s | content_len=%d | usage=%s",
+                conv_id, node, len(content), usage_data,
             )
             result = {
                 "messages": [ai_msg],
                 "full_response": content,
                 "_was_streamed": True,
+                "usage": usage_data,
             }
             if thinking:
                 result["full_thinking"] = thinking

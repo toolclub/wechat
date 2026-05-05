@@ -79,21 +79,24 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
             })
 
         # 同时刷新本 worker 的内存缓存
-        messages = [
+        messages_obj = [
             Message(
                 role=mr.role, content=mr.content, timestamp=mr.created_at, id=mr.id,
                 tool_summary=getattr(mr, "tool_summary", "") or "",
                 step_summary=getattr(mr, "step_summary", "") or "",
                 thinking=getattr(mr, "thinking", "") or "",
                 thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
-                tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), [])
+                tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), []),
+                prompt_tokens=getattr(mr, "prompt_tokens", 0) or 0,
+                completion_tokens=getattr(mr, "completion_tokens", 0) or 0,
+                reasoning_tokens=getattr(mr, "reasoning_tokens", 0) or 0,
             )
             for mr in msg_rows
         ]
         conv = Conversation(
             id=row.id, title=row.title, system_prompt=row.system_prompt,
             core_memory=dict(getattr(row, "core_memory", {}) or {}),
-            messages=messages, mid_term_summary=row.mid_term_summary,
+            messages=messages_obj, mid_term_summary=row.mid_term_summary,
             mid_term_cursor=row.mid_term_cursor, created_at=row.created_at,
             updated_at=row.updated_at, client_id=row.client_id,
             user_id=getattr(row, "user_id", "") or "",
@@ -108,20 +111,24 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
             "core_memory": dict(getattr(row, "core_memory", {}) or {}),
             "messages": [
                 {
-                    "role": mr.role,
-                    "content": mr.content,
-                    "thinking": getattr(mr, "thinking", "") or "",
-                    "thinking_segments": list(getattr(mr, "thinking_segments", []) or []),
+                    "role": m.role,
+                    "content": m.content,
+                    "thinking": m.thinking,
+                    "thinking_segments": m.thinking_segments,
+                    "tool_calls": m.tool_calls,
                     "message_id": getattr(mr, "message_id", "") or "",
                     "stream_completed": getattr(mr, "stream_completed", True),
                     "stream_buffer": getattr(mr, "stream_buffer", "") or "",
                     "images": getattr(mr, "images", []) or [],
-                    "tool_summary": getattr(mr, "tool_summary", "") or "",
-                    "step_summary": getattr(mr, "step_summary", "") or "",
+                    "tool_summary": m.tool_summary,
+                    "step_summary": m.step_summary,
+                    "prompt_tokens": m.prompt_tokens,
+                    "completion_tokens": m.completion_tokens,
+                    "reasoning_tokens": m.reasoning_tokens,
                     "clarification_data": getattr(mr, "clarification_data", {}) or {},
-                    "timestamp": mr.created_at,
+                    "timestamp": m.timestamp,
                 }
-                for mr in msg_rows
+                for m, mr in zip(messages_obj, msg_rows)
             ],
             "mid_term_summary": row.mid_term_summary,
             "user_id": getattr(row, "user_id", "") or "",
@@ -193,7 +200,10 @@ async def init() -> None:
                     step_summary=getattr(mr, "step_summary", "") or "",
                     thinking=getattr(mr, "thinking", "") or "",
                     thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
-                    tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), [])
+                    tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), []),
+                    prompt_tokens=getattr(mr, "prompt_tokens", 0) or 0,
+                    completion_tokens=getattr(mr, "completion_tokens", 0) or 0,
+                    reasoning_tokens=getattr(mr, "reasoning_tokens", 0) or 0,
                 )
                 for mr in msg_rows
             ]
@@ -310,15 +320,10 @@ async def delete(conv_id: str) -> None:
 async def add_message(
     conv_id: str, role: str, content: str, update_db_id: int = 0,
     tool_summary: str = "", step_summary: str = "",
+    usage: dict | None = None,
 ) -> None:
     """
     追加一条消息：写入 DB + 更新缓存。
-
-    update_db_id > 0 时：UPDATE 已有行（StreamSession 预写的消息），不 INSERT 新行。
-    update_db_id = 0 时：INSERT 新行（传统行为）。
-
-    tool_summary / step_summary：工具调用记录和多步执行摘要，
-    存入独立 DB 字段，不混入 content。
     """
     conv = _store.get(conv_id)
     if not conv:
@@ -331,14 +336,21 @@ async def add_message(
         new_title = content[:30] + ("..." if len(content) > 30 else "")
 
     msg_db_id = update_db_id
+    u = usage or {}
+    p_tokens = u.get("prompt_tokens", 0)
+    c_tokens = u.get("completion_tokens", 0)
+    r_tokens = u.get("reasoning_tokens", 0)
 
     async with AsyncSessionLocal() as session:
         if update_db_id > 0:
-            # UPDATE 已有行（StreamSession 在流开始时预写了 DB 行）
+            # UPDATE 已有行
             values: dict = {
                 "content": content,
                 "stream_completed": True,
                 "stream_buffer": "",
+                "prompt_tokens": p_tokens,
+                "completion_tokens": c_tokens,
+                "reasoning_tokens": r_tokens,
             }
             if tool_summary:
                 values["tool_summary"] = tool_summary
@@ -354,7 +366,8 @@ async def add_message(
             msg_row = MessageModel(
                 conv_id=conv_id, role=role, content=content,
                 tool_summary=tool_summary, step_summary=step_summary,
-                created_at=now,
+                prompt_tokens=p_tokens, completion_tokens=c_tokens,
+                reasoning_tokens=r_tokens, created_at=now,
             )
             session.add(msg_row)
             await session.flush()
@@ -371,7 +384,9 @@ async def add_message(
     msg = Message(
         role=role, content=content, timestamp=now, id=msg_db_id,
         tool_summary=tool_summary, step_summary=step_summary,
-        tool_calls=[] # 新消息初始工具调用为空，后续由 ToolExecution 关联
+        tool_calls=[], # 新消息初始工具调用为空，后续由 ToolExecution 关联
+        prompt_tokens=p_tokens, completion_tokens=c_tokens,
+        reasoning_tokens=r_tokens,
     )
     conv.messages.append(msg)
     conv.updated_at = now
@@ -410,6 +425,7 @@ async def update_status(conv_id: str, status: str) -> None:
 async def create_message_immediate(
     conv_id: str, role: str, content: str, message_id: str = "",
     thinking: str = "", images: list | None = None, stream_completed: bool = True,
+    prompt_tokens: int = 0, completion_tokens: int = 0, reasoning_tokens: int = 0,
 ) -> int:
     """
     立即写入消息到 DB（仅 DB，不写内存缓存）。返回 DB 自增 ID。
@@ -435,6 +451,9 @@ async def create_message_immediate(
             stream_completed=stream_completed,
             sequence_number=seq,
             images=images or [],
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            reasoning_tokens=reasoning_tokens,
             created_at=now,
         )
         session.add(msg_row)

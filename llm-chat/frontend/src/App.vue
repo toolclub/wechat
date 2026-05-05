@@ -9,13 +9,33 @@ import CognitivePanel from './components/CognitivePanel.vue'
 import QuantView from './components/QuantView.vue'
 import StockDetailView from './components/StockDetailView.vue'
 import LoginView from './components/LoginView.vue'
+import AdminDashboard from './components/AdminDashboard.vue'
 
 const chat = useChat()
 const auth = useAuth()
-const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail'>('chat')
+const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail' | 'admin'>('chat')
 const selectedStockData = ref<any>(null)
 const showLogin = ref(false)
 const GUEST_EXPIRE_DAYS = 3
+
+// ── 管理者页面 ──
+const showAdminVerify = ref(false)
+const adminKeyInput = ref('')
+const verifiedAdminKey = ref('')
+
+async function verifyAdmin() {
+  try {
+    const res = await import('./api').then(m => m.post<any>('/api/admin/verify', { key: adminKeyInput.value }))
+    if (res.ok) {
+      verifiedAdminKey.value = adminKeyInput.value
+      activeWorkspace.value = 'admin'
+      showAdminVerify.value = false
+      adminKeyInput.value = ''
+    }
+  } catch (err: any) {
+    import('element-plus').then(m => m.ElMessage.error(err.message || '密钥验证失败'))
+  }
+}
 
 onMounted(async () => {
   try {
@@ -234,7 +254,25 @@ function onDragStart(e: MouseEvent) {
       @batch-delete="chat.batchRemoveConversations($event)"
       @switchWorkspace="activeWorkspace = $event"
       @show-login="showLogin = true"
+      @open-admin="showAdminVerify = true"
     />
+
+    <!-- 管理员密钥验证 -->
+    <el-dialog v-model="showAdminVerify" title="管理员验证" width="340px" center border-radius="16px">
+      <div style="padding: 10px 0;">
+        <el-input 
+          v-model="adminKeyInput" 
+          type="password" 
+          placeholder="请输入管理密钥..." 
+          show-password
+          @keydown.enter="verifyAdmin"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="showAdminVerify = false">取消</el-button>
+        <el-button type="primary" @click="verifyAdmin">验证并进入</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->
     <div v-if="chat.initialLoading.value" class="global-loading-overlay">
@@ -310,6 +348,13 @@ function onDragStart(e: MouseEvent) {
         v-if="activeWorkspace === 'stock_detail' && selectedStockData"
         :stock="selectedStockData"
         @back="backToQuant"
+      />
+
+      <!-- 管理者面板 -->
+      <AdminDashboard
+        v-if="activeWorkspace === 'admin'"
+        :admin-key="verifiedAdminKey"
+        @back="activeWorkspace = 'chat'"
       />
     </div>
   </div>

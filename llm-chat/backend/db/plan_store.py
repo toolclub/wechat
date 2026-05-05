@@ -144,30 +144,30 @@ async def finalize_all_steps(plan_id: str, plan: list[dict]) -> None:
 
 
 async def get_latest_plan_for_conv(conv_id: str) -> dict | None:
-    """
-    获取对话最新的执行计划（按 created_at 降序取第一条）。
-    供前端刷新后恢复认知面板使用。
-    """
+    # ... (existing implementation)
+
+async def get_all_plans_for_conv(conv_id: str) -> list[dict]:
+    """获取对话的所有执行计划，用于全量恢复 UI 状态。"""
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 select(PlanStepModel)
                 .where(PlanStepModel.conv_id == conv_id)
-                .order_by(desc(PlanStepModel.created_at))
-                .limit(1)
+                .order_by(PlanStepModel.created_at.asc())
             )
-            row = result.scalar_one_or_none()
-            if not row:
-                return None
-            return {
-                "id":         row.id,
-                "message_id": row.message_id,
-                "goal":       row.goal,
-                "steps":      list(row.steps or []),
-            }
+            rows = result.scalars().all()
+            return [
+                {
+                    "id":         r.id,
+                    "message_id": r.message_id,
+                    "goal":       r.goal,
+                    "steps":      list(r.steps or []),
+                }
+                for r in rows
+            ]
     except Exception as exc:
-        logger.error("读取最新计划失败 | conv=%s | error=%s", conv_id, exc)
-        return None
+        logger.error("读取对话所有计划失败 | conv=%s | error=%s", conv_id, exc)
+        return []
 
 
 async def get_plan(plan_id: str) -> dict | None:

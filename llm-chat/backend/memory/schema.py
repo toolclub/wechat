@@ -17,6 +17,9 @@ class Message:
     thinking_segments: list = field(default_factory=list)
     # 结构化思考段：[{"node", "step_index", "phase", "content"}]
     tool_calls: list = field(default_factory=list)  # 保存原始 tool_calls 供重放历史
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass

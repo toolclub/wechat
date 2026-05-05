@@ -294,6 +294,7 @@ BACKEND_PORT              = settings.backend_port
 CONVERSATIONS_DIR         = settings.conversations_dir
 DATABASE_URL              = settings.database_url
 LOG_DIR                   = settings.log_dir
+ADMIN_SECRET_KEY          = settings.admin_secret_key
 
 # ── JWT 配置 ──────────────────────────────────────────────────────────────
 JWT_SECRET_KEY            = settings.jwt_secret_key
@@ -317,6 +318,10 @@ CORS_ALLOWED_ORIGINS      = settings.cors_allowed_origins
 FRONTEND_URL              = settings.frontend_url
 
 # 系统提示词从 prompts/*.md 加载（代码中不硬编码提示词内容）
+from prompts import load_prompt as _lp
+DEFAULT_SYSTEM_PROMPT     = _lp("system")
+SUMMARY_SYSTEM_PROMPT     = _lp("summary")
+� prompts/*.md 加载（代码中不硬编码提示词内容）
 from prompts import load_prompt as _lp
 DEFAULT_SYSTEM_PROMPT     = _lp("system")
 SUMMARY_SYSTEM_PROMPT     = _lp("summary")

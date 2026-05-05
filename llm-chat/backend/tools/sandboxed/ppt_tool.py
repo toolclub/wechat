@@ -13,7 +13,9 @@ PPT 生成工具 — HTML-first 方案
 GUIDANCE = (
     "把幻灯片当作「可预览的 HTML 页面」来制作，然后转成 .pptx 交付。"
     "用户说「做个 PPT / 演示文稿」时召唤。"
-    "你负责写每张幻灯片的 HTML（含内联 CSS，960×720px），后端负责渲染截图转 PPT。HTML 同时作为前端实时预览。"
+    "你负责写每张幻灯片的 HTML（含内联 CSS，960×720px）。"
+    "【重要】对于包含较多 HTML 代码的长内容，为防止参数截断，请务必先用 sandbox_write 将 JSON 写入文件（如 'ppt.json'），"
+    "然后调用 create_ppt(ppt_path='ppt.json')。"
 )
 ERROR_HINT = "PPT 生成失败请检查 slides JSON 格式和 HTML 语法，确保每张幻灯片是完整的 HTML 文档。"
 TAGS = ["sandbox", "ppt"]
@@ -38,18 +40,20 @@ def _get_message_id() -> str:
 
 
 @tool
-async def create_ppt(ppt_json: str) -> str:
+async def create_ppt(ppt_json: str = None, ppt_path: str = None) -> str:
     """
     把幻灯片当作「可预览的 HTML 页面」来写，后端转成 .pptx 交付——HTML 同时作为前端实时预览。
 
     你负责为每张幻灯片编写完整的 HTML（含内联 CSS，960×720px）。
     每页必须是完整的 <!DOCTYPE html> 文档；字体用 'Microsoft YaHei'/'PingFang SC'，配色统一。
-    设计风格参考：封面页（大气居中+装饰）/ 内容页（分区清晰）/ 数据页（CSS图表）/ 对比页（双栏）/ 引用页 / 结束页。
-    后端负责截图转 .pptx，HTML 同时实时推送给前端预览。
+
+    重要：如果 PPT 内容非常多（多于 5 页或 HTML 较复杂），导致参数过长被截断，
+    请先使用 sandbox_write 将 JSON 写入文件（如 "ppt.json"），然后传 ppt_path="ppt.json" 调用此工具。
 
     Args:
         ppt_json: JSON 字符串，格式：
           {"title": "演示文稿标题", "slides": [{"title": "索引名", "html": "<!DOCTYPE html>..."}]}
+        ppt_path: (推荐用于长内容) 沙箱中存放 PPT JSON 的文件路径。
 
     Returns:
         创建结果
@@ -59,28 +63,52 @@ async def create_ppt(ppt_json: str) -> str:
     from db.artifact_store import save_artifact
 
     conv_id = _get_conv_id()
+    ppt_data = None
 
-    # ── 解析 JSON ──
+    # ── 获取数据：优先从 ppt_path 读取，否则解析 ppt_json ──
     try:
-        if isinstance(ppt_json, dict):
-            ppt_data = ppt_json
-        elif isinstance(ppt_json, str):
-            cleaned = ppt_json.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-            try:
-                ppt_data = json.loads(cleaned)
-            except json.JSONDecodeError:
-                import re
-                cleaned = re.sub(r'[\x00-\x1f](?<![\\][\x00-\x1f])', ' ', cleaned)
-                ppt_data = json.loads(cleaned)
+        if ppt_path:
+            # 从沙箱读取文件
+            worker, session_dir = await sandbox_manager._get_worker_for_session(conv_id)
+            # 使用 cat 读取，如果文件太大可能还是会有问题，但对于 100kb 左右的 JSON 应该可行
+            # 更好的做法是直接在沙箱里跑 python 脚本处理，但这里为了兼容性先用 base64 读取
+            read_cmd = f"base64 -w0 {session_dir}/{ppt_path}"
+            read_res = await worker.exec_command(read_cmd, timeout=10)
+            if read_res.exit_code != 0:
+                return f"无法从路径 {ppt_path} 读取文件: {read_res.stderr}"
+            
+            json_content = base64.b64decode(read_res.stdout.strip()).decode("utf-8")
+            ppt_data = json.loads(json_content)
+            logger.info("create_ppt | 从路径读取成功: %s", ppt_path)
+            
+        elif ppt_json:
+            if isinstance(ppt_json, dict):
+                ppt_data = ppt_json
+            elif isinstance(ppt_json, str):
+                cleaned = ppt_json.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[-1]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                    cleaned = cleaned.strip()
+                try:
+                    ppt_data = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    import re
+                    cleaned = re.sub(r'[\x00-\x1f](?<![\\][\x00-\x1f])', ' ', cleaned)
+                    ppt_data = json.loads(cleaned)
+            else:
+                return f"参数类型错误: {type(ppt_json)}"
         else:
-            return f"参数类型错误: {type(ppt_json)}"
+            return "错误: 必须提供 ppt_json 或 ppt_path 之一"
+            
     except json.JSONDecodeError as exc:
         return f"JSON 解析失败: {exc}\n请确保 JSON 格式正确。"
+    except Exception as exc:
+        return f"获取 PPT 数据失败: {exc}"
+
+    if not ppt_data:
+        return "错误: 未能获取到有效的 PPT 数据"
 
     ppt_title = ppt_data.get("title", "presentation")
     slides = ppt_data.get("slides", [])

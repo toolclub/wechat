@@ -110,9 +110,10 @@ class ConversationService:
         if not conv_data:
             return {"error": "对话不存在"}
 
-        tool_execs, latest_plan, artifacts, last_event_id = await asyncio.gather(
+        from db.plan_store import get_all_plans_for_conv
+        tool_execs, all_plans, artifacts, last_event_id = await asyncio.gather(
             get_tool_executions_for_conv(conv_id),
-            get_latest_plan_for_conv(conv_id),
+            get_all_plans_for_conv(conv_id),
             get_artifact_meta_list(conv_id),
             get_latest_event_id(conv_id),
         )
@@ -149,7 +150,8 @@ class ConversationService:
             "title": conv_data["title"],
             "status": conv_data.get("status", "active"),
             "messages": enriched_messages,
-            "plan": latest_plan,
+            "plan": all_plans[-1] if all_plans else None,  # 向后兼容：取最后一个计划
+            "plans": all_plans,                            # 新增：所有计划，供前端按 message_id 匹配
             "artifacts": orphan_artifacts,
             "has_streaming": has_streaming,
             "last_event_id": last_event_id,

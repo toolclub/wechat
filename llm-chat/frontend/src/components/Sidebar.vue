@@ -18,7 +18,8 @@ const emit = defineEmits<{
   select: [id: string]
   delete: [id: string]
   batchDelete: [ids: string[]]
-  switchWorkspace: [workspace: 'chat' | 'quant']
+  switchWorkspace: [workspace: 'chat' | 'quant' | 'admin']
+  openAdmin: []
 }>()
 
 const searchQuery = ref('')
@@ -346,6 +347,9 @@ onMounted(() => {
               <div class="dropdown-name">{{ auth.userName.value }}</div>
               <div class="dropdown-email">{{ auth.userEmail.value }}</div>
             </div>
+          </div>
+          <div class="dropdown-item" @click="showDropdown = false; emit('openAdmin')">
+            <el-icon><Monitor /></el-icon> 系统管理
           </div>
           <div class="dropdown-item logout" @click="showDropdown = false; auth.logout()">
             <el-icon><Close /></el-icon> 退出登录
