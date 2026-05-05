@@ -187,6 +187,24 @@ _MIGRATIONS = [
 
     "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS ix_quant_snapshots_user ON quant_snapshots(user_id)",
+
+    # ── user_usage_logs 表 ──
+    """CREATE TABLE IF NOT EXISTS user_usage_logs (
+        id              SERIAL           NOT NULL,
+        user_id         VARCHAR(36)      NOT NULL DEFAULT '',
+        client_id       VARCHAR(36)      NOT NULL DEFAULT '',
+        conv_id         VARCHAR(36)      NOT NULL DEFAULT '',
+        node            VARCHAR(50)      NOT NULL DEFAULT '',
+        model           VARCHAR(100)     NOT NULL DEFAULT '',
+        prompt_tokens   INTEGER          NOT NULL DEFAULT 0,
+        completion_tokens INTEGER        NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER         NOT NULL DEFAULT 0,
+        total_tokens    INTEGER          NOT NULL DEFAULT 0,
+        created_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_user_usage_logs PRIMARY KEY (id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_usage_user_created ON user_usage_logs(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_usage_client_created ON user_usage_logs(client_id, created_at)",
 ]
 
 

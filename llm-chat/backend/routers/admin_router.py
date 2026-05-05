@@ -16,7 +16,7 @@ from sqlalchemy import select, func, desc
 from pydantic import BaseModel
 
 from db.database import AsyncSessionLocal
-from db.models import UserModel, ConversationModel, MessageModel
+from db.models import UserModel, ConversationModel, MessageModel, UserUsageLogModel
 from services.auth.dependencies import CurrentUser
 import config
 
@@ -53,15 +53,26 @@ async def get_system_stats(authorized: bool = Depends(verify_admin_access)):
         conv_count = (await session.execute(select(func.count(ConversationModel.id)))).scalar()
         msg_count = (await session.execute(select(func.count(MessageModel.id)))).scalar()
         
-        # 2. Token 总计
+        # 2. Token 总计（从 UserUsageLogModel 获取更细粒度数据）
         token_stats = (await session.execute(
             select(
-                func.sum(MessageModel.prompt_tokens).label("prompt"),
-                func.sum(MessageModel.completion_tokens).label("completion"),
-                func.sum(MessageModel.reasoning_tokens).label("reasoning")
+                func.sum(UserUsageLogModel.prompt_tokens).label("prompt"),
+                func.sum(UserUsageLogModel.completion_tokens).label("completion"),
+                func.sum(UserUsageLogModel.reasoning_tokens).label("reasoning")
             )
         )).first()
         
+        # 2.1 用户 vs 游客 Token 消耗
+        user_tokens = (await session.execute(
+            select(func.sum(UserUsageLogModel.total_tokens))
+            .where(UserUsageLogModel.user_id != "")
+        )).scalar() or 0
+        
+        guest_tokens = (await session.execute(
+            select(func.sum(UserUsageLogModel.total_tokens))
+            .where(UserUsageLogModel.user_id == "")
+        )).scalar() or 0
+
         # 3. 今日数据
         today_start = datetime.combine(datetime.today(), datetime.min.time()).timestamp()
         new_users_today = (await session.execute(
@@ -114,9 +125,12 @@ async def get_system_stats(authorized: bool = Depends(verify_admin_access)):
             "total_prompt_tokens": int(token_stats.prompt or 0),
             "total_completion_tokens": int(token_stats.completion or 0),
             "total_reasoning_tokens": int(token_stats.reasoning or 0),
+            "user_tokens": int(user_tokens),
+            "guest_tokens": int(guest_tokens),
             "new_users_today": new_users_today,
             "messages_today": msgs_today,
         },
+
         "charts": {
             "trend": {
                 "days": trend_days,

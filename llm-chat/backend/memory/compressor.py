@@ -41,20 +41,20 @@ def _strip_tool_summary(content: str) -> str:
     return content
 
 
-async def maybe_compress(conv_id: str) -> bool:
+async def maybe_compress(conv_id: str) -> tuple[bool, dict]:
     """
     检查并按需执行压缩。
 
     Returns:
-        True 表示执行了压缩，False 表示未执行。
+        (是否压缩, usage_data)
     """
     conv = memory_store.get(conv_id)
     if not conv or not should_compress(conv):
-        return False
+        return False, {}
 
     to_summarise, new_cursor = slice_for_compression(conv)
     if not to_summarise:
-        return False
+        return False, {}
 
     # 先写入长期记忆（Qdrant）— embedding 失败时跳过，不影响压缩主流程
     # 新架构（FACT_EXTRACTION_ENABLED）下事实已在每轮 extract_memory 节点写入，
@@ -96,6 +96,13 @@ async def maybe_compress(conv_id: str) -> bool:
     ]
     completion = await llm.ainvoke(messages)
     new_summary = (completion.choices[0].message.content or "").strip()
+    
+    usage = {
+        "prompt_tokens": completion.usage.prompt_tokens,
+        "completion_tokens": completion.usage.completion_tokens,
+        "total_tokens": completion.usage.total_tokens,
+        "reasoning_tokens": getattr(completion.usage.completion_tokens_details, "reasoning_tokens", 0) if hasattr(completion.usage, "completion_tokens_details") else 0
+    }
 
     conv.mid_term_summary = new_summary
     conv.mid_term_cursor = new_cursor
@@ -123,4 +130,4 @@ async def maybe_compress(conv_id: str) -> bool:
         len(conv.messages) - new_cursor,
         len(new_summary),
     )
-    return True
+    return True, usage

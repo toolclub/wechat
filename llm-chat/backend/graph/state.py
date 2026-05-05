@@ -19,10 +19,25 @@ class PlanStep(TypedDict):
     result: str
 
 
+def merge_usage(old_usage: dict, new_usage: dict) -> dict:
+    """累积 Token 统计数据。"""
+    if not old_usage:
+        return new_usage
+    if not new_usage:
+        return old_usage
+    
+    res = old_usage.copy()
+    for k, v in new_usage.items():
+        if isinstance(v, (int, float)):
+            res[k] = res.get(k, 0) + v
+    return res
+
+
 class GraphState(TypedDict):
     # ── 输入 ────────────────────────────────────────────────────────────────
     conv_id: str
-    client_id: str                              # 浏览器唯一标识（用于日志分文件）
+    user_id: str                                # 用户 ID（登录后）
+    client_id: str                              # 浏览器唯一标识（用于日志分文件和游客识别）
     user_message: str
     images: list[str]                           # 图片列表（完整 data URL 或纯 base64）
     model: str
@@ -75,3 +90,6 @@ class GraphState(TypedDict):
 
     # ── 外部传入的结构化上下文引用（如量化快照） ──
     context_refs: list[dict]
+
+    # ── Token 统计（由 LLM 节点写入，SaveResponseNode 读取） ──
+    usage: Annotated[dict, merge_usage]

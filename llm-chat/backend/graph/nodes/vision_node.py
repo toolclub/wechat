@@ -26,7 +26,7 @@ import logging
 from langchain_core.callbacks.manager import adispatch_custom_event
 
 from config import VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
 
 logger = logging.getLogger("graph.nodes.vision")
@@ -42,6 +42,7 @@ class VisionNode(BaseNode):
     def name(self) -> str:
         return "vision_node"
 
+    @track_usage
     async def execute(self, state: GraphState) -> dict:
         """
         视觉理解执行逻辑：
@@ -50,7 +51,7 @@ class VisionNode(BaseNode):
           2. VISION_MODEL 未配置 → 静默降级，返回空描述
           3. 通知前端进入"图像解析中"状态
           4. 流式调用视觉模型，逐 token 派发 vision_token 事件
-          5. 返回 {"vision_description": "..."}
+          5. 返回 {"vision_description": "...", "usage": usage_data}
         """
         images = state.get("images", [])
 
@@ -68,19 +69,19 @@ class VisionNode(BaseNode):
         # 通知前端进入"图像解析中"状态（触发状态标签切换）
         await adispatch_custom_event("vision_analyze", {"image_count": len(images)})
 
-        description = await self._analyze_images(
+        description, usage = await self._analyze_images(
             images=images,
             user_msg=state.get("user_message", ""),
             conv_id=state.get("conv_id", ""),
         )
-        return {"vision_description": description}
+        return {"vision_description": description, "usage": usage}
 
     async def _analyze_images(
         self,
         images: list[str],
         user_msg: str,
         conv_id: str,
-    ) -> str:
+    ) -> tuple[str, dict]:
         """
         流式调用视觉模型分析图片，逐 token 通过 vision_token 事件推给前端。
 
@@ -110,33 +111,34 @@ class VisionNode(BaseNode):
 
             client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
 
-            description = await asyncio.wait_for(
+            description, usage = await asyncio.wait_for(
                 self._stream_vision(client, vision_content, conv_id),
                 timeout=_VISION_TIMEOUT,
             )
-            return description
+            return description, usage
 
         except asyncio.TimeoutError:
             logger.warning(
                 "VisionNode 流式超时（%.0fs），降级为空描述 | conv=%s | model=%s",
                 _VISION_TIMEOUT, conv_id, VISION_MODEL,
             )
-            return ""
+            return "", {}
         except Exception as exc:
             logger.warning(
                 "VisionNode 流式异常，降级为空描述 | conv=%s | error=%s",
                 conv_id, exc,
             )
-            return ""
+            return "", {}
 
     @staticmethod
-    async def _stream_vision(client, vision_content: list, conv_id: str) -> str:
+    async def _stream_vision(client, vision_content: list, conv_id: str) -> tuple[str, dict]:
         """
         流式调用视觉模型，逐 token 通过统一 emit_thinking 推给前端。
         视觉输出作为 node=vision / phase=content 的 segment，
         落在消息级思考区（step_index=None），与主模型思考段自然隔离。
         """
         parts: list[str] = []
+        usage_data = {}
 
         vision_messages = [{"role": "user", "content": vision_content}]
         from logging_config import log_prompt
@@ -147,10 +149,20 @@ class VisionNode(BaseNode):
             messages=[{"role": "user", "content": vision_content}],
             temperature=0.1,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         try:
             async for chunk in stream:
+                if hasattr(chunk, "usage") and chunk.usage:
+                    u = chunk.usage
+                    usage_data = {
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "total_tokens": u.total_tokens,
+                    }
+                    continue
+
                 delta = ""
                 if chunk.choices:
                     delta = chunk.choices[0].delta.content or ""
@@ -168,13 +180,13 @@ class VisionNode(BaseNode):
                 await BaseNode.emit_thinking(
                     "vision", "content", "\n[图像分析中断，以上为部分结果]", None,
                 )
-                return partial
+                return partial, usage_data
             logger.error("VisionNode 流式失败且无部分结果 | conv=%s | %s", conv_id, exc)
-            return ""
+            return "", {}
 
         description = "".join(parts)
         logger.info(
             "VisionNode 流式完成 | conv=%s | model=%s | desc_len=%d | preview='%.200s'",
             conv_id, VISION_MODEL, len(description), description,
         )
-        return description
+        return description, usage_data

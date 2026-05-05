@@ -18,7 +18,7 @@ from datetime import date
 
 from config import SEARCH_MODEL, VISION_MODEL
 from graph.event_types import PlannerNodeOutput
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState, PlanStep
 from llm.chat import get_chat_llm
 
@@ -274,9 +274,11 @@ class PlannerNode(BaseNode):
             "step_results":       step_results,
         }
 
+    @track_usage
     async def execute(self, state: GraphState) -> PlannerNodeOutput:
         """
-        规划执行步骤。
+        核心执行逻辑：
+
 
         search / search_code 路由始终规划；
         code 路由在任务复杂时触发规划；
@@ -369,6 +371,7 @@ class PlannerNode(BaseNode):
 
         _THINK_PREFIX = "\x00THINK\x00"
         content = ""
+        usage_data = {}
 
         # 尝试 JSON mode（模型直接返回纯 JSON，无需文本解析）
         # 部分模型不支持 response_format，降级到普通流式调用
@@ -380,6 +383,10 @@ class PlannerNode(BaseNode):
             try:
                 extra = json_mode_extra if use_json_mode else None
                 async for delta in llm.astream(messages, temperature=0.1, extra_body=extra):
+                    if isinstance(delta, dict) and "usage" in delta:
+                        usage_data = delta["usage"]
+                        continue
+                    
                     if delta.startswith(_THINK_PREFIX):
                         thinking_text = delta[len(_THINK_PREFIX):]
                         await self.emit_thinking("planner", "reasoning", thinking_text, None)
@@ -398,10 +405,10 @@ class PlannerNode(BaseNode):
             raw = "".join(content_parts)
             content = raw.strip()
             logger.info(
-                "Planner 原始响应 [第%d次]%s | model=%s | len=%d | raw='%.200s'",
+                "Planner 原始响应 [第%d次]%s | model=%s | len=%d | usage=%s | raw='%.200s'",
                 attempt + 1,
                 "（JSON mode）" if use_json_mode else "",
-                model, len(raw), raw,
+                model, len(raw), usage_data, raw,
             )
             if content:
                 break
@@ -518,4 +525,5 @@ class PlannerNode(BaseNode):
             "current_step_index": 0,
             "step_iterations":    0,
             "step_results":       [],
+            "usage":              usage_data,
         }

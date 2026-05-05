@@ -21,9 +21,11 @@ const users = ref<any[]>([])
 // 图表实例
 let trendChart: echarts.ECharts | null = null
 let modelChart: echarts.ECharts | null = null
+let userTypeChart: echarts.ECharts | null = null
 
 const trendChartRef = ref<HTMLElement | null>(null)
 const modelChartRef = ref<HTMLElement | null>(null)
+const userTypeChartRef = ref<HTMLElement | null>(null)
 
 async function fetchData() {
   loading.value = true
@@ -169,11 +171,49 @@ const renderCharts = () => {
       ]
     })
   }
+
+  // 3. 用户类型分布图
+  if (userTypeChartRef.value) {
+    if (!userTypeChart) userTypeChart = echarts.init(userTypeChartRef.value)
+    userTypeChart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: { 
+        trigger: 'item',
+        formatter: '{b}: {c} ({d}%)',
+        backgroundColor: isDark ? '#1F2023' : '#fff',
+        borderColor: isDark ? '#323335' : '#EBF0F5',
+        textStyle: { color: isDark ? '#E6E7E9' : '#18191C' }
+      },
+      legend: { 
+        bottom: 0,
+        textStyle: { color: textColor }
+      },
+      series: [
+        {
+          name: 'Token 消耗分布',
+          type: 'pie',
+          radius: ['40%', '70%'],
+          avoidLabelOverlap: false,
+          itemStyle: { 
+            borderRadius: 8, 
+            borderColor: isDark ? '#1F2023' : '#fff', 
+            borderWidth: 2 
+          },
+          label: { show: false },
+          data: [
+            { name: '登录用户', value: stats.value.summary.user_tokens, itemStyle: { color: '#00AEEC' } },
+            { name: '游客群体', value: stats.value.summary.guest_tokens, itemStyle: { color: '#FB7299' } }
+          ]
+        }
+      ]
+    })
+  }
 }
 
 function handleResize() {
   trendChart?.resize()
   modelChart?.resize()
+  userTypeChart?.resize()
 }
 
 onMounted(() => {
@@ -258,6 +298,13 @@ function formatTime(ts: number) {
             <span>模型分布</span>
           </div>
           <div ref="modelChartRef" class="chart-body"></div>
+        </div>
+        <div class="chart-container side-chart">
+          <div class="chart-header">
+            <el-icon><PieChart /></el-icon>
+            <span>用户/游客分布</span>
+          </div>
+          <div ref="userTypeChartRef" class="chart-body"></div>
         </div>
       </div>
 
@@ -399,9 +446,15 @@ function formatTime(ts: number) {
 
 .charts-row {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 2fr 1fr 1fr;
   gap: 24px;
   margin-bottom: 24px;
+}
+
+@media (max-width: 1400px) {
+  .charts-row {
+    grid-template-columns: 1.5fr 1fr;
+  }
 }
 
 @media (max-width: 1024px) {

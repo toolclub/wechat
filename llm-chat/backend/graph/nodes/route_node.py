@@ -16,7 +16,7 @@ from config import (
     VISION_MODEL,
 )
 from graph.event_types import RouteNodeOutput
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
 from llm.chat import get_chat_llm
 
@@ -38,6 +38,7 @@ class RouteNode(BaseNode):
     def name(self) -> str:
         return "route_model"
 
+    @track_usage
     async def execute(self, state: GraphState) -> RouteNodeOutput:
         """
         路由决策逻辑：
@@ -76,8 +77,12 @@ class RouteNode(BaseNode):
 
         _THINK_PREFIX = "\x00THINK\x00"
         content_parts: list[str] = []
+        usage_data: dict = {}
         try:
             async for delta in llm.astream(messages, temperature=0.0, timeout=30.0):
+                if isinstance(delta, dict) and "usage" in delta:
+                    usage_data = delta["usage"]
+                    continue
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
                     # route_model 的路由标签 content 不作为思考推送；只披露 reasoning。
@@ -132,4 +137,5 @@ class RouteNode(BaseNode):
             "route":        route,
             "tool_model":   tool_model,
             "answer_model": answer_model,
+            "usage":        usage_data,
         }

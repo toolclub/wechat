@@ -23,7 +23,7 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
 from llm.chat import get_chat_llm, get_vision_llm
 
@@ -72,6 +72,7 @@ class CallModelNode(BaseNode):
     def name(self) -> str:
         return "call_model"
 
+    @track_usage
     async def execute(self, state: GraphState) -> dict:
         """
         核心推理逻辑：
@@ -478,4 +479,11 @@ class CallModelNode(BaseNode):
                 path, conv_id, len(content), content,
             )
 
-        return {"messages": [ai_msg], "full_response": content}
+        usage = {
+            "prompt_tokens": completion.usage.prompt_tokens,
+            "completion_tokens": completion.usage.completion_tokens,
+            "total_tokens": completion.usage.total_tokens,
+            "reasoning_tokens": getattr(completion.usage.completion_tokens_details, "reasoning_tokens", 0) if hasattr(completion.usage, "completion_tokens_details") else 0
+        }
+
+        return {"messages": [ai_msg], "full_response": content, "usage": usage}

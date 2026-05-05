@@ -4,12 +4,12 @@ CompressNode：记忆压缩节点
 职责：
   - 按需触发对话压缩（超过阈值时生成滚动摘要 + 写入 Qdrant）
   - 在 save_response 之后运行，不影响流式输出
-  - 本节点只负责调用触发，具体压缩逻辑封装在 memory.compressor 中
+  - 本节点只负责调用触发，具体压缩逻辑封装 in memory.compressor
 """
 import logging
 
 from graph.event_types import CompressNodeOutput
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
 from memory.compressor import maybe_compress
 
@@ -23,6 +23,7 @@ class CompressNode(BaseNode):
     def name(self) -> str:
         return "compress_memory"
 
+    @track_usage
     async def execute(self, state: GraphState) -> CompressNodeOutput:
         """
         触发压缩并返回压缩状态。
@@ -31,8 +32,9 @@ class CompressNode(BaseNode):
         """
         conv_id   = state["conv_id"]
         client_id = state.get("client_id", "")
+        usage = {}
         try:
-            compressed = await maybe_compress(conv_id)
+            compressed, usage = await maybe_compress(conv_id)
             if compressed:
                 from logging_config import get_conv_logger
                 get_conv_logger(client_id, conv_id).info(
@@ -42,4 +44,4 @@ class CompressNode(BaseNode):
             logger.error("压缩失败 | conv=%s | error=%s", conv_id, exc)
             compressed = False
 
-        return {"compressed": compressed}
+        return {"compressed": compressed, "usage": usage}

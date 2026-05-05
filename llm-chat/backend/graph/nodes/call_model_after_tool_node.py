@@ -26,7 +26,7 @@ import logging
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import VISION_MODEL
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
 from llm.chat import get_chat_llm, get_vision_llm
 
@@ -52,6 +52,7 @@ class CallModelAfterToolNode(BaseNode):
     def name(self) -> str:
         return "call_model_after_tool"
 
+    @track_usage
     async def execute(self, state: GraphState) -> dict:
         """
         综合工具结果，生成最终回复（或继续调用更多工具）。

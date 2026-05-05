@@ -345,3 +345,25 @@ class MessageDetailModel(Base):
         Index("ix_msgdetail_conv", "conv_id"),
         Index("ix_msgdetail_conv_idx", "conv_id", "msg_index"),
     )
+
+
+class UserUsageLogModel(Base):
+    """用户/游客 Token 使用统计日志表"""
+    __tablename__ = "user_usage_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), nullable=False, default="", index=True, comment="用户ID，为空表示游客")
+    client_id = Column(String(36), nullable=False, default="", index=True, comment="浏览器唯一标识")
+    conv_id = Column(String(36), nullable=False, default="", index=True)
+    node = Column(String(50), nullable=False, default="", comment="产出 Token 的图节点名")
+    model = Column(String(100), nullable=False, default="", comment="使用的模型名")
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    reasoning_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    created_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_usage_user_created", "user_id", "created_at"),
+        Index("ix_usage_client_created", "client_id", "created_at"),
+    )

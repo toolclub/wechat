@@ -16,13 +16,51 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Callable, TypeVar, cast
+from functools import wraps
 
 from langchain_core.messages import AIMessage, BaseMessage
 
 from graph.state import GraphState, PlanStep
 
 logger = logging.getLogger("graph.nodes.base")
+
+T = TypeVar("T", bound=Callable[..., Any])
+
+def track_usage(func: T) -> T:
+    """
+    装饰器：自动统计并持久化图节点的 Token 使用情况。
+    
+    逻辑：
+      - 执行节点逻辑
+      - 若返回字典中包含 "usage"，提取并记录到 DB
+      - 支持区分登录用户 (user_id) 和游客 (client_id)
+    """
+    @wraps(func)
+    async def wrapper(self: "BaseNode", state: GraphState, *args, **kwargs):
+        result = await func(self, state, *args, **kwargs)
+        
+        if isinstance(result, dict) and "usage" in result:
+            usage = result["usage"]
+            if usage:
+                user_id = state.get("user_id", "")
+                client_id = state.get("client_id", "")
+                conv_id = state.get("conv_id", "")
+                node = self.name
+                # 模型名优先从结果取（可能是 tool_model），其次从 state 取
+                model = result.get("model") or state.get("tool_model") or state.get("model", "unknown")
+                
+                from db.usage_store import record_usage
+                record_usage(
+                    user_id=user_id,
+                    client_id=client_id,
+                    conv_id=conv_id,
+                    node=node,
+                    model=model,
+                    usage=usage
+                )
+        return result
+    return cast(T, wrapper)
 
 
 class BaseNode(ABC):

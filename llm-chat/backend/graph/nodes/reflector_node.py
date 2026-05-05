@@ -24,7 +24,7 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from graph.event_types import ReflectorNodeOutput
-from graph.nodes.base import BaseNode
+from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState, PlanStep
 from llm.chat import get_chat_llm
 
@@ -48,13 +48,15 @@ class ReflectorNode(BaseNode):
     通过分层快速路径大幅减少 LLM 调用：
     - 绝大多数步骤（有响应 + 首次执行）直接 continue/done，无 LLM 开销
     - 只有重试中的边缘场景才真正调用 LLM 进行质量评估
-    """
-
     @property
     def name(self) -> str:
         return "reflector"
 
+    @track_usage
     async def execute(self, state: GraphState) -> ReflectorNodeOutput:
+        """
+        核心反思逻辑：
+
         plan = state.get("plan", [])
 
         # ── 快速路径 1：无计划 → 直接完成 ──────────────────────────────────────
@@ -243,6 +245,7 @@ class ReflectorNode(BaseNode):
 
         decision        = "done"
         reflection_text = "评估完成"
+        usage_data      = {}
         try:
             # 流式调用：逐 token 推送 thinking 事件给前端，避免长时间静默
             _THINK_PREFIX = "\x00THINK\x00"
@@ -250,6 +253,10 @@ class ReflectorNode(BaseNode):
             # reflector 在某个步骤上下文里评估，step_index 从 state 读
             step_idx_for_think = self._active_step_index(state)
             async for delta in llm.astream(messages_for_llm, temperature=0.1):
+                if isinstance(delta, dict) and "usage" in delta:
+                    usage_data = delta["usage"]
+                    continue
+                
                 if delta.startswith(_THINK_PREFIX):
                     thinking_text = delta[len(_THINK_PREFIX):]
                     await self.emit_thinking("reflector", "reasoning", thinking_text, step_idx_for_think)
@@ -282,7 +289,9 @@ class ReflectorNode(BaseNode):
         )
 
         if decision == "continue" and not is_last:
-            return await self._make_continue_result(state, plan, current_idx, total, full_response)
+            res = await self._make_continue_result(state, plan, current_idx, total, full_response)
+            res["usage"] = usage_data
+            return res
         elif decision == "retry" and step_iters < _MAX_STEP_ITERATIONS - 1:
             updated_plan = self._mark_step(plan, current_idx, "running")
             return {
@@ -290,10 +299,13 @@ class ReflectorNode(BaseNode):
                 "reflection":         reflection_text,
                 "plan":               updated_plan,
                 "step_iterations":    step_iters + 1,
+                "usage":              usage_data,
             }
         else:
             # done 或 continue 溢出边界 → 视为完成
-            return self._make_done_result(state, plan, current_idx, full_response or "(步骤结果为空)")
+            res = await self._make_done_result(state, plan, current_idx, full_response or "(步骤结果为空)")
+            res["usage"] = usage_data
+            return res
 
     # ══════════════════════════════════════════════════════════════════════════
     # 工具方法

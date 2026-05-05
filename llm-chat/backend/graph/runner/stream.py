@@ -713,7 +713,7 @@ class StreamSession:
 
     def _build_initial_state(self) -> GraphState:
         return {
-            "conv_id": self.conv_id, "client_id": self.client_id,
+            "conv_id": self.conv_id, "user_id": self.user_id, "client_id": self.client_id,
             "user_message": self.user_message, "images": self.images,
             "model": self.model, "temperature": self.temperature,
             "messages": [], "long_term_memories": [], "forget_mode": False,
