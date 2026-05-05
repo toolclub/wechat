@@ -144,7 +144,29 @@ async def finalize_all_steps(plan_id: str, plan: list[dict]) -> None:
 
 
 async def get_latest_plan_for_conv(conv_id: str) -> dict | None:
-    # ... (existing implementation)
+    """获取对话的最新执行计划（按 created_at 倒序取第一条）。"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(PlanStepModel)
+                .where(PlanStepModel.conv_id == conv_id)
+                .order_by(desc(PlanStepModel.created_at))
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if not row:
+                return None
+            return {
+                "id":           row.id,
+                "message_id":   row.message_id,
+                "goal":         row.goal,
+                "steps":        list(row.steps or []),
+                "current_step": row.current_step,
+                "total_steps":  row.total_steps,
+            }
+    except Exception as exc:
+        logger.error("读取最新计划失败 | conv=%s | error=%s", conv_id, exc)
+        return None
 
 async def get_all_plans_for_conv(conv_id: str) -> list[dict]:
     """获取对话的所有执行计划，用于全量恢复 UI 状态。"""
