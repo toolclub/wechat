@@ -177,6 +177,19 @@ class Settings(BaseSettings):
     # ── Cookie 配置 ────────────────────────────────────────────────────────────
     cookie_secure: bool = False
 
+    @property
+    def cookie_domain(self) -> str | None:
+        """从 frontend_url 提取父域名，使 Cookie 在 www/non-www 子域间共享。
+        localhost 时返回 None（不设 domain，使用默认行为）。"""
+        from urllib.parse import urlparse
+        hostname = urlparse(self.frontend_url).hostname
+        if not hostname or hostname in ("localhost", "127.0.0.1"):
+            return None
+        parts = hostname.split(".")
+        if len(parts) >= 2:
+            return "." + ".".join(parts[-2:])  # .chatflow-live.com
+        return None
+
     # ── CORS 配置 ──────────────────────────────────────────────────────────────
     cors_allowed_origins: list[str] = ["http://localhost:5173", "http://localhost"]
     frontend_url: str = "http://localhost"
@@ -299,6 +312,7 @@ OAUTH_GITHUB_REDIRECT_URI = settings.oauth_github_redirect_uri
 
 # ── Cookie/CORS 配置 ────────────────────────────────────────────────────────
 COOKIE_SECURE             = settings.cookie_secure
+COOKIE_DOMAIN             = settings.cookie_domain
 CORS_ALLOWED_ORIGINS      = settings.cors_allowed_origins
 FRONTEND_URL              = settings.frontend_url
 

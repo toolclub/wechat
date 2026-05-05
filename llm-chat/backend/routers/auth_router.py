@@ -120,7 +120,15 @@ async def oauth_callback(
         resp = RedirectResponse(redirect_url)
 
         # 7. 设置 HttpOnly Cookie（安全配置从环境变量读取）
-        # 在 HTTPS/生产环境下，同域名使用 samesite="lax" 稳定性最高
+        # 同域名使用 samesite="lax"，显式设置 domain 使 Cookie 在 www/non-www 子域共享
+        # 先清理旧格式 Cookie（无 domain，过渡期兼容），防止同名 Cookie 冲突
+        resp.delete_cookie(
+            key="refresh_token",
+            secure=settings.cookie_secure,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
         resp.set_cookie(
             key="refresh_token",
             value=refresh_token,
@@ -129,6 +137,7 @@ async def oauth_callback(
             secure=settings.cookie_secure,
             samesite="lax",
             path="/",
+            domain=settings.cookie_domain,
         )
 
         return resp
@@ -214,6 +223,7 @@ async def logout(request: Request, response: Response, user: RequiredUser):
         httponly=True,
         samesite="lax",
         path="/",
+        domain=settings.cookie_domain,
     )
     return {"success": True}
 
@@ -227,5 +237,6 @@ async def logout_all(response: Response, user: RequiredUser):
         httponly=True,
         samesite="lax",
         path="/",
+        domain=settings.cookie_domain,
     )
     return {"success": True}
