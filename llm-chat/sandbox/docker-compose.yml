@@ -31,6 +31,8 @@ services:
           memory: 2G
     restart: unless-stopped
     profiles: ["standalone"]
+    networks:
+      - chatflow-network-prod
 
   # ── 集群节点（docker compose --profile cluster up -d）──
   w1:
@@ -49,6 +51,8 @@ services:
           memory: 2G
     restart: unless-stopped
     profiles: ["cluster"]
+    networks:
+      - chatflow-network-prod
 
   w2:
     build:
@@ -66,6 +70,8 @@ services:
           memory: 2G
     restart: unless-stopped
     profiles: ["cluster"]
+    networks:
+      - chatflow-network-prod
 
   w3:
     build:
@@ -83,6 +89,12 @@ services:
           memory: 2G
     restart: unless-stopped
     profiles: ["cluster"]
+    networks:
+      - chatflow-network-prod
+
+networks:
+  chatflow-network-prod:
+    external: true
 
 volumes:
   sandbox-data-1:
