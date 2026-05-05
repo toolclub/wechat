@@ -144,14 +144,27 @@ async def get_system_stats(authorized: bool = Depends(verify_admin_access)):
 
 @router.get("/users")
 async def get_recent_users(authorized: bool = Depends(verify_admin_access)):
-    """获取最近活跃用户列表"""
+    """获取最近活跃用户列表（带 Token 统计）"""
     async with AsyncSessionLocal() as session:
+        # 1. 获取用户基本信息
         result = await session.execute(
             select(UserModel)
             .order_by(desc(UserModel.last_login_at))
             .limit(50)
         )
         users = result.scalars().all()
+        
+        # 2. 批量查询这些用户的 Token 消耗
+        user_ids = [u.id for u in users]
+        usage_result = await session.execute(
+            select(
+                UserUsageLogModel.user_id,
+                func.sum(UserUsageLogModel.total_tokens).label("total")
+            )
+            .where(UserUsageLogModel.user_id.in_(user_ids))
+            .group_by(UserUsageLogModel.user_id)
+        )
+        usage_map = {r[0]: int(r[1] or 0) for r in usage_result.all()}
         
     return [
         {
@@ -161,6 +174,7 @@ async def get_recent_users(authorized: bool = Depends(verify_admin_access)):
             "last_login_at": u.last_login_at,
             "created_at": u.created_at,
             "is_active": u.is_active,
+            "total_tokens": usage_map.get(u.id, 0)
         }
         for u in users
     ]

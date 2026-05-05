@@ -270,15 +270,15 @@ function formatTime(ts: number) {
         <div class="stat-card purple">
           <div class="stat-icon"><el-icon><Cpu /></el-icon></div>
           <div class="stat-info">
-            <div class="stat-label">总 Token 消耗</div>
-            <div class="stat-value">{{ (stats.summary.total_prompt_tokens + stats.summary.total_completion_tokens).toLocaleString() }}</div>
+            <div class="stat-label">用户消耗 / 游客消耗</div>
+            <div class="stat-value">{{ stats.summary.user_tokens.toLocaleString() }} <span class="sub">/ {{ stats.summary.guest_tokens.toLocaleString() }}</span></div>
           </div>
         </div>
         <div class="stat-card green">
           <div class="stat-icon"><el-icon><TrendCharts /></el-icon></div>
           <div class="stat-info">
-            <div class="stat-label">推理 Token (Reasoning)</div>
-            <div class="stat-value">{{ stats.summary.total_reasoning_tokens.toLocaleString() }}</div>
+            <div class="stat-label">Token 总计 (Reasoning)</div>
+            <div class="stat-value">{{ (stats.summary.total_prompt_tokens + stats.summary.total_completion_tokens).toLocaleString() }} <span class="sub">({{ stats.summary.total_reasoning_tokens.toLocaleString() }})</span></div>
           </div>
         </div>
       </div>
@@ -317,6 +317,11 @@ function formatTime(ts: number) {
         <el-table :data="users" border stripe style="width: 100%" size="small" class="admin-table">
           <el-table-column prop="name" label="名称" width="120" />
           <el-table-column prop="email" label="邮箱" min-width="180" />
+          <el-table-column label="累计消耗 (Tokens)" width="150">
+            <template #default="scope">
+              <span class="tokens-badge">{{ scope.row.total_tokens.toLocaleString() }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="最近登录" width="180">
             <template #default="scope">{{ formatTime(scope.row.last_login_at) }}</template>
           </el-table-column>
@@ -522,6 +527,16 @@ function formatTime(ts: number) {
   --el-table-header-bg-color: var(--cf-bg);
   --el-table-header-text-color: var(--cf-text-1);
   --el-table-text-color: var(--cf-text-2);
+}
+
+.tokens-badge {
+  background: rgba(0, 174, 236, 0.1);
+  color: var(--cf-bili-blue);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: 'Inter', monospace;
+  font-weight: 600;
+  font-size: 12px;
 }
 
 :deep(.el-table) {
