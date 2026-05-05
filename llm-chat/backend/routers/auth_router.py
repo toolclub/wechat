@@ -116,9 +116,13 @@ async def oauth_callback(
         # 6. 存储 Session
         await session_store.create_session(user["id"], refresh_token)
 
+        # 8. 重定向回前端 (使用 Fragment # 传递 access_token)
+        redirect_url = f"{settings.frontend_url}/#auth_success=1&access_token={access_token}"
+        resp = RedirectResponse(redirect_url)
+
         # 7. 设置 HttpOnly Cookie（安全配置从环境变量读取）
         # 在 HTTPS/生产环境下，samesite="none" + secure=True 兼容性最好，能解决跨域 Cookie 丢失问题
-        response.set_cookie(
+        resp.set_cookie(
             key="refresh_token",
             value=refresh_token,
             max_age=settings.jwt_refresh_expire_days * 24 * 60 * 60,
@@ -128,9 +132,7 @@ async def oauth_callback(
             path="/",
         )
 
-        # 8. 重定向回前端 (使用 Fragment # 传递 access_token)
-        redirect_url = f"{settings.frontend_url}/#auth_success=1&access_token={access_token}"
-        return RedirectResponse(redirect_url)
+        return resp
 
     except HTTPException:
         raise
