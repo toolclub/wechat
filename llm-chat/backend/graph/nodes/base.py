@@ -7,7 +7,6 @@ from functools import wraps
 from langchain_core.messages import AIMessage, BaseMessage
 
 from graph.state import GraphState, PlanStep
-from db.usage_store import record_usage
 
 logger = logging.getLogger("graph.nodes.base")
 
@@ -42,6 +41,7 @@ def track_usage(func: T) -> T:
                 )
                 
                 try:
+                    from db.usage_store import record_usage
                     # record_usage 现在是异步的
                     await record_usage(
                         user_id=user_id,
@@ -51,6 +51,8 @@ def track_usage(func: T) -> T:
                         model=model,
                         usage=usage
                     )
+                except (ImportError, ModuleNotFoundError) as e:
+                    logger.error("Token 统计模块加载失败: %s", e)
                 except Exception as e:
                     logger.error("Token 统计持久化失败: %s", e)
         return result
