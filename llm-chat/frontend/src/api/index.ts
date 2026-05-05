@@ -107,6 +107,10 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
 
 export async function get<T>(path: string): Promise<T> {
   const res = await fetchWithAuth(`${API_BASE}${path}`)
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
   return res.json()
 }
 
@@ -115,6 +119,10 @@ export async function post<T>(path: string, body: any): Promise<T> {
     method: 'POST',
     body: JSON.stringify(body),
   })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
   return res.json()
 }
 
@@ -123,6 +131,10 @@ export async function put<T>(path: string, body: any): Promise<T> {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
   return res.json()
 }
 
@@ -131,6 +143,10 @@ export async function patch<T>(path: string, body: any): Promise<T> {
     method: 'PATCH',
     body: JSON.stringify(body),
   })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
   return res.json()
 }
 
