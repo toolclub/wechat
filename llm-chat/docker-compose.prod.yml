@@ -127,7 +127,7 @@ services:
       - NUMEXPR_NUM_THREADS=1
       - GUNICORN_WORKERS=4
     dns:
-      - 119.29.29.29
+      - 223.5.5.5
       - 114.114.114.114
     expose:
       - "${BACKEND_PORT}"
