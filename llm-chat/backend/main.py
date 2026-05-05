@@ -55,6 +55,13 @@ async def lifespan(app: FastAPI):
         await run_migrations(conn)
     logger.info("数据库初始化完成")
 
+    # 1.2 迁移历史 Token 数据到审计表
+    try:
+        from db.backfill import backfill_usage_logs
+        await backfill_usage_logs()
+    except Exception as exc:
+        logger.error("历史数据回填失败: %s", exc)
+
     # 1.5 清理过期的量化任务状态
     try:
         from db.quant_store import cleanup_stale_quant_sessions

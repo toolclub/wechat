@@ -7,6 +7,7 @@ from functools import wraps
 from langchain_core.messages import AIMessage, BaseMessage
 
 from graph.state import GraphState, PlanStep
+from db.usage_store import record_usage
 
 logger = logging.getLogger("graph.nodes.base")
 
@@ -35,8 +36,12 @@ def track_usage(func: T) -> T:
                 # 模型名优先从结果取（可能是 tool_model），其次从 state 取
                 model = result.get("model") or state.get("tool_model") or state.get("model", "unknown")
                 
+                logger.info(
+                    "Token 统计触发 | node=%s | user=%s | tokens=%s",
+                    node, user_id or "GUEST", usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+                )
+                
                 try:
-                    from db.usage_store import record_usage
                     # record_usage 现在是异步的
                     await record_usage(
                         user_id=user_id,
@@ -46,10 +51,8 @@ def track_usage(func: T) -> T:
                         model=model,
                         usage=usage
                     )
-                except (ImportError, ModuleNotFoundError) as e:
-                    logger.error("Usage tracking import failed: %s", e)
                 except Exception as e:
-                    logger.error("Usage tracking recording failed: %s", e)
+                    logger.error("Token 统计持久化失败: %s", e)
         return result
     return cast(T, wrapper)
 
