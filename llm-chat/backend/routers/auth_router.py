@@ -120,14 +120,14 @@ async def oauth_callback(
         resp = RedirectResponse(redirect_url)
 
         # 7. 设置 HttpOnly Cookie（安全配置从环境变量读取）
-        # 在 HTTPS/生产环境下，samesite="none" + secure=True 兼容性最好，能解决跨域 Cookie 丢失问题
+        # 在 HTTPS/生产环境下，同域名使用 samesite="lax" 稳定性最高
         resp.set_cookie(
             key="refresh_token",
             value=refresh_token,
             max_age=settings.jwt_refresh_expire_days * 24 * 60 * 60,
             httponly=True,
             secure=settings.cookie_secure,
-            samesite="none" if settings.cookie_secure else "lax",
+            samesite="lax",
             path="/",
         )
 
@@ -212,7 +212,7 @@ async def logout(request: Request, response: Response, user: RequiredUser):
         key="refresh_token",
         secure=settings.cookie_secure,
         httponly=True,
-        samesite="none" if settings.cookie_secure else "lax",
+        samesite="lax",
         path="/",
     )
     return {"success": True}
@@ -225,7 +225,7 @@ async def logout_all(response: Response, user: RequiredUser):
         key="refresh_token",
         secure=settings.cookie_secure,
         httponly=True,
-        samesite="none" if settings.cookie_secure else "lax",
+        samesite="lax",
         path="/",
     )
     return {"success": True}

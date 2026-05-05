@@ -16,30 +16,21 @@ export function useAuth() {
 
   /**
    * 初始化认证状态
-   * 无 access_token 时先尝试 cookie 静默刷新，有则走正常流程（拦截器兜底 401）
+   * 尝试拉取用户信息。如果 access_token 失效或缺失，api 拦截器会自动尝试 cookie 刷新。
    */
   async function init() {
     if (initialized.value) return
 
     loading.value = true
     try {
-      const hasToken = !!localStorage.getItem('cf_access_token')
-
-      if (!hasToken) {
-        // 无 access_token：主动用 refresh_token cookie 换新 token 后再拉用户信息
-        try {
-          const { refreshAccessToken } = await import('../api/index')
-          await refreshAccessToken()
-        } catch {
-          // cookie 也不存在或已过期，下面 fetchMe 会以匿名身份走到 401
-        }
-      }
-
       const me = await authApi.fetchMe()
       user.value = me.user
       settings.value = me.settings
     } catch (err) {
       console.error('[Auth] Init failed:', err)
+      // 只要报错（比如 401 且刷新也失败了），就把用户状态重置为 null
+      user.value = null
+      settings.value = null
     } finally {
       initialized.value = true
       loading.value = false
