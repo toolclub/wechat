@@ -102,6 +102,11 @@ _MIGRATIONS = [
         created_at      DOUBLE PRECISION NOT NULL,
         CONSTRAINT pk_quant_snapshots PRIMARY KEY (id)
     )""",
+    # ── messages 补字段（token 统计） ──
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS completion_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER NOT NULL DEFAULT 0",
+
     # ── quant_snapshots 补字段（异步计算状态追踪） ──
     "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'DONE'",
 
