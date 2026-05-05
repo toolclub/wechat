@@ -81,7 +81,7 @@ class AKShareProvider:
     }
     supported_markets = {"cn_a"}
 
-    def __init__(self, priority: int = 100, max_concurrency: int = 8) -> None:
+    def __init__(self, priority: int = 100, max_concurrency: int = 16) -> None:
         self.priority = priority
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
 

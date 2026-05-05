@@ -63,7 +63,7 @@ class AKShareUSProvider:
     }
     supported_markets = {"us_stock"}
 
-    def __init__(self, priority: int = 110, max_concurrency: int = 4) -> None:
+    def __init__(self, priority: int = 110, max_concurrency: int = 16) -> None:
         self.priority = priority
         self._sem = asyncio.Semaphore(max_concurrency)
         # 缓存 em_code 映射: ticker -> em_code (e.g. AAPL -> 105.AAPL)
@@ -145,8 +145,7 @@ class AKShareUSProvider:
         if not self._em_code_map:
             await self.realtime_snapshot()
 
-        results = []
-        for sym in symbols:
+        async def _one(sym: str) -> pd.DataFrame:
             ticker = sym.split(".")[0]
             em_code = self._em_code_map.get(ticker)
             if not em_code:
@@ -158,13 +157,16 @@ class AKShareUSProvider:
                     df = await asyncio.to_thread(self._fetch_hist, em_code, start, end, adjust)
                     if not df.empty:
                         df["symbol"] = sym
-                        results.append(df)
+                    return df
                 except Exception as exc:
                     logger.warning("Fetch US hist failed for %s: %s", sym, exc)
+                    return pd.DataFrame()
 
-        if not results:
+        results = await asyncio.gather(*[_one(s) for s in symbols])
+        non_empty = [r for r in results if not r.empty]
+        if not non_empty:
             return pd.DataFrame()
-        return pd.concat(results, ignore_index=True)
+        return pd.concat(non_empty, ignore_index=True)
 
     @staticmethod
     def _fetch_hist(em_code: str, start: str, end: str, adjust: str) -> pd.DataFrame:
