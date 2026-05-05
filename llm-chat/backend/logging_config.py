@@ -58,6 +58,8 @@ def setup_logging(log_dir: str) -> None:
     # asyncssh 每次 sandbox 健康检查都会刷一大堆 INFO（SSH session/channel 生命周期），
     # 业务上没有价值，完全屏蔽；真正的连接失败会以异常形式抛出到 sandbox.manager。
     logging.getLogger("asyncssh").setLevel(logging.CRITICAL + 1)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # ── 提示词专用日志（独立文件，不传播到 chatflow.log）─────────────────────
     _prompt_logger = logging.getLogger("graph.prompts")
