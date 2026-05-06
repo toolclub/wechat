@@ -141,14 +141,13 @@ async def screen(
         logger.exception("创建初始快照失败")
         raise HTTPException(status_code=500, detail=f"初始化筛选失败：{exc}")
 
-    # 2. 提交给选股独立进程（不等待主循环，防止阻塞普通请求，零冷启动开销）
-    from quant.worker import submit_screen_task
-    submit_screen_task(
+    # 2. 触发后台异步任务（不等待）
+    asyncio.create_task(background_screen(
         snapshot_id, 
         client_id, 
         criteria.model_dump(),
         user_id=user_id
-    )
+    ))
 
     # 3. 立即返回 ID
     return {
@@ -156,10 +155,8 @@ async def screen(
         "status": "COMPUTING",
         "criteria": criteria.model_dump(),
     }
-from quant.service import get_service, QuantScreeningService
 
-logger = logging.getLogger("quant.router")
-...
+
 async def _check_snapshot_access(snapshot_id: str, user: dict):
     """验证用户是否有权访问该快照"""
     snap = await get_quant_snapshot(snapshot_id)

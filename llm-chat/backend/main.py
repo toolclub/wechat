@@ -131,16 +131,18 @@ async def lifespan(app: FastAPI):
     all_tools = get_all_tools()
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
-    # 8. 延迟初始化量化模块（独立常驻进程，完全避开主循环阻塞）
+    # 8. 延迟初始化量化模块
     async def delayed_quant_init():
         try:
             # 等待 15s，确保错峰完成基础启动，且 Web 端口已就绪
             await asyncio.sleep(15.0)
-            from quant.worker import start_quant_workers
-            start_quant_workers()
-            logger.info("量化独立进程 (Screen & Warmer) 启动完成")
+            from quant.bootstrap import init_quant
+            await init_quant()
+            from quant.cache_warmer import get_warmer
+            await get_warmer().start(initial_delay=2.0)
+            logger.info("量化缓存预热器启动完成")
         except Exception as exc:
-            logger.error("量化独立进程启动失败: %s", exc)
+            logger.error("量化模块延迟初始化失败: %s", exc)
 
     # 抛出后台任务，不阻塞 lifespan yield
     asyncio.create_task(delayed_quant_init())
@@ -157,10 +159,10 @@ async def lifespan(app: FastAPI):
     yield
     # ── 关闭 ──
     try:
-        from quant.worker import stop_quant_workers
-        stop_quant_workers()
+        from quant.cache_warmer import get_warmer
+        await get_warmer().stop(timeout=5.0)
     except Exception as exc:
-        logger.warning("量化独立进程停止异常（忽略）: %s", exc)
+        logger.warning("预热器停止异常（忽略）: %s", exc)
     if sandbox_ok:
         from sandbox.manager import sandbox_manager
         await sandbox_manager.shutdown()

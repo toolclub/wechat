@@ -101,8 +101,7 @@ class WarmerState:
             pass
 
         kinds = kinds or ["spot", "index", "bars", "prune"]
-        from quant.worker import submit_refresh_task
-        submit_refresh_task(kinds)
+        asyncio.create_task(self._refresh_once(kinds, manual=True))
         return {"scheduled": kinds, "worker": _WORKER_ID}
 
     # ── 主循环 ──────────────────────────────────────────────────────────────
@@ -145,46 +144,27 @@ class WarmerState:
                 continue
 
     async def _renew_master_lock(self) -> None:
-        """续期 master 锁，防止长耗时 _tick 导致锁过期。"""
-        try:
-            from db.redis_state import _get_redis  # type: ignore
-            r = _get_redis()
-            cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
-            if cur == _WORKER_ID:
-                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 90)
-        except Exception:
-            pass
+        """文件锁不需要续期，持有 fd 就会一直锁住。此处留空以兼容老代码调用。"""
+        pass
 
     async def _try_acquire_master_lock(self) -> bool:
-        """尝试成为 master worker（Redis SETNX，TTL 600s）。
-
-        检测旧容器残留锁：hostname 不匹配时强制接管。
-        Redis 不可用时直接放行（单机模式）。
-        """
+        """尝试获取文件独占锁，确保单机多 Worker 下只有一个预热循环运行。"""
+        import fcntl
+        import os
+        from pathlib import Path
+        
+        lock_path = Path("/tmp/chatflow-quant-warmer-bg.lock")
         try:
-            from db.redis_state import _get_redis  # type: ignore
-            r = _get_redis()
-            ok = await r.set(
-                f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID,
-                nx=True, ex=90,
-            )
-            if ok:
-                return True
-            cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
-            if cur == _WORKER_ID:
-                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 90)
-                return True
-            # 锁存在但 worker 不同 → 检测是否旧容器残留
-            if cur and ":" in cur:
-                cur_host = cur.rsplit(":", 1)[0]
-                my_host = _WORKER_ID.rsplit(":", 1)[0]
-                if cur_host != my_host:
-                    logger.info("检测到旧容器 master 锁 (%s)，强制接管", cur[:40])
-                    await r.set(f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID, ex=90)
-                    return True
-            return False
-        except Exception:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            # 把 fd 挂到 self 上防止被 gc 回收导致释放
+            self._bg_lock_fd = fd
             return True
+        except (BlockingIOError, OSError):
+            return False
 
     async def _tick(self) -> None:
         now = datetime.now()
@@ -214,6 +194,16 @@ class WarmerState:
         
         if (now.hour >= QUANT_WARMER_INDEX_HOUR and self.last_index_day_ok != today):
             await self._refresh_once(["index"])
+
+        # 定时清理可能异常中断的卡死选股任务（超过 15 分钟）
+        if now.minute % 5 == 0:  # 每 5 分钟尝试清理一次
+            try:
+                from db.quant_store import cleanup_stale_quant_sessions
+                cleaned = await cleanup_stale_quant_sessions(timeout_minutes=15)
+                if cleaned > 0:
+                    logger.info("已清理 %d 个超时的异常选股任务", cleaned)
+            except Exception as exc:
+                logger.error("清理超时选股任务失败: %s", exc)
 
         # 按需补仓：处理 API 路径发现的缓存缺失标的
         await self._warm_on_demand()

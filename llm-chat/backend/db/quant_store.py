@@ -120,15 +120,22 @@ async def update_quant_analysis(
         snapshot.risk_notes = list(risk_notes or [])
         await session.commit()
 
-async def cleanup_stale_quant_sessions() -> int:
-    """系统启动时调用：清理所有卡在 COMPUTING 状态的旧任务。"""
+async def cleanup_stale_quant_sessions(timeout_minutes: int | None = None) -> int:
+    """系统启动时或定时调用：清理所有卡在 COMPUTING 状态的旧任务。"""
     from sqlalchemy import update
+    from datetime import datetime, timedelta
+    
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(QuantSnapshotModel)
-            .where(QuantSnapshotModel.status == "COMPUTING")
-            .values(status="FAILED", analysis="服务重启，筛选任务已中断")
-        )
+        stmt = update(QuantSnapshotModel).where(QuantSnapshotModel.status == "COMPUTING")
+        
+        if timeout_minutes is not None:
+            cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+            stmt = stmt.where(QuantSnapshotModel.created_at < cutoff)
+            reason = f"筛选任务超时（超过 {timeout_minutes} 分钟未完成）"
+        else:
+            reason = "服务重启，筛选任务已中断"
+            
+        stmt = stmt.values(status="FAILED", analysis=reason)
         result = await session.execute(stmt)
         count = result.rowcount
         await session.commit()

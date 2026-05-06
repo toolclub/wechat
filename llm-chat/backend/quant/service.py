@@ -95,50 +95,55 @@ class QuantScreeningService:
         bars = await self._fetch_bars(candidates, criteria, provider_trace, warnings)
         logger.info("    ✅ 阶段 5: 获取历史 K 线完成 | 数据行数: %d | 耗时: %.0fms", len(bars), (time.perf_counter() - t4) * 1000)
 
-        # 6. 因子计算
+        # 6. 因子计算与 7. 组装结果 (转移到线程池执行，防止 Pandas 计算阻塞主循环)
         t5 = time.perf_counter()
-        tech_df = compute_technical_factors(
-            narrowed, bars,
-            momentum_window=criteria.momentum_window,
-            volatility_window=criteria.volatility_window,
-        )
-        fund_df = compute_fundamental_factors(narrowed, bars=bars)
-        liq_df = compute_liquidity_factors(narrowed, bars)
-        risk_df = compute_risk_factors(narrowed)
+        
+        def _sync_compute():
+            tech_df = compute_technical_factors(
+                narrowed, bars,
+                momentum_window=criteria.momentum_window,
+                volatility_window=criteria.volatility_window,
+            )
+            fund_df = compute_fundamental_factors(narrowed, bars=bars)
+            liq_df = compute_liquidity_factors(narrowed, bars)
+            risk_df = compute_risk_factors(narrowed)
 
-        idx = pd.Index(candidates, name="symbol").drop_duplicates()
-        tech_df = tech_df.reindex(idx)
-        fund_df = fund_df.reindex(idx)
-        liq_df = liq_df.reindex(idx)
-        risk_df = risk_df.reindex(idx).fillna(False)
+            idx = pd.Index(candidates, name="symbol").drop_duplicates()
+            tech_df = tech_df.reindex(idx)
+            fund_df = fund_df.reindex(idx)
+            liq_df = liq_df.reindex(idx)
+            risk_df = risk_df.reindex(idx).fillna(False)
 
-        tech_z, fund_z, liq_z, risk_z = self._score_categories(
-            tech_df, fund_df, liq_df, risk_df,
-        )
+            tech_z, fund_z, liq_z, risk_z = self._score_categories(
+                tech_df, fund_df, liq_df, risk_df,
+            )
 
-        total_z = compose_scores(
-            {
-                "technical": tech_z,
-                "fundamental": fund_z,
-                "liquidity": liq_z,
-                "risk": risk_z,
-            },
-            weights=criteria.weights,
-        )
-        logger.info("    ✅ 阶段 6: 因子与打分计算完成 | 耗时: %.0fms", (time.perf_counter() - t5) * 1000)
+            total_z = compose_scores(
+                {
+                    "technical": tech_z,
+                    "fundamental": fund_z,
+                    "liquidity": liq_z,
+                    "risk": risk_z,
+                },
+                weights=criteria.weights,
+            )
 
-        # 7. 组装结果
-        t6 = time.perf_counter()
-        rows = self._build_rows(
-            narrowed=narrowed,
-            tech=tech_df, fund=fund_df, liq=liq_df, risk=risk_df,
-            tech_z=tech_z, fund_z=fund_z, liq_z=liq_z, risk_z=risk_z,
-            total_z=total_z,
-        )
-        rows.sort(key=lambda r: r.total, reverse=True)
-        rows = rows[: criteria.top_n]
-        for i, r in enumerate(rows, start=1):
-            r.rank = i
+            # 7. 组装结果
+            _rows = self._build_rows(
+                narrowed=narrowed,
+                tech=tech_df, fund=fund_df, liq=liq_df, risk=risk_df,
+                tech_z=tech_z, fund_z=fund_z, liq_z=liq_z, risk_z=risk_z,
+                total_z=total_z,
+            )
+            _rows.sort(key=lambda r: r.total, reverse=True)
+            _rows = _rows[: criteria.top_n]
+            for i, r in enumerate(_rows, start=1):
+                r.rank = i
+            return _rows
+
+        import asyncio
+        rows = await asyncio.to_thread(_sync_compute)
+        logger.info("    ✅ 阶段 6 & 7: 因子与打分计算并组装结果完成 | 耗时: %.0fms", (time.perf_counter() - t5) * 1000)
 
         elapsed_ms = (time.perf_counter() - t_total_start) * 1000
         logger.info(
