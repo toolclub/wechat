@@ -177,14 +177,15 @@ class WarmerState:
         except Exception:
             last_spot_val = self.last_spot_ok
 
-        # spot：行情时间窗 + 间隔到了
-        if _is_trading_hours(now) or _is_us_trading_hours(now):
+        # 首次 tick：无条件拉取全部 spot + bars_top（保证重启后缓存立即可用）
+        if self._first_tick:
+            await self._refresh_once(["spot", "bars_top"])
+            self._first_tick = False
+        # 后续：仅在交易时段按节奏刷新
+        elif _is_trading_hours(now) or _is_us_trading_hours(now):
             need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
-            if need or self._first_tick:
-                # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
-                # 注意：这里会静默尝试获取锁，抢不到就跳过，不会踢掉手动任务
+            if need:
                 await self._refresh_once(["spot", "bars_top"])
-                self._first_tick = False
 
         # 全量预热：凌晨跑 (4 AM)
         today = date.today()
@@ -277,23 +278,14 @@ class WarmerState:
     async def _do_spot(self) -> None:
         t0 = time.perf_counter()
         adapter = get_adapter()
-        now = datetime.now()
-        # 只在各自交易时段拉取对应市场，避免闭市数据污染缓存
         # force=True 强制回源，不走缓存 freshness 检查
-        if _is_trading_hours(now):
+        for market in ["cn_a", "us_stock"]:
             try:
-                df = await adapter.spot("cn_a", force=True)
+                df = await adapter.spot(market, force=True)
                 if df is not None and not df.empty:
-                    logger.info("    ∟ Spot (cn_a) 更新完成 | 数量: %d", len(df))
+                    logger.info("    ∟ Spot (%s) 更新完成 | 数量: %d", market, len(df))
             except Exception as exc:
-                logger.warning("    ❌ Spot (cn_a) 失败: %s", exc)
-        if _is_us_trading_hours(now):
-            try:
-                df = await adapter.spot("us_stock", force=True)
-                if df is not None and not df.empty:
-                    logger.info("    ∟ Spot (us_stock) 更新完成 | 数量: %d", len(df))
-            except Exception as exc:
-                logger.warning("    ❌ Spot (us_stock) 失败: %s", exc)
+                logger.warning("    ❌ Spot (%s) 失败: %s", market, exc)
         self.last_spot_ok = time.time()
 
     async def _do_bars(self, symbols: list[str] | None = None, top_n: int | None = None) -> None:
