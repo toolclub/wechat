@@ -30,6 +30,7 @@ from quant.cache_warmer import get_warmer
 from quant.config import QUANT_ENABLED
 from quant.domain import ProviderInfo, ScreenCriteria
 from quant.provider_registry import NoProviderAvailable, get_registry
+from quant.service import get_service
 from services.auth.dependencies import CurrentUser
 
 logger = logging.getLogger("quant.router")
