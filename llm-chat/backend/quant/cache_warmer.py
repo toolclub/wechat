@@ -101,8 +101,8 @@ class WarmerState:
             pass
 
         kinds = kinds or ["spot", "index", "bars", "prune"]
-        from quant.worker import start_refresh_process
-        start_refresh_process(kinds)
+        from quant.worker import submit_refresh_task
+        submit_refresh_task(kinds)
         return {"scheduled": kinds, "worker": _WORKER_ID}
 
     # ── 主循环 ──────────────────────────────────────────────────────────────

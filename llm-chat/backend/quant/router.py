@@ -141,9 +141,9 @@ async def screen(
         logger.exception("创建初始快照失败")
         raise HTTPException(status_code=500, detail=f"初始化筛选失败：{exc}")
 
-    # 2. 触发独立进程后台任务（不等待主循环，防止阻塞普通请求）
-    from quant.worker import start_screen_process
-    start_screen_process(
+    # 2. 提交给选股独立进程（不等待主循环，防止阻塞普通请求，零冷启动开销）
+    from quant.worker import submit_screen_task
+    submit_screen_task(
         snapshot_id, 
         client_id, 
         criteria.model_dump(),

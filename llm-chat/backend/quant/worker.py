@@ -2,15 +2,14 @@
 量化独立进程 Worker
 
 为了防止量化选股（Pandas CPU密集型、大量同步网络请求）阻塞主 FastAPI 事件循环，
-我们将选股任务和预热任务放到独立的系统进程中执行。使用 subprocess 直接启动，避免 multiprocessing 和 uvicorn 的冲突。
+我们将选股任务和预热任务放到独立的常驻系统进程中执行。
+每个 Worker 有自己独立的 Event Loop 和进程级任务队列，避免了每次请求的冷启动开销，
+同时与普通聊天请求做到 100% 物理隔离。
 """
 import asyncio
-import json
 import logging
-import os
-import subprocess
-import sys
-from pathlib import Path
+import multiprocessing as mp
+from typing import Optional
 
 logger = logging.getLogger("quant.worker")
 
@@ -24,127 +23,121 @@ def _init_worker_env():
     init_engine(DATABASE_URL)
 
 
-# ── 选股进程 ─────────────────────────────────────────────────────────────
+class ScreenWorker:
+    def __init__(self):
+        # 强制使用 spawn，确保进程纯净，不继承 uvicorn/fastapi 状态
+        self.ctx = mp.get_context('spawn')
+        self.queue = self.ctx.Queue()
+        self.process: Optional[mp.Process] = None
 
-def _run_screen_sync(snapshot_id: str, client_id: str, criteria: dict, user_id: str):
-    """选股独立进程入口点"""
-    _init_worker_env()
-    
-    async def _main():
+    def start(self):
+        if self.process is None or not self.process.is_alive():
+            self.process = self.ctx.Process(target=self._run, daemon=True, name="QuantScreenWorker")
+            self.process.start()
+            logger.info("QuantScreenWorker 进程已启动 (pid: %s)", self.process.pid)
+
+    def stop(self):
+        if self.process and self.process.is_alive():
+            self.queue.put(None) # 发送结束信号
+            self.process.join(timeout=3.0)
+            if self.process.is_alive():
+                self.process.terminate()
+
+    def submit(self, snapshot_id: str, client_id: str, criteria: dict, user_id: str):
+        self.queue.put(("screen", (snapshot_id, client_id, criteria, user_id)))
+
+    def _run(self):
+        _init_worker_env()
+        asyncio.run(self._async_run())
+
+    async def _async_run(self):
         from quant.bootstrap import init_quant
         await init_quant()
         
         from graph.quant_agent import background_screen
-        await background_screen(snapshot_id, client_id, criteria, user_id)
         
-        # 稍微延迟退出，确保底层网络连接（如 aiohttp）能正常关闭
-        await asyncio.sleep(0.5)
-        
-    asyncio.run(_main())
-
-def start_screen_process(snapshot_id: str, client_id: str, criteria: dict, user_id: str) -> subprocess.Popen:
-    """通过 subprocess 启动选股独立进程"""
-    backend_dir = str(Path(__file__).resolve().parent.parent)
-    criteria_json = json.dumps(criteria)
-    
-    code = f"""
-import sys
-sys.path.insert(0, {repr(backend_dir)})
-import json
-from quant.worker import _run_screen_sync
-
-snapshot_id = {repr(snapshot_id)}
-client_id = {repr(client_id)}
-criteria = json.loads({repr(criteria_json)})
-user_id = {repr(user_id)}
-
-_run_screen_sync(snapshot_id, client_id, criteria, user_id)
-"""
-    p = subprocess.Popen(
-        [sys.executable, "-c", code],
-        env=os.environ.copy()
-    )
-    return p
+        logger.info("QuantScreenWorker 启动，等待选股任务...")
+        while True:
+            try:
+                # 放入独立线程阻塞读取 queue，不阻塞当前 worker 的事件循环
+                task = await asyncio.to_thread(self.queue.get)
+                if task is None:
+                    break
+                
+                cmd, args = task
+                if cmd == "screen":
+                    snapshot_id, client_id, criteria, user_id = args
+                    # 抛出后台任务处理选股，允许并发处理多个选股请求
+                    asyncio.create_task(background_screen(snapshot_id, client_id, criteria, user_id))
+            except Exception as exc:
+                logger.error("ScreenWorker 执行异常: %s", exc, exc_info=True)
 
 
-# ── 预热常驻进程 ─────────────────────────────────────────────────────────
+class WarmerWorker:
+    def __init__(self):
+        self.ctx = mp.get_context('spawn')
+        self.queue = self.ctx.Queue()
+        self.process: Optional[mp.Process] = None
 
-def _run_warmer_sync():
-    """预热常驻进程入口点"""
-    _init_worker_env()
-    
-    async def _main():
+    def start(self):
+        if self.process is None or not self.process.is_alive():
+            self.process = self.ctx.Process(target=self._run, daemon=True, name="QuantWarmerWorker")
+            self.process.start()
+            logger.info("QuantWarmerWorker 进程已启动 (pid: %s)", self.process.pid)
+
+    def stop(self):
+        if self.process and self.process.is_alive():
+            self.queue.put(None)
+            self.process.join(timeout=3.0)
+            if self.process.is_alive():
+                self.process.terminate()
+
+    def submit_refresh(self, kinds: list[str] | None):
+        self.queue.put(("refresh", (kinds,)))
+
+    def _run(self):
+        _init_worker_env()
+        asyncio.run(self._async_run())
+
+    async def _async_run(self):
         from quant.bootstrap import init_quant
         await init_quant()
         
         from quant.cache_warmer import get_warmer
         warmer = get_warmer()
+        
+        # 启动定时预热循环（它会在后台 create_task 跑，不阻塞）
         await warmer.start(initial_delay=2.0)
         
-        # 阻塞进程，保持 warmer 的 loop 持续运行
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            await warmer.stop(timeout=5.0)
-            
-    try:
-        asyncio.run(_main())
-    except KeyboardInterrupt:
-        pass
-
-def start_warmer_process() -> subprocess.Popen:
-    """启动预热独立进程"""
-    backend_dir = str(Path(__file__).resolve().parent.parent)
-    code = f"""
-import sys
-sys.path.insert(0, {repr(backend_dir)})
-from quant.worker import _run_warmer_sync
-
-_run_warmer_sync()
-"""
-    p = subprocess.Popen(
-        [sys.executable, "-c", code],
-        env=os.environ.copy()
-    )
-    return p
+        logger.info("QuantWarmerWorker 启动，等待手动刷新任务...")
+        while True:
+            try:
+                task = await asyncio.to_thread(self.queue.get)
+                if task is None:
+                    break
+                
+                cmd, args = task
+                if cmd == "refresh":
+                    kinds = args[0]
+                    # 手动刷新阻塞执行即可，反正 warmer 是单实例
+                    await warmer._refresh_once(kinds, manual=True)
+            except Exception as exc:
+                logger.error("WarmerWorker 执行异常: %s", exc, exc_info=True)
 
 
-# ── 手动刷新进程 ─────────────────────────────────────────────────────────
+_screen_worker = ScreenWorker()
+_warmer_worker = WarmerWorker()
 
-def _run_refresh_sync(kinds: list[str] | None):
-    """手动刷新独立进程入口点"""
-    _init_worker_env()
-    
-    async def _main():
-        from quant.bootstrap import init_quant
-        await init_quant()
-        
-        from quant.cache_warmer import get_warmer
-        warmer = get_warmer()
-        # 作为独立进程被触发，手动执行一次 refresh_once
-        await warmer._refresh_once(kinds or ["spot", "index", "bars", "prune"], manual=True)
-        
-        await asyncio.sleep(0.5)
-        
-    asyncio.run(_main())
+def start_quant_workers():
+    _screen_worker.start()
+    _warmer_worker.start()
 
-def start_refresh_process(kinds: list[str] | None) -> subprocess.Popen:
-    """启动手动刷新独立进程"""
-    backend_dir = str(Path(__file__).resolve().parent.parent)
-    kinds_json = json.dumps(kinds) if kinds else "None"
-    
-    code = f"""
-import sys
-sys.path.insert(0, {repr(backend_dir)})
-import json
-from quant.worker import _run_refresh_sync
+def stop_quant_workers():
+    _screen_worker.stop()
+    _warmer_worker.stop()
 
-kinds = json.loads({repr(kinds_json)}) if {repr(kinds_json)} != "None" else None
-_run_refresh_sync(kinds)
-"""
-    p = subprocess.Popen(
-        [sys.executable, "-c", code],
-        env=os.environ.copy()
-    )
-    return p
+def submit_screen_task(snapshot_id: str, client_id: str, criteria: dict, user_id: str):
+    _screen_worker.submit(snapshot_id, client_id, criteria, user_id)
+
+def submit_refresh_task(kinds: list[str] | None):
+    _warmer_worker.submit_refresh(kinds)
