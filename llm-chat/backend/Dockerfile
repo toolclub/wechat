@@ -3,10 +3,13 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖 + 时区
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 先复制依赖文件，利用 Docker 缓存层
 COPY pyproject.toml ./

@@ -64,6 +64,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Shanghai
     ports:
       - "${BACKEND_PORT}:${BACKEND_PORT}"
     extra_hosts:
