@@ -165,7 +165,7 @@ async def lifespan(app: FastAPI):
     if quant_warmer_process is not None:
         try:
             quant_warmer_process.terminate()
-            quant_warmer_process.join(timeout=3.0)
+            quant_warmer_process.wait(timeout=3.0)
         except Exception as exc:
             logger.warning("warmer 进程停止异常（忽略）: %s", exc)
     if sandbox_ok:

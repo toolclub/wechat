@@ -2,12 +2,15 @@
 量化独立进程 Worker
 
 为了防止量化选股（Pandas CPU密集型、大量同步网络请求）阻塞主 FastAPI 事件循环，
-我们将选股任务和预热任务放到独立的进程中执行。每个进程拥有自己独立的 Event Loop。
+我们将选股任务和预热任务放到独立的系统进程中执行。使用 subprocess 直接启动，避免 multiprocessing 和 uvicorn 的冲突。
 """
 import asyncio
+import json
 import logging
-import multiprocessing
-from multiprocessing import Process
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 logger = logging.getLogger("quant.worker")
 
@@ -39,15 +42,28 @@ def _run_screen_sync(snapshot_id: str, client_id: str, criteria: dict, user_id: 
         
     asyncio.run(_main())
 
-def start_screen_process(snapshot_id: str, client_id: str, criteria: dict, user_id: str) -> Process:
-    """启动选股独立进程"""
-    p = Process(
-        target=_run_screen_sync,
-        args=(snapshot_id, client_id, criteria, user_id),
-        daemon=True,
-        name=f"QuantScreen-{snapshot_id[:8]}"
+def start_screen_process(snapshot_id: str, client_id: str, criteria: dict, user_id: str) -> subprocess.Popen:
+    """通过 subprocess 启动选股独立进程"""
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    criteria_json = json.dumps(criteria)
+    
+    code = f"""
+import sys
+sys.path.insert(0, {repr(backend_dir)})
+import json
+from quant.worker import _run_screen_sync
+
+snapshot_id = {repr(snapshot_id)}
+client_id = {repr(client_id)}
+criteria = json.loads({repr(criteria_json)})
+user_id = {repr(user_id)}
+
+_run_screen_sync(snapshot_id, client_id, criteria, user_id)
+"""
+    p = subprocess.Popen(
+        [sys.executable, "-c", code],
+        env=os.environ.copy()
     )
-    p.start()
     return p
 
 
@@ -77,14 +93,20 @@ def _run_warmer_sync():
     except KeyboardInterrupt:
         pass
 
-def start_warmer_process() -> Process:
+def start_warmer_process() -> subprocess.Popen:
     """启动预热独立进程"""
-    p = Process(
-        target=_run_warmer_sync,
-        daemon=True,
-        name="QuantWarmer"
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    code = f"""
+import sys
+sys.path.insert(0, {repr(backend_dir)})
+from quant.worker import _run_warmer_sync
+
+_run_warmer_sync()
+"""
+    p = subprocess.Popen(
+        [sys.executable, "-c", code],
+        env=os.environ.copy()
     )
-    p.start()
     return p
 
 
@@ -107,13 +129,22 @@ def _run_refresh_sync(kinds: list[str] | None):
         
     asyncio.run(_main())
 
-def start_refresh_process(kinds: list[str] | None) -> Process:
+def start_refresh_process(kinds: list[str] | None) -> subprocess.Popen:
     """启动手动刷新独立进程"""
-    p = Process(
-        target=_run_refresh_sync,
-        args=(kinds,),
-        daemon=True,
-        name="QuantRefresh"
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    kinds_json = json.dumps(kinds) if kinds else "None"
+    
+    code = f"""
+import sys
+sys.path.insert(0, {repr(backend_dir)})
+import json
+from quant.worker import _run_refresh_sync
+
+kinds = json.loads({repr(kinds_json)}) if {repr(kinds_json)} != "None" else None
+_run_refresh_sync(kinds)
+"""
+    p = subprocess.Popen(
+        [sys.executable, "-c", code],
+        env=os.environ.copy()
     )
-    p.start()
     return p
