@@ -366,8 +366,9 @@ class WarmerState:
         end_d = date.today()
         start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
 
-        # 2.1 cn_a 快速路径：tushare 按交易日并发批量拉，几十秒覆盖全市场
-        # 命中后从 sym_list 里剔除已覆盖标的，余下再走单点回退路径
+        # 2.1 cn_a 快速路径：akshare 并发优先（免费、~3min 全覆盖）
+        #     → tushare bulk 退路（积分 ≥2000 时 ~30s 全覆盖）
+        #     → 都失败再走 2.2 单点回退（baostock + 60s 超时）
         # 只对计划性全量/Top 预热触发；按需补仓（指定 symbols）不走 bulk，避免小请求触发全市场拉取
         if market == "cn_a" and symbols is None:
             covered = await self._bulk_fetch_cn_a(sym_list, start_d, end_d)
@@ -377,12 +378,12 @@ class WarmerState:
                 if not sym_list:
                     self.last_bars_day_ok = end_d
                     logger.info(
-                        "    ∟ [%s] Bars 抓取完成（tushare bulk 全覆盖） | 总耗时: %.1fs",
+                        "    ∟ [%s] Bars 抓取完成（bulk 全覆盖） | 总耗时: %.1fs",
                         market, time.perf_counter() - t0,
                     )
                     return
                 logger.info(
-                    "    ∟ [%s] tushare bulk 已覆盖 %d 只，剩余 %d 只走单点回退",
+                    "    ∟ [%s] bulk 已覆盖 %d 只，剩余 %d 只走单点回退",
                     market, len(covered), len(sym_list),
                 )
                 total_count = len(sym_list)
@@ -449,9 +450,118 @@ class WarmerState:
     async def _bulk_fetch_cn_a(
         self, sym_list: list[str], start_d: date, end_d: date,
     ) -> set[str]:
-        """tushare 按交易日并发批量拉 A 股全市场 daily_bars，写盘后返回已覆盖 symbol 集。
+        """A 股全市场快速预热的总编排：akshare 优先 → tushare bulk 兜底。
 
-        失败/不可用时返回空集——调用方继续走 per-symbol 回退路径。
+        - akshare：免 token、HTTP 并发 16，~2-3min 全覆盖；只要不是 DOWN 就先试它
+        - tushare bulk：要 ≥2000 积分；积分够就 30s 全覆盖，是更快的极速档
+        - 都失败 → 返回空集，调用方走单点 chunk 回退（baostock + 60s 超时）
+        """
+        # 冷却：一轮 _do_bars 里 VIP-Top 与全量长尾会先后各调一次，第二次直接报告全覆盖
+        if time.time() - self._last_bulk_cn_a < 600:
+            logger.info(
+                "    ∟ [cn_a] bulk 冷却中（<10min），跳过重复拉取，假定全覆盖",
+            )
+            return set(sym_list)
+
+        # 1) akshare 并发优先
+        covered = await self._bulk_via_akshare(sym_list, start_d, end_d)
+        if covered:
+            return covered
+
+        # 2) tushare bulk 兜底（积分够时极速档）
+        return await self._bulk_via_tushare(sym_list, start_d, end_d)
+
+    async def _bulk_via_akshare(
+        self, sym_list: list[str], start_d: date, end_d: date,
+    ) -> set[str]:
+        """akshare 并发拉 A 股全市场 daily_bars，分批写盘控制内存峰值。"""
+        try:
+            registry = get_registry()
+            ak_candidates = registry.candidates(
+                ProviderCapability.DAILY_BARS, market="cn_a",
+            )
+        except Exception as exc:
+            logger.debug("registry 不可用，跳过 akshare bulk: %s", exc)
+            return set()
+        ak = next((p for p in ak_candidates if p.name == "akshare"), None)
+        if ak is None:
+            return set()
+
+        t0 = time.perf_counter()
+        # 分批写盘，避免 5500 个 DataFrame 全在内存里 concat
+        BATCH = 1000
+        BATCH_TIMEOUT = 240.0  # 1000 只 / 16 并发 ≈ 25s，给 4 分钟兜底
+        covered: set[str] = set()
+        total_rows = 0
+        sym_set = set(sym_list)
+
+        logger.info(
+            "    ∟ [cn_a] 🚀 akshare 并发预热 | 目标 %d 只 | 分批 %d × %d 批",
+            len(sym_list), BATCH, (len(sym_list) + BATCH - 1) // BATCH,
+        )
+        for i in range(0, len(sym_list), BATCH):
+            batch = sym_list[i : i + BATCH]
+            try:
+                df = await asyncio.wait_for(
+                    ak.daily_bars(
+                        batch,
+                        start=start_d.strftime("%Y-%m-%d"),
+                        end=end_d.strftime("%Y-%m-%d"),
+                    ),
+                    timeout=BATCH_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "    ❌ [cn_a] akshare 批次 %d-%d 超时 %.0fs，停止 akshare 路径",
+                    i, i + len(batch), BATCH_TIMEOUT,
+                )
+                break
+            except Exception as exc:
+                logger.warning(
+                    "    ❌ [cn_a] akshare 批次 %d-%d 异常: %s，停止 akshare 路径",
+                    i, i + len(batch), exc,
+                )
+                break
+
+            if df is None or df.empty or "symbol" not in df.columns:
+                continue
+            try:
+                await cache_disk.write_bars("cn_a", df)
+            except Exception as exc:
+                logger.warning("    ❌ [cn_a] akshare 批次 %d 写盘失败: %s", i, exc)
+                continue
+
+            new_covered = set(df["symbol"].astype(str).unique()) & sym_set
+            covered.update(new_covered)
+            total_rows += len(df)
+            logger.info(
+                "    ∟ [cn_a] akshare 进度 %d/%d | 累计覆盖 %d 只 | 累计行数 %d",
+                min(i + BATCH, len(sym_list)), len(sym_list),
+                len(covered), total_rows,
+            )
+
+        # 至少覆盖一半才算成功；否则让 tushare/单点回退接力
+        if covered and len(covered) >= len(sym_list) * 0.5:
+            self._last_bulk_cn_a = time.time()
+            logger.info(
+                "    ∟ [cn_a] ✅ akshare bulk 完成 | 覆盖 %d/%d | 行数 %d | 耗时: %.1fs",
+                len(covered), len(sym_list), total_rows, time.perf_counter() - t0,
+            )
+            return covered
+        if covered:
+            logger.warning(
+                "    ⚠️ [cn_a] akshare 覆盖率不足（%d/%d <50%%），尝试 tushare 兜底",
+                len(covered), len(sym_list),
+            )
+        return covered  # 部分覆盖也返回，调用方会跳过这部分继续 fallback
+
+    async def _bulk_via_tushare(
+        self, sym_list: list[str], start_d: date, end_d: date,
+    ) -> set[str]:
+        """tushare 按交易日并发批量拉 A 股全市场 daily_bars。
+
+        要求积分 ≥2000（pro.daily/adj_factor 的 trade_date 模式门槛）。
+        120 积分账号会被服务端拒，daily_bars 能力会被 health_check 摘掉，本方法直接跳过。
         """
         try:
             registry = get_registry()
@@ -462,18 +572,10 @@ class WarmerState:
         if tushare is None:
             return set()
         if ProviderCapability.DAILY_BARS not in getattr(tushare, "capabilities", set()):
-            logger.info("    ∟ [cn_a] tushare 无 daily_bars 能力，跳过 bulk 路径")
+            logger.info("    ∟ [cn_a] tushare 无 daily_bars 能力（积分不足），跳过 bulk 路径")
             return set()
         if not hasattr(tushare, "daily_bars_bulk"):
             return set()
-
-        # 冷却：上次 bulk 完成 < 10min，盘中数据无变化，直接报告全覆盖
-        # 一轮 _do_bars 里 VIP-Top 与全量长尾会先后各调一次，第二次走这里跳过
-        if time.time() - self._last_bulk_cn_a < 600:
-            logger.info(
-                "    ∟ [cn_a] tushare bulk 冷却中（<10min），跳过重复拉取，假定全覆盖",
-            )
-            return set(sym_list)
 
         t0 = time.perf_counter()
         logger.info(
@@ -481,7 +583,6 @@ class WarmerState:
             start_d, end_d, QUANT_TUSHARE_BULK_WORKERS,
         )
         try:
-            # 给 bulk 一个总超时：120 个交易日 × 2 RPC × 安全系数，6 分钟够了
             df = await asyncio.wait_for(
                 tushare.daily_bars_bulk(
                     start=start_d.strftime("%Y-%m-%d"),
