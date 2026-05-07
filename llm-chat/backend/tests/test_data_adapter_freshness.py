@@ -288,6 +288,48 @@ def test_yfinance_download_bars_passes_end_plus_one(monkeypatch):
 
 
 @pytest.mark.unit
+def test_write_bars_handles_legacy_multiindex_existing(tmp_path, monkeypatch):
+    """T-ADAPTER-FRESH-12：磁盘上历史脏数据（MultiIndex columns）与新单层数据 concat 时不崩。
+
+    防止 `Can only union MultiIndex with MultiIndex or Index of tuples` 写盘失败。
+    """
+    import pickle
+    from quant import cache_disk
+
+    monkeypatch.setattr("quant.cache_disk.QUANT_CACHE_DIR", str(tmp_path))
+
+    # 1. 先伪造一份 MultiIndex columns 的"脏"历史缓存写入磁盘
+    bad_existing = pd.DataFrame(
+        [[100, 101, 99, 100, 1_000_000, "AAPL", "2026-05-05"]],
+        columns=pd.MultiIndex.from_tuples([
+            ("open", ""), ("close", ""), ("low", ""), ("high", ""),
+            ("volume", ""), ("symbol", ""), ("date", ""),
+        ]),
+    )
+    p = cache_disk.bars_path("us_stock", date(2026, 5, 5))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cache_disk._sync_write_df(p, bad_existing)
+
+    # 2. 新拉取的数据是单层 columns（修复后的 yfinance 输出）
+    fresh = pd.DataFrame([
+        {"symbol": "AAPL", "date": "2026-05-05", "open": 105, "close": 106, "high": 107, "low": 104, "volume": 2_000_000},
+        {"symbol": "TSLA", "date": "2026-05-05", "open": 200, "close": 202, "high": 203, "low": 199, "volume": 3_000_000},
+    ])
+
+    # 3. write_bars 应该展平历史脏数据后正常合并写盘，不抛异常
+    size = asyncio.run(cache_disk.write_bars("us_stock", fresh))
+    assert size > 0
+
+    # 4. 读回验证：两条记录共存（按 symbol/date 去重 keep=last，新数据覆盖旧 AAPL）
+    written = cache_disk._sync_read_df(p)
+    assert written is not None and not written.empty
+    assert not isinstance(written.columns, pd.MultiIndex)
+    assert {"symbol", "date", "open", "close"}.issubset(set(written.columns))
+    aapl_row = written[written["symbol"] == "AAPL"].iloc[0]
+    assert aapl_row["close"] == 106  # keep=last 保留新数据
+
+
+@pytest.mark.unit
 def test_yfinance_download_bars_flattens_multiindex_for_single_ticker():
     """T-ADAPTER-FRESH-11：yfinance 单 ticker 返回 MultiIndex columns 时正确展平。
 

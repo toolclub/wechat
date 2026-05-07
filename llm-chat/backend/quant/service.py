@@ -196,7 +196,15 @@ class QuantScreeningService:
         df["ma20"] = df["close"].rolling(20).mean()
 
         def _safe_float(val):
-            return None if pd.isna(val) else float(val)
+            # 防御：列名重复时 row["open"] 可能返回 Series（不是标量），取首个值
+            if isinstance(val, pd.Series):
+                if val.empty:
+                    return None
+                val = val.iloc[0]
+            try:
+                return None if pd.isna(val) else float(val)
+            except (TypeError, ValueError):
+                return None
 
         values = [
             [_safe_float(row["open"]), _safe_float(row["close"]), _safe_float(row["low"]), _safe_float(row["high"])]

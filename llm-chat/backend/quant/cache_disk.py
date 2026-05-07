@@ -144,20 +144,28 @@ async def is_spot_fresh(
 
 
 async def write_bars(market: str, df: pd.DataFrame) -> int:
-    """按 date 列拆分写入每日文件（合并已有数据，按 symbol 去重）。"""
+    """按 date 列拆分写入每日文件（合并已有数据，按 symbol 去重）。
+
+    防御：sub / existing 任一方 columns 是 MultiIndex（来自历史 yfinance 脏数据
+    或新版 yfinance 单 ticker 行为）时，强制展平到 level 0；否则 pd.concat 会报
+    `Can only union MultiIndex with MultiIndex or Index of tuples`。
+    """
     if df is None or df.empty or "date" not in df.columns:
         return 0
 
     def _split_and_merge() -> int:
         total = 0
-        days = pd.to_datetime(df["date"]).dt.date.unique()
+        # df 自身列若是 MultiIndex，先整体展平
+        df_flat = _flatten_columns(df)
+        days = pd.to_datetime(df_flat["date"]).dt.date.unique()
         for d in days:
-            sub = df[pd.to_datetime(df["date"]).dt.date == d]
+            sub = df_flat[pd.to_datetime(df_flat["date"]).dt.date == d]
             if sub.empty:
                 continue
             # 合并已有数据，按 (symbol, date) 去重，保留最新
             existing = _sync_read_df(bars_path(market, d))
             if existing is not None and not existing.empty:
+                existing = _flatten_columns(existing)
                 merged = pd.concat([existing, sub], ignore_index=True)
                 if "symbol" in merged.columns and "date" in merged.columns:
                     merged = merged.drop_duplicates(subset=["symbol", "date"], keep="last")
@@ -169,6 +177,27 @@ async def write_bars(market: str, df: pd.DataFrame) -> int:
     logger.info("bars 写盘 market=%s days=%d rows=%d size=%dKB",
                 market, df["date"].nunique(), len(df), size // 1024)
     return size
+
+
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """归一化 columns：MultiIndex 展平 + 去除重复列名（保留最后出现）。
+
+    历史 yfinance 脏数据可能写入了 MultiIndex 或带重复列名的 df（如多 ticker 误展平后
+    "open" 出现多次），读出后 `row["open"]` 会返回 Series 而非标量，触发各种 ambiguous
+    错误。本函数确保任何 df 出入磁盘前后列结构都是干净的单层 + 唯一名。
+    """
+    if df is None or df.empty:
+        return df
+    out = df
+    if isinstance(out.columns, pd.MultiIndex):
+        out = out.copy()
+        out.columns = [c[0] if isinstance(c, tuple) else c for c in out.columns]
+    # 去重列名：保留最后一个（新数据覆盖旧数据）
+    if out.columns.duplicated().any():
+        if out is df:
+            out = df.copy()
+        out = out.loc[:, ~out.columns.duplicated(keep="last")]
+    return out
 
 
 async def read_bars_for_symbol(
@@ -189,10 +218,13 @@ async def read_bars_for_symbol(
                 continue
             scanned += 1
             sub = _sync_read_df(p)
-            if sub is not None and "symbol" in sub.columns and not sub.empty:
-                match = sub[sub["symbol"].astype(str) == symbol]
-                if not match.empty:
-                    frames.append(match)
+            if sub is not None and not sub.empty:
+                # 防御：历史脏数据可能 columns 是 MultiIndex 或含重复名，归一化后再筛
+                sub = _flatten_columns(sub)
+                if "symbol" in sub.columns:
+                    match = sub[sub["symbol"].astype(str) == symbol]
+                    if not match.empty:
+                        frames.append(match)
         elapsed = (time.perf_counter() - t0) * 1000
         if elapsed > 500:
             logger.info("单标扫描 symbol=%s scanned=%d found=%d elapsed=%.0fms",
@@ -229,7 +261,8 @@ async def read_bars_range(
         for d in sorted(avail):
             sub = _sync_read_df(avail[d])
             if sub is not None and not sub.empty:
-                frames.append(sub)
+                # 防御：历史脏数据归一化（MultiIndex 展平 + 列名去重）
+                frames.append(_flatten_columns(sub))
 
         # 缺失的日期（实际历史交易日由调用方自行判断）
         present = set(avail.keys())
