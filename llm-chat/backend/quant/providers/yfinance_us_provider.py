@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -192,9 +192,18 @@ class YFinanceUSProvider:
 
     @staticmethod
     def _download_bars(yf, tickers: list[str], start: str, end: str) -> pd.DataFrame:
+        # yfinance.download 的 `end` 参数是 exclusive — 不包含 end 当日。
+        # 调用方传 end=今天，期望得到含今天的数据；这里 +1 天才能正确包含。
+        end_inclusive = end
+        try:
+            end_dt = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
+            end_inclusive = end_dt.strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            pass
+
         try:
             raw = yf.download(
-                tickers, start=start, end=end,
+                tickers, start=start, end=end_inclusive,
                 auto_adjust=False, threads=8,
             )
         except Exception as exc:

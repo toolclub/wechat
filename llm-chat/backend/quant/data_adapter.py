@@ -18,7 +18,8 @@ warmer 任务则定期主动刷新（见 cache_warmer.py），保证业务请求
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -27,6 +28,54 @@ from quant.domain import ProviderCapability, ProviderTrace
 from quant.provider_registry import ProviderRegistry, get_registry
 
 logger = logging.getLogger("quant.data_adapter")
+
+
+# ── 交易日新鲜度判定 ──────────────────────────────────────────────────────────
+# 周末规避 + 收盘时间判定；不识别节假日（节假日时缓存会被判陈旧 → 触发回源 →
+# provider 返回最近交易日数据 → 覆盖缓存，自动收敛）。
+# 不调用 trading_calendar provider 是因为这是缓存判定的热路径，不能引入 IO。
+
+_NY_TZ = ZoneInfo("America/New_York")
+_CST_TZ = ZoneInfo("Asia/Shanghai")
+
+# 收盘时间（含 30min 数据延迟缓冲，避免刚收盘就回源拉到当天空数据）
+_US_CLOSE = time(16, 30)   # NYSE 收盘 16:00 EDT/EST，留 30min buffer
+_CN_CLOSE = time(15, 30)   # 沪深收盘 15:00 CST，留 30min buffer
+
+
+def _expected_last_trading_day(market: str, now: datetime | None = None) -> date:
+    """根据当前时间和市场，推算"预期最新交易日"。
+
+    判定规则：
+      - 美股：以 NY 时间为准；当日是周一-周五且已过 16:30 EDT 收盘 → 当日；否则前一个工作日
+      - A 股：以 CST 时间为准；当日是周一-周五且已过 15:30 CST 收盘 → 当日；否则前一个工作日
+
+    返回的日期保证是工作日（Mon-Fri）；不识别节假日（缓存陈旧时会自动回源补救）。
+    """
+    if now is None:
+        now = datetime.now(tz=ZoneInfo("UTC"))
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=ZoneInfo("UTC"))
+
+    if market == "us_stock":
+        local = now.astimezone(_NY_TZ)
+        close_time = _US_CLOSE
+    else:
+        local = now.astimezone(_CST_TZ)
+        close_time = _CN_CLOSE
+
+    d = local.date()
+    is_weekday = local.weekday() < 5  # 0=Mon ... 4=Fri
+    after_close = local.time() >= close_time
+
+    # 当天非工作日 / 未到收盘 → 退到前一日
+    if not (is_weekday and after_close):
+        d = d - timedelta(days=1)
+
+    # 退到最近的工作日（处理周末）
+    while d.weekday() >= 5:
+        d = d - timedelta(days=1)
+    return d
 
 
 class CachedDataAdapter:
@@ -119,7 +168,22 @@ class CachedDataAdapter:
         else:
             cover_ratio = 0.0
 
-        if cover_ratio >= 0.8:
+        # ── 日期新鲜度判定（spec §"原则：永远不信任进程内数据"在缓存上的体现）──
+        # 单看 cover_ratio 会让缓存永久卡在首次拉取那天的数据（详见 cache_warmer
+        # 跑了几天但 K 线日期不更新的 bug）。必须叠加"最新日期 ≥ 预期交易日"。
+        cached_max_date = _max_cached_date(cached)
+        # readonly 不判预期：调用方明确"绝不回源"
+        request_end_date = e_date if e_date else date.today()
+        expected_last = _expected_last_trading_day(market) if not readonly else cached_max_date
+        # 若用户请求的 end 早于预期最新日（请求历史区间），按 end 比对
+        compare_target = min(expected_last, request_end_date) if expected_last else request_end_date
+        is_fresh = (
+            cached_max_date is not None
+            and compare_target is not None
+            and cached_max_date >= compare_target
+        )
+
+        if cover_ratio >= 0.8 and is_fresh:
             if trace is not None:
                 trace.append(ProviderTrace(
                     provider="disk_cache",
@@ -127,11 +191,11 @@ class CachedDataAdapter:
                     status="ok",
                     elapsed_ms=0.0,
                     rows=len(cached) if cached is not None else 0,
-                    error=f"coverage={cover_ratio:.0%}",
+                    error=f"coverage={cover_ratio:.0%},max_date={cached_max_date}",
                 ))
             return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True) if cached is not None else pd.DataFrame()
 
-        # readonly 模式：缓存不足直接返回已有数据（含空），绝不回源
+        # readonly 模式：缓存不足/陈旧也直接返回已有数据（绝不回源）
         if readonly:
             if cached is not None and not cached.empty:
                 return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
@@ -140,7 +204,16 @@ class CachedDataAdapter:
         # 2) 增量回源：仅请求缺失的标的
         cached_syms = set(cached["symbol"].astype(str).unique()) if cached is not None and not cached.empty else set()
         missing_syms = list(sym_set - cached_syms)
-        
+
+        # 标的齐全但日期陈旧 → 强制全量回源补最新日（drop_duplicates 保留 cached
+        # 的旧记录，新增日期由 new_df 提供，merge 后日期范围扩展）。
+        if not missing_syms and not is_fresh:
+            missing_syms = list(sym_set)
+            logger.info(
+                "bars 缓存日期陈旧 market=%s max_cached=%s expected=%s → 强制全量回源",
+                market, cached_max_date, compare_target,
+            )
+
         if not missing_syms:
             return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True) if cached is not None else pd.DataFrame()
 
@@ -215,6 +288,16 @@ class CachedDataAdapter:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+def _max_cached_date(df: pd.DataFrame | None) -> date | None:
+    """从缓存 df 取最大的 date 列值；空 / 异常时返回 None。"""
+    if df is None or df.empty or "date" not in df.columns:
+        return None
+    try:
+        return pd.to_datetime(df["date"]).max().date()
+    except Exception:
+        return None
+
 
 def _to_date(v: str | date) -> date:
     if isinstance(v, date):
